@@ -63,6 +63,11 @@ llvm::Pass *createScopLibExporterPass();
 llvm::Pass *createScopLibImporterPass();
 #endif
 
+llvm::Pass *createNoRIPass();
+llvm::Pass *createBasicReductionInfoPass();
+llvm::Pass *createReductionHandlerPass();
+
+extern char &BasicReductionInfoID;
 extern char &IndependentBlocksID;
 extern char &CodePreparationID;
 }
@@ -115,6 +120,9 @@ struct PollyForcePassLinking {
     createScopLibImporterPass();
 #endif
 
+    createNoRIPass();
+    createBasicReductionInfoPass();
+    createReductionHandlerPass();
   }
 } PollyForcePassLinking; // Force link by creating a global definition.
 }
@@ -139,6 +147,10 @@ void initializePlutoOptimizerPass(llvm::PassRegistry &);
 void initializePoccPass(llvm::PassRegistry &);
 #endif
 void initializePollyIndVarSimplifyPass(llvm::PassRegistry &);
+void initializeNoRIPass(llvm::PassRegistry &);
+void initializeBasicReductionInfoPass(llvm::PassRegistry &);
+void initializeReductionHandlerPass(llvm::PassRegistry &);
+void initializeReductionInfoAnalysisGroup(llvm::PassRegistry &);
 }
 
 #endif

@@ -69,6 +69,20 @@ static cl::opt<OptimizerChoice> Optimizer(
     cl::Hidden, cl::init(OPTIMIZER_ISL), cl::ZeroOrMore,
     cl::cat(PollyCategory));
 
+enum ReductionInfoChoice {
+  NO_RI,
+  BASIC_RI
+};
+
+static cl::opt<ReductionInfoChoice> ReductionDetection(
+    "polly-reduction-detection", cl::desc("Select the reduction detection"),
+    cl::values(
+        clEnumValN(NO_RI,    "none",  "No reduction detection"),
+        clEnumValN(BASIC_RI, "basic", "Basic reduction detection"),
+        clEnumValEnd),
+    cl::Hidden, cl::init(BASIC_RI), cl::ZeroOrMore,
+    cl::cat(PollyCategory));
+
 enum CodeGenChoice {
 #ifdef CLOOG_FOUND
   CODEGEN_CLOOG,
@@ -174,6 +188,9 @@ static void initializePollyPasses(PassRegistry &Registry) {
   initializeScopDetectionPass(Registry);
   initializeScopInfoPass(Registry);
   initializeTempScopInfoPass(Registry);
+  initializeNoRIPass(Registry);
+  initializeBasicReductionInfoPass(Registry);
+  initializeReductionHandlerPass(Registry);
 }
 
 /// @brief Initialize Polly passes when library is loaded.
@@ -262,6 +279,19 @@ static void registerPollyPasses(llvm::PassManagerBase &PM) {
 
   if (DeadCodeElim)
     PM.add(polly::createDeadCodeElimPass());
+
+  switch (ReductionDetection) {
+  case NO_RI:
+    break; /* Do nothing */
+
+  case BASIC_RI:
+    PM.add(polly::createBasicReductionInfoPass());
+    break;
+  }
+
+  // If we use a meaningful reduction detection we enable reduction handling
+  if (ReductionDetection != NO_RI)
+    PM.add(polly::createReductionHandlerPass());
 
   switch (Optimizer) {
   case OPTIMIZER_NONE:

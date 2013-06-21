@@ -29,6 +29,8 @@
 #include "polly/Options.h"
 #include "polly/ScopInfo.h"
 #include "polly/TempScopInfo.h"
+#include "polly/ReductionInfo.h"
+#include "polly/ReductionHandler.h"
 #include "polly/CodeGen/CodeGeneration.h"
 #include "polly/CodeGen/BlockGenerators.h"
 #include "polly/CodeGen/LoopGenerators.h"
@@ -256,6 +258,12 @@ private:
   // Codegenerator for clast expressions.
   ClastExpCodeGen ExpGen;
 
+  /// @brief Vector to store reduction prepare statements
+  ///
+  /// Prepare statements, not yet matched by a fixup statement, are stored in
+  /// the order they are encountered (from front to back).
+  SmallVector<ScopStmt *, 8> PrepareStatements;
+
   // Do we currently generate parallel code?
   bool parallelCodeGeneration;
 
@@ -434,6 +442,46 @@ void ClastStmtCodeGen::codegen(const clast_user_stmt *u,
   if (u->substitutions)
     codegenSubstitutions(u->substitutions, Statement);
 
+  if (Statement->isReductionStatement()) {
+
+    // Reduction statements need an empty basic block as entry point
+    // in case we have to generate code later on.
+    BasicBlock *ReductionBB = SplitBlock(Builder.GetInsertBlock(),
+                                         Builder.GetInsertPoint(), P);
+    StringRef StatementName = StringRef(Statement->getBaseName());
+    ReductionBB->setName("polly.red." + StatementName);
+
+    Builder.SetInsertPoint(ReductionBB->begin());
+    Statement->setBasicBlock(ReductionBB);
+
+    if (Statement->isReductionPrepareStatement()) {
+
+      // Preparation statements are just stored as we dont know if we need to
+      // create any reductions vectors or not
+      PrepareStatements.push_back(Statement);
+
+    } else if (Statement->isReductionFixupStatement()) {
+
+      // For a fixup statement we find the matching prepare statement and
+      // generate code to combine the results stored in the reduction vectors
+      assert(!PrepareStatements.empty() &&
+             "Cannot create fixup code without prepare statements");
+
+      // Pop the corresponding (last) prepare statement
+      ScopStmt *PrepareStmt = PrepareStatements.back();
+      PrepareStatements.pop_back();
+
+      // Combine and store the results stored in the reduction vectors
+      ReductionHandler &RH = P->getAnalysis<ReductionHandler>();
+      RH.createReductionResult(Builder, PrepareStmt, ValueMap);
+
+    } else {
+      llvm_unreachable("Unknown ScopStmt type !");
+    }
+
+    return;
+  }
+
   int VectorDimensions = IVS ? IVS->size() : 1;
 
   if (VectorDimensions == 1) {
@@ -458,6 +506,10 @@ void ClastStmtCodeGen::codegen(const clast_user_stmt *u,
   isl_map *Schedule = extractPartialSchedule(Statement, Domain);
   VectorBlockGenerator::generate(Builder, *Statement, VectorMap, VLTS, Schedule,
                                  P);
+
+  // As for scalar code we store the mapping from old to new values
+  ValueMap.insert(VectorMap[0].begin(), VectorMap[0].end());
+
   isl_map_free(Schedule);
 }
 
@@ -1034,6 +1086,7 @@ public:
     AU.addRequired<ScopInfo>();
     AU.addRequired<DataLayout>();
     AU.addRequired<LoopInfo>();
+    AU.addRequired<ReductionHandler>();
 
     AU.addPreserved<CloogInfo>();
     AU.addPreserved<Dependences>();
@@ -1041,6 +1094,9 @@ public:
     AU.addPreserved<DominatorTree>();
     AU.addPreserved<ScopDetection>();
     AU.addPreserved<ScalarEvolution>();
+    AU.addPreserved<ReductionInfo>();
+    AU.addPreserved<ReductionHandler>();
+    AU.addPreservedID(BasicReductionInfoID);
 
     // FIXME: We do not yet add regions for the newly generated code to the
     //        region tree.

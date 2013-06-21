@@ -25,6 +25,8 @@ class PHINode;
 class Region;
 class Pass;
 class BasicBlock;
+class Constant;
+class Type;
 }
 
 namespace polly {
@@ -67,5 +69,17 @@ void simplifyRegion(polly::Scop *S, llvm::Pass *P);
 /// @param P          The pass that currently running.
 ///
 void splitEntryBlockForAlloca(llvm::BasicBlock *EntryBlock, llvm::Pass *P);
+
+/// @brief Create a constant vector with sequential entries
+///
+/// @param min The value of the first entry
+/// @param max The value one greater than the last entry
+/// @param Ty  The type of the entry values
+///
+/// Creates a constant vector consisting of values of type @p Ty
+/// from @p min (inclusive) to @p max (exclusive) in incrementing order
+llvm::Constant*
+getSequentialConstantVector(unsigned min, unsigned max, llvm::Type *Ty);
+
 }
 #endif

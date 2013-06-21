@@ -254,6 +254,12 @@ private:
   ///
   Value *generateStrideOneLoad(const LoadInst *Load, ValueMapT &BBMap);
 
+  /// @brief Load a vector from a set of adjacent scalars (Reduction Version)
+  ///
+  /// Use the ReductionHandler to get the reduction vector for this load.
+  /// Reduction vectors have (by construction) stride one.
+  Value *generateStrideOneReductionLoad(const LoadInst *Load, ValueMapT &BBMap);
+
   /// @brief Load a vector initialized from a single scalar in memory
   ///
   /// In case all elements of a vector are initialized to the same

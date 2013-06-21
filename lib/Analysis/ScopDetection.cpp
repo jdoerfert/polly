@@ -13,7 +13,7 @@
 // that only has statically known control flow and can therefore be described
 // within the polyhedral model.
 //
-// Every Scop fullfills these restrictions:
+// Every Scop fulfills these restrictions:
 //
 // * It is a single entry single exit region
 //

@@ -16,6 +16,7 @@
 #include "polly/ScopInfo.h"
 #include "isl/aff.h"
 #include "isl/set.h"
+#include "polly/ReductionHandler.h"
 #include "polly/CodeGen/BlockGenerators.h"
 #include "polly/CodeGen/CodeGeneration.h"
 #include "polly/Options.h"
@@ -423,6 +424,26 @@ Type *VectorBlockGenerator::getVectorPtrTy(const Value *Val, int Width) {
   return PointerType::getUnqual(VectorType);
 }
 
+Value *
+VectorBlockGenerator::generateStrideOneReductionLoad(const LoadInst *Load,
+                                                     ValueMapT &BBMap) {
+  const Value *Pointer = Load->getPointerOperand();
+  ReductionHandler &RH = P->getAnalysis<ReductionHandler>();
+  Value *VectorPtr     = RH.getReductionVecPointer(Load, getVectorWidth());
+  LoadInst *VecLoad =
+    Builder.CreateLoad(VectorPtr, Load->getName() + "_p_vec_full");
+
+  // To generate fixup code we need to copy the original pointer too
+  Value *NewPointer    = generateLocationAccessed(Load, Pointer, BBMap,
+                                                  GlobalMaps[0], VLTS[0]);
+  GlobalMaps[0][Pointer] = NewPointer;
+
+  // TODO: Allignment set according to 'getReductionVecPointer'
+  // VecLoad->setAlignment(256);
+
+  return VecLoad;
+}
+
 Value *VectorBlockGenerator::generateStrideOneLoad(const LoadInst *Load,
                                                    ValueMapT &BBMap) {
   const Value *Pointer = Load->getPointerOperand();
@@ -495,9 +516,12 @@ void VectorBlockGenerator::generateLoad(const LoadInst *Load,
   }
 
   MemoryAccess &Access = Statement.getAccessFor(Load);
+  bool reductionAccess = Access.isReductionAccess();
 
   Value *NewLoad;
-  if (Access.isStrideZero(isl_map_copy(Schedule)))
+  if (reductionAccess)
+    NewLoad = generateStrideOneReductionLoad(Load, ScalarMaps[0]);
+  else if (Access.isStrideZero(isl_map_copy(Schedule)))
     NewLoad = generateStrideZeroLoad(Load, ScalarMaps[0]);
   else if (Access.isStrideOne(isl_map_copy(Schedule)))
     NewLoad = generateStrideOneLoad(Load, ScalarMaps[0]);
@@ -543,12 +567,24 @@ void VectorBlockGenerator::copyStore(const StoreInst *Store,
   int VectorWidth = getVectorWidth();
 
   MemoryAccess &Access = Statement.getAccessFor(Store);
+  bool reductionAccess = Access.isReductionAccess();
 
   const Value *Pointer = Store->getPointerOperand();
   Value *Vector = getVectorValue(Store->getValueOperand(), VectorMap,
                                  ScalarMaps, getLoopForInst(Store));
+  if (reductionAccess) {
+    assert(Access.isRead() && Access.getOriginalType() == MemoryAccess::Write);
 
-  if (Access.isStrideOne(isl_map_copy(Schedule))) {
+    ReductionHandler &RH = P->getAnalysis<ReductionHandler>();
+    Value     *VectorPtr = RH.getReductionVecPointer(Store, VectorWidth);
+
+    StoreInst *Store = Builder.CreateStore(Vector, VectorPtr);
+    (void) Store;
+
+    // TODO: Allignment as in 'getReductionVecPointer' ?
+    // Store.setAlignment(256)
+
+  } else if (Access.isStrideOne(isl_map_copy(Schedule))) {
     Type *VectorPtrType = getVectorPtrTy(Pointer, VectorWidth);
     Value *NewPointer = getNewValue(Pointer, ScalarMaps[0], GlobalMaps[0],
                                     VLTS[0], getLoopForInst(Store));

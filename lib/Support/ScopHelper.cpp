@@ -124,3 +124,16 @@ void polly::splitEntryBlockForAlloca(BasicBlock *EntryBlock, Pass *P) {
   if (RegionInfo *RI = P->getAnalysisIfAvailable<RegionInfo>())
     RI->splitBlock(NewEntry, EntryBlock);
 }
+
+Constant*
+polly::getSequentialConstantVector(unsigned min, unsigned max, Type *Ty) {
+  // Create a vector to store all entries
+  std::vector<Constant *> array(max - min);
+
+  // Fill the vector with the incrementing constants of type Ty
+  for(unsigned cur = min; cur != max; cur++) {
+    array[cur - min] = ConstantInt::get(Ty, cur);
+  }
+
+  return ConstantVector::get(array);
+}
