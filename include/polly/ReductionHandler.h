@@ -163,6 +163,8 @@ class ReductionHandler : public ScopPass {
   typedef DenseMap<const Instruction *, const ScopStmt *> InstToPrepMapT;
   InstToPrepMapT InstToPrepMap;
 
+  /// @brief Helper function to get a pointer value
+  const Value *getPointerValue(const Instruction *Inst);
 
   /// @brief Internal interface to model reduction dependences
   //@{
@@ -307,6 +309,17 @@ public:
   /// new value for the reduction base value.
   void createReductionResult(llvm::IRBuilder<> &Builder, ScopStmt *PrepStmt,
                              ValueMapT &ValueMap);
+  //@}
+
+  /// @brief Parallel code generation interface
+  //@{
+
+  /// @brief Check if an instruction is mapped to a reduction access
+  bool isMappedToReductionAccess(const llvm::Instruction *Inst) const;
+
+  /// @brief Get the reduction access for a given instruction
+  const ReductionAccess& getReductionAccess(const llvm::Instruction *Inst);
+
   //@}
 
 };

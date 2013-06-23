@@ -19,6 +19,7 @@
 
 #include "llvm/IR/BasicBlock.h"
 #include "llvm/IR/Instruction.h"
+#include "llvm/IR/Instructions.h"
 
 namespace llvm {
   class Loop;
@@ -96,6 +97,12 @@ public:
   /// @returns An instruction inserted at @p IP computing: S1 Type S2
   llvm::Instruction *getBinaryOperation(llvm::Value *S1, llvm::Value *S2,
                                         llvm::BasicBlock::iterator IP) const;
+
+  /// @brief Test if there is a matching AtomicRMWInst binary operation type
+  bool hasAtomicRMWInstBinOp() const;
+
+  /// @brief Get the matching AtomicRMWInst binary operation type
+  llvm::AtomicRMWInst::BinOp getAtomicRMWInstBinOp() const;
 
 private:
 

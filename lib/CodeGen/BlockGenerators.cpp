@@ -162,13 +162,14 @@ BlockGenerator::BlockGenerator(IRBuilder<> &B, ScopStmt &Stmt, Pass *P)
 Value *BlockGenerator::getNewValue(const Value *Old, ValueMapT &BBMap,
                                    ValueMapT &GlobalMap, LoopToScevMapT &LTS,
                                    Loop *L) {
-  // We assume constants never change.
-  // This avoids map lookups for many calls to this function.
-  if (isa<Constant>(Old))
+  // We can't assume constants never change. For reductions on global constants
+  // we have a mapping from the constant to the local reduction vector.
+  ValueMapT::iterator GI = GlobalMap.find(Old), GE = GlobalMap.end();
+  if (GI == GE && isa<Constant>(Old))
     return const_cast<Value *>(Old);
 
-  if (GlobalMap.count(Old)) {
-    Value *New = GlobalMap[Old];
+  if (GI != GE) {
+    Value *New = GI->second;
 
     if (Old->getType()->getScalarSizeInBits() <
         New->getType()->getScalarSizeInBits())
@@ -315,6 +316,7 @@ Value *BlockGenerator::generateScalarLoad(const LoadInst *Load,
                                           LoopToScevMapT &LTS) {
   const Value *Pointer = Load->getPointerOperand();
   const Instruction *Inst = dyn_cast<Instruction>(Load);
+
   Value *NewPointer =
       generateLocationAccessed(Inst, Pointer, BBMap, GlobalMap, LTS);
   Value *ScalarLoad =

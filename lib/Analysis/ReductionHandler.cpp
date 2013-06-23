@@ -54,6 +54,15 @@ PreserveReductionStatements("polly-preserve-reduction-statements",
 
 static unsigned F_ID = 0;
 
+const Value *ReductionHandler::getPointerValue(const Instruction *Inst) {
+  const Value *Pointer = 0;
+  if (const LoadInst *Load = dyn_cast<LoadInst>(Inst))
+    Pointer = Load->getPointerOperand();
+  else if (const StoreInst *Store = dyn_cast<StoreInst>(Inst))
+    Pointer = Store->getPointerOperand();
+  return Pointer;
+}
+
 void ReductionHandler::insertFreshMemoryAccess(ScopStmt *Stmt) {
 
   // Create the access relation for the new memory access
@@ -413,14 +422,8 @@ Value *ReductionHandler::getReductionVecPointer(const Instruction *Inst,
   const ScopStmt *PrepareStmt = InstToPrepMap[Inst];
   assert(ReductionPointers.count(PrepareStmt) && "Prepare statement unknown");
 
-  const Value *Pointer = 0;
-  if (const LoadInst *Load = dyn_cast<LoadInst>(Inst)) {
-    Pointer = Load->getPointerOperand();
-  } else if (const StoreInst *Store = dyn_cast<StoreInst>(Inst)) {
-    Pointer = Store->getPointerOperand();
-  } else {
-    llvm_unreachable("Instruction has no pointer operand");
-  }
+  const Value *Pointer = getPointerValue(Inst);
+  assert(Pointer && "Instruction has no pointer operand");
 
   PointerToVecMapT &PVM = ReductionPointers[PrepareStmt];
   PointerToVecMapT::iterator I = PVM.find(Pointer);
@@ -440,12 +443,13 @@ Value *ReductionHandler::getReductionVecPointer(const Instruction *Inst,
   BasicBlock *PrepareBB     = PrepareStmt->getBasicBlock();
   AllocaInst *Alloca        = new AllocaInst(VectorType,
                                              Pointer->getName() + ".RedVec",
-                                             PrepareBB->getTerminator());
+                                             PrepareBB->getFirstNonPHI());
   // TODO: Is alignment necessary ?
   // Alloca.setAlignment(256);
 
   // Initialize the allocated space in PrepareBB
-  new StoreInst(IdentElement, Alloca, PrepareBB->getTerminator());
+  StoreInst *Store = new StoreInst(IdentElement, Alloca);
+  Store->insertAfter(Alloca);
 
   PVM[Pointer] = Alloca;
 
@@ -502,12 +506,41 @@ void ReductionHandler::createReductionResult(IRBuilder<> &Builder,
     Value *L1 = Builder.CreateExtractElement(V1, Builder.getInt32(0));
     Value *L2 = Builder.CreateExtractElement(V1, Builder.getInt32(1));
     Value *TV = RA.getBinaryOperation(L1, L2, Builder.GetInsertPoint());
-    assert(ValueMap.count(Pointer));
-    Value *LV = Builder.CreateLoad(ValueMap[Pointer]);
+
+    // The original base pointer might or might not been copied during code
+    // generation. If it was, we need to use the copied version.
+    ValueMapT::iterator VI = ValueMap.find(Pointer);
+    if (VI != ValueMap.end())
+      Pointer = VI->second;
+
+    Value *LV = Builder.CreateLoad(Pointer);
     Value *OS = RA.getBinaryOperation(TV, LV, Builder.GetInsertPoint());
-    Builder.CreateStore(OS, ValueMap[Pointer]);
+    Builder.CreateStore(OS, Pointer);
   }
 
+}
+
+bool
+ReductionHandler::isMappedToReductionAccess(const Instruction *Inst) const {
+  return InstToPrepMap.count(Inst);
+}
+
+const ReductionAccess&
+ReductionHandler::getReductionAccess(const Instruction *Inst) {
+  assert(InstToPrepMap.count(Inst) && "Instruction not part of reduction");
+  assert(isa<LoadInst>(Inst) || isa<StoreInst>(Inst) &&
+         "Instruction is no load nor store");
+
+  const ScopStmt *PrepareStmt = InstToPrepMap[Inst];
+  assert(ReductionPointers.count(PrepareStmt) && "Prepare statement unknown");
+
+  const Value *Pointer = getPointerValue(Inst);
+  assert(Pointer && "Instruction has no pointer operand");
+
+  const Loop *RLoop         = PrepareStmt->getReductionLoop();
+  const ReductionAccess &RA = RI->getReductionAccess(Pointer, RLoop);
+
+  return RA;
 }
 
 void ReductionHandler::getAnalysisUsage(AnalysisUsage &AU) const {

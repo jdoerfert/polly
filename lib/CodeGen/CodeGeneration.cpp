@@ -68,6 +68,27 @@ OpenMP("enable-polly-openmp", cl::desc("Generate OpenMP parallel code"),
        cl::value_desc("OpenMP code generation enabled if true"),
        cl::init(false), cl::ZeroOrMore, cl::cat(PollyCategory));
 
+// Use AtomicRMWInst instructions to aggregate the thread local reduction
+// variables at the end of OpenMP sub-functions. An alternative is to limit
+// the number of OpenMP threads. This is the default and usually supersedes
+// the vector aggregation enabled when the number of OpenMP threads is limited.
+bool AtomicReductions;
+static cl::opt<bool, true>
+AtomicReductionsF("polly-openmp-reductions-atomic",
+             cl::desc("Use atomic instructions for parallel code generation."),
+             cl::Hidden, cl::location(AtomicReductions), cl::init(false),
+             cl::ZeroOrMore, cl::cat(PollyCategory));
+
+// Allow the user to limit the number of OpenMP threads.
+// Especially useful when reductions are inside an OpenMP sub-function and
+// needed if reductions are contained but no AtomicRMWInst available.
+unsigned NoOpenMPThreads;
+static cl::opt<unsigned, true>
+NoOpenMPThreadsF("polly-openmp-threads",
+        cl::desc("Limit the number of OpenMP threads"),
+        cl::location(NoOpenMPThreads), cl::init(0),
+        cl::ZeroOrMore, cl::cat(PollyCategory));
+
 #ifdef GPU_CODEGEN
 static cl::opt<bool>
 GPGPU("enable-polly-gpgpu", cl::desc("Generate GPU parallel code"), cl::Hidden,
@@ -291,9 +312,11 @@ private:
 
   /// @brief Create OpenMP structure values.
   ///
-  /// Create a list of values that has to be stored into the OpenMP subfuncition
-  /// structure.
-  SetVector<Value *> getOMPValues(const clast_stmt *Body);
+  /// Create a set of values that has to be stored into the OpenMP subfuncition
+  /// structure. Additionally prepare thread local variables for contained
+  /// reduction memory accesses.
+  SetVector<Value *> getOMPValues(const clast_stmt *Body,
+                                  OMPGenerator::ValueToValueMapTy &RMap);
 
   /// @brief Update ClastVars and ValueMap according to a value map.
   ///
@@ -543,11 +566,92 @@ void ClastStmtCodeGen::codegenForSequential(const clast_for *f) {
 
 // Helper class to determine all scalar parameters used in the basic blocks of a
 // clast. Scalar parameters are scalar variables defined outside of the SCoP.
+// It will also collect all reduction accesses inside the basic blocks and
+// prepare thread local variables to compute the reduction separately.
 class ParameterVisitor : public ClastVisitor {
   std::set<Value *> Values;
+  ReductionHandler &RH;
+  OMPGenerator::ValueToValueMapTy &RMap;
 
 public:
-  ParameterVisitor() : ClastVisitor(), Values() {}
+  ParameterVisitor(ReductionHandler &RH, OMPGenerator::ValueToValueMapTy &RMap)
+    : ClastVisitor(), Values(), RH(RH), RMap(RMap) {}
+
+  /// @brief Visit a reduction memory access
+  ///
+  /// This prepares a thread local pointer for the reduction access
+  void visitReductionMemoryAccess(MemoryAccess &Access, Instruction *Inst) {
+    assert(Inst == Access.getAccessInstruction());
+
+    // Get the pointer used by this memory access
+    Value *Pointer = 0;
+    if (LoadInst *Load = dyn_cast<LoadInst>(Inst))
+      Pointer = Load->getPointerOperand();
+    else if (StoreInst *Store = dyn_cast<StoreInst>(Inst))
+      Pointer = Store->getPointerOperand();
+    assert(Pointer && "Reduction memory access has no pointer operand");
+
+    // Even if atomic reduction handling is enabled it is not always possible
+    const ReductionAccess   &RA = RH.getReductionAccess(Inst);
+    bool AtomicHandlingPossible = RA.hasAtomicRMWInstBinOp();
+
+    // In those cases it is not we check for a limit on the number of
+    // OpenMP threads and set one if necessary.
+    if (!AtomicHandlingPossible && NoOpenMPThreads == 0) {
+
+      /* TODO Think of a good default value or assert out */
+      NoOpenMPThreads = 4;
+
+      errs() << "\n"
+        << "Reduction detection and OpenMP code generation are enabled, but:\n"
+        << " * atomic reduction handling is not possible\n"
+        << " * the number of OpenMP threads is not limited\n"
+        << "A default value (" << NoOpenMPThreads << ") for the maximal"
+        << " number of threads is used.\n\n";
+    }
+
+    // Check for atomic reduction handling (via AtomicRMWInst) first, then
+    // for a limited number of OpenMP threads. If none is true warn the user
+    // and enable atomic reduction handling.
+    if (AtomicReductions && AtomicHandlingPossible) {
+
+      // For atomic reduction handling we map the current access instruction
+      // to the used pointer. We need the instruction to get the reduction
+      // access, which 'knows' the identity element and the AtomicRMWBinOp.
+      RMap[Pointer] = const_cast<Instruction*>(Inst);
+
+    } else if (NoOpenMPThreads != 0) {
+
+      // For a limited number of OpenMP threads we can utilize the vector
+      // interface of the reduction handler. It can create #Threads locations
+      // in a vector and aggregate them later on in log(#Threads) instructions.
+      Value *VectorPtr  = RH.getReductionVecPointer(Inst, NoOpenMPThreads);
+      // The original pointer will be mapped to the vector pointer here,
+      // then to the re-loaded vector pointer (from the OpenMP struct) and
+      // then to a GEP instruction which selects the local pointer using the
+      // thread ID.
+      RMap[Pointer] = VectorPtr;
+      // This will cause the OpenMP struct to contain the new vector pointer
+      Values.insert(VectorPtr);
+
+    } else {
+
+      // Atomic reduction handling was possible but not enabled and no limit
+      // on the number of threads was set. To preserve soundness the former
+      // one will be enabled.
+      AtomicReductions = true;
+
+      errs() << "\n"
+        << "Reduction detection and OpenMP code generation are enabled, but:\n"
+        << " * no limit on the #OpenMP threads (-polly-openmp-threads=<uint>)\n"
+        << " * no atomic reduction handling (-polly-openmp-reductions-atomic)\n"
+        << "Fall back to atomic reduction handling!\n\n";
+
+      // This will avoid code duplication
+      visitReductionMemoryAccess(Access, Inst);
+    }
+
+  }
 
   void visitUser(const clast_user_stmt *Stmt) {
     const ScopStmt *S = static_cast<const ScopStmt *>(Stmt->statement->usr);
@@ -557,6 +661,12 @@ public:
     for (BasicBlock::const_iterator BI = BB->begin(), BE = BB->end(); BI != BE;
          ++BI) {
       const Instruction &Inst = *BI;
+
+      // Check for reduction memory accesses inside the basic block
+      MemoryAccess *Access = S->lookupAccessFor(&Inst);
+      if (Access && Access->isReductionAccess())
+        visitReductionMemoryAccess(*Access, const_cast<Instruction*>(&Inst));
+
       for (Instruction::const_op_iterator II = Inst.op_begin(),
                                           IE = Inst.op_end();
            II != IE; ++II) {
@@ -578,7 +688,9 @@ public:
   inline const_iterator end() const { return Values.end(); }
 };
 
-SetVector<Value *> ClastStmtCodeGen::getOMPValues(const clast_stmt *Body) {
+SetVector<Value *>
+ClastStmtCodeGen::getOMPValues(const clast_stmt *Body,
+                               OMPGenerator::ValueToValueMapTy &RMap) {
   SetVector<Value *> Values;
 
   // The clast variables
@@ -589,8 +701,10 @@ SetVector<Value *> ClastStmtCodeGen::getOMPValues(const clast_stmt *Body) {
   // Find the temporaries that are referenced in the clast statements'
   // basic blocks but are not defined by these blocks (e.g., references
   // to function arguments or temporaries defined before the start of
-  // the SCoP).
-  ParameterVisitor Params;
+  // the SCoP). Also collect information about reduction memory accesses
+  // inside those blocks and prepare thread local variables for them.
+  ReductionHandler &RH = P->getAnalysis<ReductionHandler>();
+  ParameterVisitor Params(RH, RMap);
   Params.visit(Body);
 
   for (ParameterVisitor::const_iterator PI = Params.begin(), PE = Params.end();
@@ -640,6 +754,7 @@ void ClastStmtCodeGen::codegenForOpenMP(const clast_for *For) {
   IntegerType *IntPtrTy = getIntPtrTy();
   SetVector<Value *> Values;
   OMPGenerator::ValueToValueMapTy VMap;
+  OMPGenerator::ValueToValueMapTy RMap;
   OMPGenerator OMPGen(Builder, P);
 
   Stride = Builder.getInt(APInt_from_MPZ(For->stride));
@@ -647,9 +762,9 @@ void ClastStmtCodeGen::codegenForOpenMP(const clast_for *For) {
   LB = ExpGen.codegen(For->LB, IntPtrTy);
   UB = ExpGen.codegen(For->UB, IntPtrTy);
 
-  Values = getOMPValues(For->body);
+  Values = getOMPValues(For->body, RMap);
 
-  IV = OMPGen.createParallelLoop(LB, UB, Stride, Values, VMap, &LoopBody);
+  IV = OMPGen.createParallelLoop(LB, UB, Stride, Values, VMap, RMap, &LoopBody);
   BasicBlock::iterator AfterLoop = Builder.GetInsertPoint();
   Builder.SetInsertPoint(LoopBody);
 
@@ -1066,6 +1181,7 @@ public:
     ParallelLoops.insert(ParallelLoops.begin(),
                          CodeGen.getParallelLoops().begin(),
                          CodeGen.getParallelLoops().end());
+    StartBlock->getParent()->getParent()->dump();
     return true;
   }
 

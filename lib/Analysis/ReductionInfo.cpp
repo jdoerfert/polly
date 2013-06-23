@@ -121,4 +121,24 @@ Value *ReductionAccess::getIdentityElement(llvm::Type *Ty) const {
 
   llvm_unreachable("Cannot construct identity element");
 }
+
+bool ReductionAccess::hasAtomicRMWInstBinOp() const {
+  return (Type != MUL);
+}
+
+AtomicRMWInst::BinOp ReductionAccess::getAtomicRMWInstBinOp() const {
+  switch (Type) {
+  case ADD:
+    return AtomicRMWInst::Add;
+  case MUL:
+    llvm_unreachable("Multiplication is no AtomicRMWInst binary operation");
+  case MIN:
+    return AtomicRMWInst::Min;
+  case MAX:
+    return AtomicRMWInst::Max;
+  }
+
+  llvm_unreachable("Cannot find AtomicRMWInst binary operation");
+}
+
 // @}
