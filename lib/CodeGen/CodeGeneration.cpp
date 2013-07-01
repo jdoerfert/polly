@@ -80,8 +80,6 @@ AtomicReductionsF("polly-openmp-reductions-atomic",
              cl::ZeroOrMore, cl::cat(PollyCategory));
 
 // Allow the user to limit the number of OpenMP threads.
-// Especially useful when reductions are inside an OpenMP sub-function and
-// needed if reductions are contained but no AtomicRMWInst available.
 unsigned NoOpenMPThreads;
 static cl::opt<unsigned, true>
 NoOpenMPThreadsF("polly-openmp-threads",
@@ -591,29 +589,10 @@ public:
       Pointer = Store->getPointerOperand();
     assert(Pointer && "Reduction memory access has no pointer operand");
 
-    // Even if atomic reduction handling is enabled it is not always possible
-    const ReductionAccess   &RA = RH.getReductionAccess(Inst);
-    bool AtomicHandlingPossible = RA.hasAtomicRMWInstBinOp();
-
-    // In those cases it is not we check for a limit on the number of
-    // OpenMP threads and set one if necessary.
-    if (!AtomicHandlingPossible && NoOpenMPThreads == 0) {
-
-      /* TODO Think of a good default value or assert out */
-      NoOpenMPThreads = 4;
-
-      errs() << "\n"
-        << "Reduction detection and OpenMP code generation are enabled, but:\n"
-        << " * atomic reduction handling is not possible\n"
-        << " * the number of OpenMP threads is not limited\n"
-        << "A default value (" << NoOpenMPThreads << ") for the maximal"
-        << " number of threads is used.\n\n";
-    }
-
     // Check for atomic reduction handling (via AtomicRMWInst) first, then
     // for a limited number of OpenMP threads. If none is true warn the user
     // and enable atomic reduction handling.
-    if (AtomicReductions && AtomicHandlingPossible) {
+    if (AtomicReductions) {
 
       // For atomic reduction handling we map the current access instruction
       // to the used pointer. We need the instruction to get the reduction
@@ -777,6 +756,10 @@ void ClastStmtCodeGen::codegenForOpenMP(const clast_for *For) {
 
   if (For->body)
     codegen(For->body);
+
+  // Notify the reduction handler that the sub-function was generated completely
+  ReductionHandler &RH = P->getAnalysis<ReductionHandler>();
+  RH.unsetSubFunction(ValueMap);
 
   // Restore the original values.
   ValueMap = ValueMapCopy;
@@ -1164,6 +1147,7 @@ public:
 
   bool runOnScop(Scop &S) {
     ParallelLoops.clear();
+    S.dump();
 
     assert(!S.getRegion().isTopLevelRegion() &&
            "Top level regions are not supported");
@@ -1176,6 +1160,7 @@ public:
 
     ClastStmtCodeGen CodeGen(&S, Builder, this);
     CloogInfo &C = getAnalysis<CloogInfo>();
+    C.printScop(errs());
     CodeGen.codegen(C.getClast());
 
     ParallelLoops.insert(ParallelLoops.begin(),

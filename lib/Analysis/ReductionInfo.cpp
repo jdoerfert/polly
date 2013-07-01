@@ -21,6 +21,9 @@
 #include "llvm/IR/Type.h"
 #include "llvm/IR/Constants.h"
 #include "llvm/IR/Instructions.h"
+#include "llvm/Transforms/Utils/BasicBlockUtils.h"
+
+#include "llvm/Support/Debug.h"
 
 using namespace llvm;
 using namespace polly;
@@ -83,23 +86,30 @@ ReductionAccess::ReductionAccess(const Value *BaseValue,
 
   switch(BinOpcode) {
   case Instruction::Add:
-    Type = ADD;
-    break;
+    Type = ADD; break;
+  case Instruction::FAdd:
+    Type = FADD; break;
   case Instruction::Mul:
-    Type = MUL;
-    break;
+    Type = MUL; break;
+  case Instruction::FMul:
+    Type = FMUL; break;
   default:
+    dbgs() << *BaseValue << "\n";
     llvm_unreachable("Reduction accesss created with invalid opcode");
   }
 }
 
 Instruction *ReductionAccess::getBinaryOperation(Value *S1, Value *S2,
-                                             BasicBlock::iterator IP) const {
+                                                BasicBlock::iterator IP) const {
   switch (Type) {
   case ADD:
     return BinaryOperator::Create(Instruction::Add, S1, S2, "Red.Add", IP);
+  case FADD:
+    return BinaryOperator::Create(Instruction::FAdd, S1, S2, "Red.FAdd", IP);
   case MUL:
     return BinaryOperator::Create(Instruction::Mul, S1, S2, "Red.Mul", IP);
+  case FMUL:
+    return BinaryOperator::Create(Instruction::FMul, S1, S2, "Red.FMul", IP);
   case MIN:
   case MAX:
     llvm_unreachable("TODO: Min/Max not supported yet");
@@ -111,8 +121,10 @@ Instruction *ReductionAccess::getBinaryOperation(Value *S1, Value *S2,
 Value *ReductionAccess::getIdentityElement(llvm::Type *Ty) const {
   switch (Type) {
   case ADD:
+  case FADD:
     return Constant::getNullValue(Ty);
   case MUL:
+  case FMUL:
     return ConstantInt::get(Ty, 1);
   case MIN:
   case MAX:
@@ -122,8 +134,52 @@ Value *ReductionAccess::getIdentityElement(llvm::Type *Ty) const {
   llvm_unreachable("Cannot construct identity element");
 }
 
-bool ReductionAccess::hasAtomicRMWInstBinOp() const {
-  return (Type != MUL);
+void ReductionAccess::createAtomicBinOp(Value *Val, Value *Ptr,
+                                        IRBuilder<> &Builder, Pass *P) const {
+  AtomicOrdering Order = AtomicOrdering::Monotonic;
+
+  if (Type != MUL) {
+    Builder.CreateAtomicRMW(getAtomicRMWInstBinOp(), Ptr, Val, Order);
+    return;
+  }
+
+  llvm::Type *ValTy = Val->getType();
+  Value *Cmp, *Old, *Read, *Mul;
+
+  LLVMContext &Context = Builder.getContext();
+  BasicBlock *InsertBB = Builder.GetInsertBlock();
+  BasicBlock *CmpXchgLoopBB = BasicBlock::Create(Context, "RedCmpXchgLoop",
+                                                 InsertBB->getParent());
+  BasicBlock *PostLoopBB = BasicBlock::Create(Context, "RedPostLoop",
+                                              InsertBB->getParent());
+  CmpXchgLoopBB->moveAfter(InsertBB);
+  PostLoopBB->moveAfter(CmpXchgLoopBB);
+
+  Old = Builder.CreateLoad(Ptr, "RedCmpLoad");
+  Builder.CreateBr(CmpXchgLoopBB);
+  Builder.SetInsertPoint(CmpXchgLoopBB);
+
+  PHINode *Phi = Builder.CreatePHI(ValTy, 2);
+  Phi->addIncoming(Old, InsertBB);
+
+  if (ValTy->isIntegerTy())
+    Mul = Builder.CreateMul(Phi, Val);
+  else if (ValTy->isFloatingPointTy())
+    Mul = Builder.CreateFMul(Phi, Val);
+  else
+    llvm_unreachable("No atomic instruction for non int, non float type");
+
+  Read = Builder.CreateAtomicCmpXchg(Ptr, Phi, Mul,
+                                    AtomicOrdering::Monotonic);
+  Phi->addIncoming(Read, CmpXchgLoopBB);
+
+  if (ValTy->isIntegerTy())
+    Cmp = Builder.CreateICmpEQ(Phi, Read);
+  else
+    Cmp = Builder.CreateFCmpOEQ(Phi, Read);
+
+  Builder.CreateCondBr(Cmp, PostLoopBB, CmpXchgLoopBB);
+  Builder.SetInsertPoint(PostLoopBB);
 }
 
 AtomicRMWInst::BinOp ReductionAccess::getAtomicRMWInstBinOp() const {

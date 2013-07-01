@@ -63,13 +63,14 @@ const Value *ReductionHandler::getPointerValue(const Instruction *Inst) {
   return Pointer;
 }
 
-void ReductionHandler::insertFreshMemoryAccess(ScopStmt *Stmt) {
+void ReductionHandler::insertFreshMemoryAccess(ScopStmt *Stmt, int dim, int free) {
 
   // Create the access relation for the new memory access
   const std::string BaseName = "FRESH_" + std::to_string(F_ID++);
-  unsigned StmtDim            = Stmt->getNumIterators();
+  if (dim == -1)
+    dim = Stmt->getNumIterators();
 
-  isl_space *Space = isl_space_set_alloc(Stmt->getIslCtx(), 0, StmtDim);
+  isl_space *Space = isl_space_set_alloc(Stmt->getIslCtx(), 0, dim);
   Space = isl_space_set_tuple_name(Space, isl_dim_set, BaseName.c_str());
   Space = isl_space_align_params(Space, Stmt->getDomainSpace());
 
@@ -81,7 +82,8 @@ void ReductionHandler::insertFreshMemoryAccess(ScopStmt *Stmt) {
   isl_space *ParamSpace = Stmt->getParent()->getParamSpace();
   AccessRelation = isl_map_align_params(AccessRelation, ParamSpace);
 
-  for (unsigned i = 0; i < StmtDim; ++i)
+  dbgs() << "Dim: " << dim << " : free " << free << "\n";
+  for (unsigned i = 0; i < dim - free; ++i)
     AccessRelation = isl_map_equate(AccessRelation, isl_dim_out,
                                     i, isl_dim_in, i);
 
@@ -210,6 +212,8 @@ void ReductionHandler::incrementScattering(int D, ScopStmt *PrepStmt,
 
   unsigned Increment = 0;
 
+  S->dump();
+  dbgs() << " D: " << D <<" \n";
   Scop::iterator SI = S->begin();
 
   // Find the prepare statement
@@ -245,13 +249,50 @@ void ReductionHandler::incrementScattering(int D, ScopStmt *PrepStmt,
 
 void ReductionHandler::insertMemoryAccess(MemoryAccess *MA, ScopStmt *Stmt) {
 
-  // Combine the range of the access relation with the domain of the statement
-  isl_map *AccessRelation = isl_map_from_domain_and_range(
-                                 isl_set_universe(Stmt->getDomainSpace()),
-                                 isl_map_range(MA->getAccessRelation()));
-  // Align the parameters
+  isl_map *AccessRelation = MA->getAccessRelation();
+  isl_space    *StmtSpace = Stmt->getDomainSpace();
+  isl_set   *AccessDomain = MA->getStatement()->getDomain();
+  unsigned MemDim = isl_map_n_in(AccessRelation);
+  unsigned DomDim = isl_space_dim(StmtSpace, isl_dim_set);
+  dbgs() <<"MemDim:" <<  MemDim << " DomDim: " << DomDim << "\n";
+  assert(MemDim > DomDim);
+
+  //isl_set *AccessRange = isl_map_range(isl_map_copy(AccessRelation));
+  //isl_set_dump(AccessRange);
+  //isl_set_free(AccessRange);
+
+
+  AccessRelation = isl_map_remove_inputs(AccessRelation, DomDim,
+                                         MemDim - DomDim);
+  AccessRelation = isl_map_set_tuple_id(AccessRelation, isl_dim_in,
+                                isl_space_get_tuple_id(StmtSpace, isl_dim_set));
+
+  AccessDomain   = isl_set_remove_dims(AccessDomain, isl_dim_set,
+                                       DomDim, MemDim - DomDim);
+  AccessDomain = isl_set_set_tuple_id(AccessDomain,
+                             isl_space_get_tuple_id(StmtSpace, isl_dim_set));
+  AccessRelation = isl_map_intersect_domain(AccessRelation, AccessDomain);
+
+  AccessRelation = isl_map_intersect_domain(AccessRelation,
+                                            isl_set_universe(isl_space_copy(StmtSpace)));
+
   isl_space *ParamSpace = Stmt->getParent()->getParamSpace();
   AccessRelation = isl_map_align_params(AccessRelation, ParamSpace);
+
+  //dbgs() << " Access Realtion: ";
+  //isl_map_dump(AccessRelation);
+  //isl_map *ProjectRelation = isl_map_project_out(AccessRelation,
+                                                 //isl_dim_in, 0, DomDim);
+  //dbgs() << " Projected  Realtion: ";
+  //isl_map_dump(ProjectRelation);
+  isl_space_free(StmtSpace);
+  //AccessRelation = isl_map_from_domain_and_range(isl_set_universe(StmtSpace),
+                                                 //isl_map_range(ProjectRelation));
+  //dbgs() << " Projected Access Realtion: ";
+  //isl_map_dump(AccessRelation);
+
+  //ParamSpace = Stmt->getParent()->getParamSpace();
+  //AccessRelation = isl_map_align_params(AccessRelation, ParamSpace);
 
   // And create the memory access before adding it to the parent SCoP statement
   MemoryAccess *NewMA = new MemoryAccess(Stmt, AccessRelation,
@@ -297,6 +338,10 @@ ReductionHandler::createReductionStmts(int D, const Loop * ReductionLoop) {
   PStmts.first  = PrepareStmt;
   PStmts.second = FixupStmt;
 
+  insertFreshMemoryAccess(PrepareStmt, 1, 1);
+  F_ID--;
+  insertFreshMemoryAccess(FixupStmt, 1, 1);
+
   return PStmts;
 }
 
@@ -306,6 +351,9 @@ bool ReductionHandler::runOnScop(Scop &Scop) {
   S  = &Scop;
   LI = &getAnalysis<LoopInfo>();
   RI = &getAnalysis<ReductionInfo>();
+
+  DEBUG(Scop.dump());
+  DEBUG(Scop.getRegion().getEntry()->getParent()->dump());
 
   // We cannot use the built-in iterators later as we might concurrently
   // modify the SCoP (e.g., add new ScopStmts)
@@ -377,12 +425,11 @@ bool ReductionHandler::runOnScop(Scop &Scop) {
       if (I != LoopRedStmts.end()) {
         RedStmtPair = &I->second;
       } else {
+        dbgs() << *outerLoop << "\n";
+        dbgs() << *reductionLoop << "\n";
         int RDim    = reductionLoop->getLoopDepth() - outerLoop->getLoopDepth();
+        dbgs() << RDim<< "\n";
         RedStmtPair = &createReductionStmts(RDim, reductionLoop);
-
-        // Create an empty map:
-        //  old pointer --> reduction vector pointer
-        ReductionPointers[RedStmtPair->first];
       }
 
       // Map the current access instruction to the reduction prepare statement.
@@ -415,17 +462,22 @@ bool ReductionHandler::runOnScop(Scop &Scop) {
 
 Value *ReductionHandler::getReductionVecPointer(const Instruction *Inst,
                                                 unsigned VectorWidth) {
-  assert(InstToPrepMap.count(Inst) && "Instruction not part of reduction");
   assert(isa<LoadInst>(Inst) || isa<StoreInst>(Inst) &&
          "Instruction is no load nor store");
 
   const ScopStmt *PrepareStmt = InstToPrepMap[Inst];
-  assert(ReductionPointers.count(PrepareStmt) && "Prepare statement unknown");
-
+  assert(PrepareStmt && "Instruction not part of any reduction access");
   const Value *Pointer = getPointerValue(Inst);
   assert(Pointer && "Instruction has no pointer operand");
 
-  PointerToVecMapT &PVM = ReductionPointers[PrepareStmt];
+  BasicBlock *PrepareBB;
+  SubFnRemappingT::iterator SI = SubFnRemapping.find(PrepareStmt);
+  if (SI == SubFnRemapping.end())
+    PrepareBB = PrepareStmt->getBasicBlock();
+  else
+    PrepareBB = SI->second;
+
+  PointerToVecMapT &PVM = ReductionPointers[PrepareBB];
   PointerToVecMapT::iterator I = PVM.find(Pointer);
   if (I != PVM.end())
     return I->second;
@@ -439,16 +491,14 @@ Value *ReductionHandler::getReductionVecPointer(const Instruction *Inst,
   const Loop *RLoop         = PrepareStmt->getReductionLoop();
   const ReductionAccess &RA = RI->getReductionAccess(Pointer, RLoop);
   Value *IdentElement       = RA.getIdentityElement(VectorType);
-
-  BasicBlock *PrepareBB     = PrepareStmt->getBasicBlock();
   AllocaInst *Alloca        = new AllocaInst(VectorType,
                                              Pointer->getName() + ".RedVec",
-                                             PrepareBB->getFirstNonPHI());
-  // TODO: Is alignment necessary ?
-  // Alloca.setAlignment(256);
+                                             PrepareBB->getFirstInsertionPt());
+  //Alloca->setAlignment(VectorType->getBitWidth());
 
   // Initialize the allocated space in PrepareBB
-  StoreInst *Store = new StoreInst(IdentElement, Alloca);
+  StoreInst *Store = new StoreInst(IdentElement, Alloca, false,
+                                   VectorType->getBitWidth());
   Store->insertAfter(Alloca);
 
   PVM[Pointer] = Alloca;
@@ -459,12 +509,17 @@ Value *ReductionHandler::getReductionVecPointer(const Instruction *Inst,
 
 
 void ReductionHandler::createReductionResult(IRBuilder<> &Builder,
-                                             ScopStmt *PrepareStmt,
+                                             const ScopStmt *PrepareStmt,
                                              ValueMapT &ValueMap) {
-  assert(ReductionPointers.count(PrepareStmt) && "Prepare statement unknown");
-  Type *Int32T = Builder.getInt32Ty();
 
-  PointerToVecMapT &PVM = ReductionPointers[PrepareStmt];
+  BasicBlock *PrepareBB;
+  SubFnRemappingT::iterator SI = SubFnRemapping.find(PrepareStmt);
+  if (SI == SubFnRemapping.end())
+    PrepareBB = PrepareStmt->getBasicBlock();
+  else
+    PrepareBB = SI->second;
+
+  PointerToVecMapT &PVM = ReductionPointers[PrepareBB];
   PointerToVecMapT::iterator I = PVM.begin(), E = PVM.end();
   for (; I != E; ++I) {
     Value *Pointer    = const_cast<Value *>(I->first);
@@ -486,37 +541,56 @@ void ReductionHandler::createReductionResult(IRBuilder<> &Builder,
     // TODO VectorDim % 2 == 1 ?
     assert((VectorDim % 2 == 0) && "Odd vector width not supported yet");
 
-    VectorType *VType;
-    Value *V1 = Builder.CreateLoad(VecPointer);
-    Value *V2, *Mask;
-    while (VectorDim > 2) {
-      VType = VectorType::get(ScalarType, VectorDim);
-      V2    = UndefValue::get(VType);
-      Mask  = getSequentialConstantVector(0, VectorDim / 2, Int32T);
-      Value *SV1 = Builder.CreateShuffleVector(V1, V2, Mask);
-      Mask  = getSequentialConstantVector(VectorDim / 2, VectorDim, Int32T);
-      Value *SV2 = Builder.CreateShuffleVector(V1, V2, Mask);
-
-      V1 = RA.getBinaryOperation(SV1, SV2, Builder.GetInsertPoint());
-
-      VectorDim /= 2;
-    }
-
-    assert(VectorDim == 2);
-    Value *L1 = Builder.CreateExtractElement(V1, Builder.getInt32(0));
-    Value *L2 = Builder.CreateExtractElement(V1, Builder.getInt32(1));
-    Value *TV = RA.getBinaryOperation(L1, L2, Builder.GetInsertPoint());
-
     // The original base pointer might or might not been copied during code
     // generation. If it was, we need to use the copied version.
     ValueMapT::iterator VI = ValueMap.find(Pointer);
     if (VI != ValueMap.end())
       Pointer = VI->second;
 
-    Value *LV = Builder.CreateLoad(Pointer);
-    Value *OS = RA.getBinaryOperation(TV, LV, Builder.GetInsertPoint());
-    Builder.CreateStore(OS, Pointer);
+    // Aggreagate the reduction vector into a single value and store it in
+    // the given pointer
+    aggregateReductionResult(Pointer, VecPointer, Builder,
+                             ScalarType, RA, VectorDim);
+
   }
+}
+
+void ReductionHandler::aggregateReductionResult(Value *Pointer,
+                                                Value *VecPointer,
+                                                IRBuilder<> &Builder,
+                                                Type *ScalarType,
+                                                const ReductionAccess &RA,
+                                                unsigned VectorDim) {
+
+  Type *Int32T = Builder.getInt32Ty();
+  VectorType *VType;
+  Value *V1, *V2, *Mask;
+
+  LoadInst *InitalLoad = Builder.CreateLoad(VecPointer);
+  //InitalLoad->setAlignment(VecTy->getBitWidth());
+
+  V1 = InitalLoad;
+  while (VectorDim > 2) {
+    VType = VectorType::get(ScalarType, VectorDim);
+    V2    = UndefValue::get(VType);
+    Mask  = getSequentialConstantVector(0, VectorDim / 2, Int32T);
+    Value *SV1 = Builder.CreateShuffleVector(V1, V2, Mask);
+    Mask  = getSequentialConstantVector(VectorDim / 2, VectorDim, Int32T);
+    Value *SV2 = Builder.CreateShuffleVector(V1, V2, Mask);
+
+    V1 = RA.getBinaryOperation(SV1, SV2, Builder.GetInsertPoint());
+
+    VectorDim /= 2;
+  }
+
+  assert(VectorDim == 2);
+  Value *L1 = Builder.CreateExtractElement(V1, Builder.getInt32(0));
+  Value *L2 = Builder.CreateExtractElement(V1, Builder.getInt32(1));
+  Value *TV = RA.getBinaryOperation(L1, L2, Builder.GetInsertPoint());
+
+  Value *LV = Builder.CreateLoad(Pointer);
+  Value *OS = RA.getBinaryOperation(TV, LV, Builder.GetInsertPoint());
+  Builder.CreateStore(OS, Pointer);
 
 }
 
@@ -527,12 +601,11 @@ ReductionHandler::isMappedToReductionAccess(const Instruction *Inst) const {
 
 const ReductionAccess&
 ReductionHandler::getReductionAccess(const Instruction *Inst) {
-  assert(InstToPrepMap.count(Inst) && "Instruction not part of reduction");
   assert(isa<LoadInst>(Inst) || isa<StoreInst>(Inst) &&
          "Instruction is no load nor store");
 
   const ScopStmt *PrepareStmt = InstToPrepMap[Inst];
-  assert(ReductionPointers.count(PrepareStmt) && "Prepare statement unknown");
+  assert(PrepareStmt && "Instruction not part of any reduction access");
 
   const Value *Pointer = getPointerValue(Inst);
   assert(Pointer && "Instruction has no pointer operand");
@@ -541,6 +614,47 @@ ReductionHandler::getReductionAccess(const Instruction *Inst) {
   const ReductionAccess &RA = RI->getReductionAccess(Pointer, RLoop);
 
   return RA;
+}
+
+void ReductionHandler::setSubFunction(IRBuilder<> &Builder,
+                                      BasicBlock *ExitBB) {
+  BasicBlock *PrepareBB, *LastPrepareBB = Builder.GetInsertBlock();
+  LLVMContext &Context = Builder.getContext();
+  Function *F = ExitBB->getParent();
+  SubFnExitBB = ExitBB;
+
+  DominatorTree *DT = this->getAnalysisIfAvailable<DominatorTree>();
+
+  for (LoopStatementMap::iterator I = LoopRedStmts.begin(),
+       E = LoopRedStmts.end(); I != E; ++I) {
+
+    ScopStmt   *PrepareStmt = I->second.first;
+    StringRef StatementName = StringRef(PrepareStmt->getBaseName());
+    PrepareBB = BasicBlock::Create(Context, "polly." + StatementName, F);
+
+    PrepareBB->moveAfter(LastPrepareBB);
+    DT->addNewBlock(PrepareBB, LastPrepareBB);
+
+    Builder.CreateBr(PrepareBB);
+    Builder.SetInsertPoint(PrepareBB);
+
+    SubFnRemapping[I->second.first] = PrepareBB;
+
+    LastPrepareBB = PrepareBB;
+  }
+
+}
+
+void ReductionHandler::unsetSubFunction(ValueMapT &ValueMap) {
+  IRBuilder<> Builder(SubFnExitBB->getFirstInsertionPt());
+
+  for (SubFnRemappingT::iterator I = SubFnRemapping.begin(),
+       E = SubFnRemapping.end(); I != E; ++I) {
+
+    createReductionResult(Builder, I->first, ValueMap);
+  }
+
+  SubFnRemapping.clear();
 }
 
 void ReductionHandler::getAnalysisUsage(AnalysisUsage &AU) const {
@@ -557,6 +671,9 @@ void ReductionHandler::releaseMemory() {
   ReductionSet.clear();
   LoopRedStmts.clear();
   ReductionPointers.clear();
+
+  assert(SubFnRemapping.empty() &&
+         "SetOpenMPFunction was called but not unset");
 }
 
 char ReductionHandler::ID = 0;

@@ -44,9 +44,9 @@ target triple = "x86_64-unknown-linux-gnu"
 ;    return 0;
 ;  }
 
-@A = common global [8192 x i64] zeroinitializer, align 16
+@A = common global [65536 x i64] zeroinitializer, align 16
 @sum1 = common global i64 0, align 8
-@B = common global [8192 x i64] zeroinitializer, align 16
+@B = common global [65536 x i64] zeroinitializer, align 16
 @sum2 = common global i64 0, align 8
 @mul1 = common global i64 0, align 8
 @mul2 = common global i64 0, align 8
@@ -63,7 +63,7 @@ entry:
 for.cond:                                         ; preds = %for.inc13, %entry
   %indvars.iv = phi i64 [ %indvars.iv.next, %for.inc13 ], [ 0, %entry ]
   %lftr.wideiv = trunc i64 %indvars.iv to i32
-  %exitcond1 = icmp ne i32 %lftr.wideiv, 8192
+  %exitcond1 = icmp ne i32 %lftr.wideiv, 65536
   br i1 %exitcond1, label %for.body, label %for.end15
 
 for.body:                                         ; preds = %for.cond
@@ -71,26 +71,26 @@ for.body:                                         ; preds = %for.cond
 
 for.cond1:                                        ; preds = %for.inc, %for.body
   %j.0 = phi i32 [ 0, %for.body ], [ %inc, %for.inc ]
-  %exitcond = icmp ne i32 %j.0, 8192
+  %exitcond = icmp ne i32 %j.0, 65536
   br i1 %exitcond, label %for.body3, label %for.end
 
 for.body3:                                        ; preds = %for.cond1
-  %arrayidx = getelementptr inbounds [8192 x i64]* @A, i64 0, i64 %indvars.iv
+  %arrayidx = getelementptr inbounds [65536 x i64]* @A, i64 0, i64 %indvars.iv
   %tmp = load i64* %arrayidx, align 8
   %tmp2 = load i64* @sum1, align 8
   %add = add i64 %tmp2, %tmp
   store i64 %add, i64* @sum1, align 8
-  %arrayidx5 = getelementptr inbounds [8192 x i64]* @B, i64 0, i64 %indvars.iv
+  %arrayidx5 = getelementptr inbounds [65536 x i64]* @B, i64 0, i64 %indvars.iv
   %tmp3 = load i64* %arrayidx5, align 8
   %tmp4 = load i64* @sum2, align 8
   %add6 = add i64 %tmp4, %tmp3
   store i64 %add6, i64* @sum2, align 8
-  %arrayidx8 = getelementptr inbounds [8192 x i64]* @A, i64 0, i64 %indvars.iv
+  %arrayidx8 = getelementptr inbounds [65536 x i64]* @A, i64 0, i64 %indvars.iv
   %tmp5 = load i64* %arrayidx8, align 8
   %tmp6 = load i64* @mul1, align 8
   %mul = mul i64 %tmp6, %tmp5
   store i64 %mul, i64* @mul1, align 8
-  %arrayidx10 = getelementptr inbounds [8192 x i64]* @B, i64 0, i64 %indvars.iv
+  %arrayidx10 = getelementptr inbounds [65536 x i64]* @B, i64 0, i64 %indvars.iv
   %tmp7 = load i64* %arrayidx10, align 8
   %tmp8 = load i64* @mul2, align 8
   %mul11 = mul i64 %tmp8, %tmp7
@@ -124,7 +124,7 @@ entry:
 for.cond:                                         ; preds = %for.inc, %entry
   %indvars.iv = phi i64 [ %indvars.iv.next, %for.inc ], [ 0, %entry ]
   %lftr.wideiv = trunc i64 %indvars.iv to i32
-  %exitcond = icmp ne i32 %lftr.wideiv, 8192
+  %exitcond = icmp ne i32 %lftr.wideiv, 65536
   br i1 %exitcond, label %for.body, label %for.end
 
 for.body:                                         ; preds = %for.cond
@@ -132,55 +132,55 @@ for.body:                                         ; preds = %for.cond
   %tmp3 = trunc i64 %tmp to i32
   %rem = srem i32 %tmp3, 1000
   %conv = sext i32 %rem to i64
-  %arrayidx = getelementptr inbounds [8192 x i64]* @A, i64 0, i64 %indvars.iv
+  %arrayidx = getelementptr inbounds [65536 x i64]* @A, i64 0, i64 %indvars.iv
   store i64 %conv, i64* %arrayidx, align 8
   %tmp4 = mul i64 %indvars.iv, 3234
   %tmp5 = trunc i64 %tmp4 to i32
   %rem3 = srem i32 %tmp5, 500
   %conv4 = sext i32 %rem3 to i64
-  %arrayidx6 = getelementptr inbounds [8192 x i64]* @B, i64 0, i64 %indvars.iv
+  %arrayidx6 = getelementptr inbounds [65536 x i64]* @B, i64 0, i64 %indvars.iv
   store i64 %conv4, i64* %arrayidx6, align 8
-  %arrayidx8 = getelementptr inbounds [8192 x i64]* @A, i64 0, i64 %indvars.iv
+  %arrayidx8 = getelementptr inbounds [65536 x i64]* @A, i64 0, i64 %indvars.iv
   %tmp6 = load i64* %arrayidx8, align 8
   %rem9 = and i64 %tmp6, 1
   %cmp10 = icmp eq i64 %rem9, 0
   br i1 %cmp10, label %cond.true, label %cond.false
 
 cond.true:                                        ; preds = %for.body
-  %arrayidx13 = getelementptr inbounds [8192 x i64]* @A, i64 0, i64 %indvars.iv
+  %arrayidx13 = getelementptr inbounds [65536 x i64]* @A, i64 0, i64 %indvars.iv
   %tmp7 = load i64* %arrayidx13, align 8
   %add = add i64 %tmp7, 1
   br label %cond.end
 
 cond.false:                                       ; preds = %for.body
-  %arrayidx15 = getelementptr inbounds [8192 x i64]* @A, i64 0, i64 %indvars.iv
+  %arrayidx15 = getelementptr inbounds [65536 x i64]* @A, i64 0, i64 %indvars.iv
   %tmp8 = load i64* %arrayidx15, align 8
   br label %cond.end
 
 cond.end:                                         ; preds = %cond.false, %cond.true
   %cond = phi i64 [ %add, %cond.true ], [ %tmp8, %cond.false ]
-  %arrayidx17 = getelementptr inbounds [8192 x i64]* @A, i64 0, i64 %indvars.iv
+  %arrayidx17 = getelementptr inbounds [65536 x i64]* @A, i64 0, i64 %indvars.iv
   store i64 %cond, i64* %arrayidx17, align 8
-  %arrayidx19 = getelementptr inbounds [8192 x i64]* @B, i64 0, i64 %indvars.iv
+  %arrayidx19 = getelementptr inbounds [65536 x i64]* @B, i64 0, i64 %indvars.iv
   %tmp9 = load i64* %arrayidx19, align 8
   %rem20 = and i64 %tmp9, 1
   %cmp21 = icmp eq i64 %rem20, 0
   br i1 %cmp21, label %cond.true23, label %cond.false27
 
 cond.true23:                                      ; preds = %cond.end
-  %arrayidx25 = getelementptr inbounds [8192 x i64]* @B, i64 0, i64 %indvars.iv
+  %arrayidx25 = getelementptr inbounds [65536 x i64]* @B, i64 0, i64 %indvars.iv
   %tmp10 = load i64* %arrayidx25, align 8
   %add26 = add i64 %tmp10, 1
   br label %cond.end30
 
 cond.false27:                                     ; preds = %cond.end
-  %arrayidx29 = getelementptr inbounds [8192 x i64]* @B, i64 0, i64 %indvars.iv
+  %arrayidx29 = getelementptr inbounds [65536 x i64]* @B, i64 0, i64 %indvars.iv
   %tmp11 = load i64* %arrayidx29, align 8
   br label %cond.end30
 
 cond.end30:                                       ; preds = %cond.false27, %cond.true23
   %cond31 = phi i64 [ %add26, %cond.true23 ], [ %tmp11, %cond.false27 ]
-  %arrayidx33 = getelementptr inbounds [8192 x i64]* @B, i64 0, i64 %indvars.iv
+  %arrayidx33 = getelementptr inbounds [65536 x i64]* @B, i64 0, i64 %indvars.iv
   store i64 %cond31, i64* %arrayidx33, align 8
   br label %for.inc
 

@@ -280,9 +280,8 @@ void OMPGenerator::extractValuesFromStruct(SetVector<Value *> OldValues,
 
 void OMPGenerator::createThreadLocalReductionPointers(ValueToValueMapTy &Map,
                                                       ValueToValueMapTy &RMap,
-                                                      AccessPointerMapT &AMap) {
-
-  ReductionHandler &RH = P->getAnalysis<ReductionHandler>();
+                                                      AccessPointerMapT &AMap,
+                                                      ReductionHandler &RH) {
   for (ValueToValueMapTy::iterator I = RMap.begin(), E = RMap.end();
        I != E; ++I) {
     Value *LocalReductionPointer = 0;
@@ -295,10 +294,8 @@ void OMPGenerator::createThreadLocalReductionPointers(ValueToValueMapTy &Map,
     if (RedInst && RH.isMappedToReductionAccess(RedInst)) {
       const ReductionAccess &RA = RH.getReductionAccess(RedInst);
 
-      assert(RA.hasAtomicRMWInstBinOp() &&
-             "Invalid reduction access pointer mapping");
       LocalReductionPointer = Builder.CreateAlloca(ReductionPointerType, 0,
-                                                   "ThreadLocalReductionPtr");
+                               RA.getBaseValue()->getName() + ".thread.local");
       Builder.CreateStore(RA.getIdentityElement(ReductionPointerType),
                           LocalReductionPointer);
 
@@ -381,9 +378,12 @@ Value *OMPGenerator::createSubfunction(Value *Stride, Value *StructData,
 
   extractValuesFromStruct(Data, UserContext, Map);
 
+  // Notify the reduction handler about the new sub-function
+  ReductionHandler &RH = P->getAnalysis<ReductionHandler>();
+  RH.setSubFunction(Builder, ExitBB);
   // Create thread local reduction pointers after we extracted the values
   AccessPointerMapT AMap;
-  createThreadLocalReductionPointers(Map, RMap, AMap);
+  createThreadLocalReductionPointers(Map, RMap, AMap, RH);
 
   Builder.CreateBr(CheckNextBB);
 
@@ -422,11 +422,9 @@ Value *OMPGenerator::createSubfunction(Value *Stride, Value *StructData,
       const ReductionAccess *RA = I->first;
       Value   *ReductionPointer = I->second;
       Value    *ReductionAlloca = Map[ReductionPointer];
-      Value *AtomicReload = Builder.CreateLoad(ReductionAlloca,
-                                               "red.alloca.reload");
-      Builder.CreateAtomicRMW(RA->getAtomicRMWInstBinOp(),
-                              ReductionPointer, AtomicReload,
-                              AtomicOrdering::Monotonic);
+      Value       *AtomicReload = Builder.CreateLoad(ReductionAlloca,
+                                                     "red.alloca.reload");
+      RA->createAtomicBinOp(AtomicReload, ReductionPointer, Builder);
   }
 
   Builder.CreateRetVoid();

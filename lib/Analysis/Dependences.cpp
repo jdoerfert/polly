@@ -126,7 +126,7 @@ void Dependences::calculateDependences(Scop &S) {
 bool Dependences::runOnScop(Scop &S) {
   releaseMemory();
   calculateDependences(S);
-
+  printScop(errs());
   return false;
 }
 
@@ -201,11 +201,16 @@ bool Dependences::isParallelDimension(__isl_take isl_set *ScheduleSubset,
   // o Calculate distances of the dependences.
   // o Check if one of the distances is invalid in presence of parallelism.
 
+  //errs() << "IsParallel: " << ParallelDim << "\n";
+
   isl_union_map *Schedule, *Deps;
   isl_map *ScheduleDeps;
   Scop *S = &getCurScop();
 
   Deps = getDependences(TYPE_ALL);
+
+  errs() << "Deps: ";
+  isl_union_map_dump(Deps);
 
   if (isl_union_map_is_empty(Deps)) {
     isl_union_map_free(Deps);
@@ -214,12 +219,27 @@ bool Dependences::isParallelDimension(__isl_take isl_set *ScheduleSubset,
   }
 
   Schedule = getCombinedScheduleForSpace(S, ParallelDim);
+
+  //errs() << "Schedule: ";
+  //isl_union_map_dump(Schedule);
+
   Deps = isl_union_map_apply_range(Deps, isl_union_map_copy(Schedule));
   Deps = isl_union_map_apply_domain(Deps, Schedule);
+
+  //errs() << "Deps: ";
+  //isl_union_map_dump(Deps);
+
   ScheduleDeps = isl_map_from_union_map(Deps);
   ScheduleDeps =
       isl_map_intersect_domain(ScheduleDeps, isl_set_copy(ScheduleSubset));
+
+  //errs() << "ScheduleDeps: ";
+  //isl_map_dump(ScheduleDeps);
+
   ScheduleDeps = isl_map_intersect_range(ScheduleDeps, ScheduleSubset);
+
+  //errs() << "ScheduleDeps: ";
+  //isl_map_dump(ScheduleDeps);
 
   isl_set *Distances = isl_map_deltas(ScheduleDeps);
   isl_space *Space = isl_set_get_space(Distances);
@@ -231,6 +251,11 @@ bool Dependences::isParallelDimension(__isl_take isl_set *ScheduleSubset,
 
   Invalid = isl_set_lower_bound_si(Invalid, isl_dim_set, ParallelDim - 1, 1);
   Invalid = isl_set_intersect(Invalid, Distances);
+
+  //errs() << "Invalid: ";
+  //isl_set_dump(Invalid);
+  //errs() << "Empty: " << isl_set_is_empty(Invalid);
+  //errs() << "\n\n";
 
   bool IsParallel = isl_set_is_empty(Invalid);
   isl_set_free(Invalid);

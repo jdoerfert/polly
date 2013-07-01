@@ -16,6 +16,7 @@
 #ifdef PLUTO_FOUND
 #include "polly/CodeGen/CodeGeneration.h"
 #include "polly/Dependences.h"
+#include "polly/ReductionHandler.h"
 #include "polly/LinkAllPasses.h"
 #include "polly/Options.h"
 #include "polly/ScopInfo.h"
@@ -111,6 +112,7 @@ bool PlutoOptimizer::runOnScop(Scop &S) {
   int counter = 0;
   for (Scop::iterator SI = S.begin(), SE = S.end(); SI != SE; ++SI) {
     ScopStmt *Stmt = *SI;
+    Stmt->dump();
     std::string Name = "S_" + convertInt(counter);
     isl_map *Identity = isl_map_identity(isl_space_map_from_domain_and_range(
         Stmt->getDomainSpace(), Stmt->getDomainSpace()));
@@ -126,6 +128,9 @@ bool PlutoOptimizer::runOnScop(Scop &S) {
   Options = pluto_options_alloc();
   Options->fuse = 0;
   Options->tile = EnableTiling;
+  Options->parallel = 1;
+  Options->innerpar = 1;
+
 
   DEBUG(dbgs() << "Domain: " << stringFromIslObj(Domain) << "\n";
         dbgs() << "Dependences: " << stringFromIslObj(Deps) << "\n";);
@@ -168,6 +173,7 @@ void PlutoOptimizer::printScop(raw_ostream &OS) const {}
 
 void PlutoOptimizer::getAnalysisUsage(AnalysisUsage &AU) const {
   ScopPass::getAnalysisUsage(AU);
+  AU.addRequired<ReductionHandler>();
   AU.addRequired<Dependences>();
 }
 
@@ -176,6 +182,7 @@ Pass *polly::createPlutoOptimizerPass() { return new PlutoOptimizer(); }
 INITIALIZE_PASS_BEGIN(PlutoOptimizer, "polly-opt-pluto",
                       "Polly - Optimize schedule of SCoP (Pluto)", false,
                       false);
+INITIALIZE_PASS_DEPENDENCY(ReductionHandler);
 INITIALIZE_PASS_DEPENDENCY(Dependences);
 INITIALIZE_PASS_DEPENDENCY(ScopInfo);
 INITIALIZE_PASS_END(PlutoOptimizer, "polly-opt-pluto",

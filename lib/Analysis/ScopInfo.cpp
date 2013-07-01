@@ -596,7 +596,7 @@ ScopStmt::ScopStmt(Scop &Parent, ScopStmt *Template,
   : Parent(Parent), BB(NULL), IVS(Dim), NestLoops(Dim), ReductionLoop(RLoop) {
 
   Type     = (Prepare ? REDUCTION_PREPARE : REDUCTION_FIXUP);
-  BaseName = (Prepare ? "RedPrep" : "RedFix");
+  BaseName =  (RLoop->getHeader()->getName().str() + "." +(Prepare ? "RedPrep" : "RedFix"));
 
   assert(ReductionLoop && "Each reduction statement needs a reduction loop");
   assert(Dim <= Template->getNumIterators() && "Not enough dimensions to copy");
@@ -921,12 +921,15 @@ isl_ctx *Scop::getIslCtx() const { return IslCtx; }
 __isl_give isl_union_set *Scop::getDomains() {
   isl_union_set *Domain = NULL;
 
-  for (Scop::iterator SI = begin(), SE = end(); SI != SE; ++SI)
+  for (Scop::iterator SI = begin(), SE = end(); SI != SE; ++SI) {
+    //if ((*SI)->isReductionStatement())
+      //continue;
     if (!Domain)
       Domain = isl_union_set_from_set((*SI)->getDomain());
     else
       Domain = isl_union_set_union(Domain,
                                    isl_union_set_from_set((*SI)->getDomain()));
+  }
 
   return Domain;
 }

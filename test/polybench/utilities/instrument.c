@@ -16,7 +16,6 @@
 double polybench_t_start, polybench_t_end;
 
 static
-inline
 double rtclock()
 {
     struct timezone Tzp;
@@ -28,7 +27,6 @@ double rtclock()
     return (Tp.tv_sec + Tp.tv_usec * 1.0e-6);
 }
 
-inline
 void polybench_flush_cache()
 {
   int cs = POLYBENCH_CACHE_SIZE_KB * 1024 / sizeof(double);
@@ -42,7 +40,6 @@ void polybench_flush_cache()
 }
 
 #ifdef POLYBENCH_LINUX_FIFO_SCHEDULER
-inline
 void polybench_linux_fifo_scheduler()
 {
   /* Use FIFO scheduler to limit OS interference. Program must be run
@@ -52,7 +49,6 @@ void polybench_linux_fifo_scheduler()
   sched_setscheduler(0, SCHED_FIFO, &schedParam);
 }
 
-inline
 void polybench_linux_standard_scheduler()
 {
   /* Restore to standard scheduler policy. */

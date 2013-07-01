@@ -62,4 +62,4 @@ INITIALIZE_AG_PASS(NoRI, ReductionInfo, "polly-no-ri",
                    "Polly - No Reduction Info",
                    true, true, false)
 
-ImmutablePass *createNoRIPass() { return new NoRI(); }
+Pass *polly::createNoRIPass() { return new NoRI(); }

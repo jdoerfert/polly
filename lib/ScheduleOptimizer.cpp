@@ -288,6 +288,11 @@ isl_union_map *IslScheduleOptimizer::getScheduleForBand(isl_band *Band,
   if (DisableTiling)
     return PartialSchedule;
 
+  errs() << "\n\n\n Dimensions: " << *Dimensions << "\n";
+  isl_band_dump(Band);
+  isl_union_map_dump(PartialSchedule);
+
+
   // It does not make any sense to tile a band with just one dimension.
   if (*Dimensions == 1)
     return PartialSchedule;
@@ -296,6 +301,8 @@ isl_union_map *IslScheduleOptimizer::getScheduleForBand(isl_band *Band,
   Space = isl_union_map_get_space(PartialSchedule);
 
   TileMap = getTileMap(ctx, *Dimensions, Space);
+  isl_band_dump(Band);
+  isl_basic_map_dump(TileMap);
   TileUMap = isl_union_map_from_map(isl_map_from_basic_map(TileMap));
   TileUMap = isl_union_map_align_params(TileUMap, Space);
   *Dimensions = 2 * *Dimensions;
@@ -511,6 +518,9 @@ bool IslScheduleOptimizer::runOnScop(Scop &S) {
   isl_options_set_schedule_maximize_band_depth(S.getIslCtx(), IslMaximizeBands);
   isl_options_set_schedule_max_constant_term(S.getIslCtx(), MaxConstantTerm);
   isl_options_set_schedule_max_coefficient(S.getIslCtx(), MaxCoefficient);
+  isl_options_set_schedule_algorithm(S.getIslCtx(), ISL_SCHEDULE_ALGORITHM_FEAUTRIER);
+  dbgs() << "ISL SCHEDULE ALGO: "
+         << isl_options_get_schedule_algorithm(S.getIslCtx()) << "\n";
 
   isl_options_set_on_error(S.getIslCtx(), ISL_ON_ERROR_CONTINUE);
   isl_schedule *Schedule;

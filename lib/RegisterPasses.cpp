@@ -282,7 +282,8 @@ static void registerPollyPasses(llvm::PassManagerBase &PM) {
 
   switch (ReductionDetection) {
   case NO_RI:
-    break; /* Do nothing */
+    PM.add(polly::createNoRIPass());
+    break;
 
   case BASIC_RI:
     PM.add(polly::createBasicReductionInfoPass());
@@ -290,8 +291,10 @@ static void registerPollyPasses(llvm::PassManagerBase &PM) {
   }
 
   // If we use a meaningful reduction detection we enable reduction handling
-  if (ReductionDetection != NO_RI)
-    PM.add(polly::createReductionHandlerPass());
+  //if (ReductionDetection != NO_RI) {
+    //PM.add(polly::createReductionHandlerPass());
+    //PM.add(polly::createDependencesPass());
+  //}
 
   switch (Optimizer) {
   case OPTIMIZER_NONE:
@@ -312,6 +315,11 @@ static void registerPollyPasses(llvm::PassManagerBase &PM) {
   case OPTIMIZER_ISL:
     PM.add(polly::createIslScheduleOptimizerPass());
     break;
+  }
+
+  if (ReductionDetection != NO_RI) {
+    PM.add(polly::createReductionHandlerPass());
+    PM.add(polly::createDependencesPass());
   }
 
   if (ExportJScop)

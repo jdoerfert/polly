@@ -27,6 +27,7 @@ class BasicBlock;
 namespace polly {
 
 class ReductionAccess;
+class ReductionHandler;
 
 using namespace llvm;
 
@@ -115,6 +116,7 @@ private:
   /// @param Map  The mappings from the OpenMP struct
   /// @param RMap The preperation map with reduction pointers as keys
   /// @param AMap Map from reduction accesses to reduction pointers
+  /// @param RH   The reduction handler
   ///
   /// @returns New mappings from vector pointers to thread local reduction
   ///          variables are inserted in @p Map. In case local allocas are
@@ -124,7 +126,8 @@ private:
   /// a thread local stack slot.
   void createThreadLocalReductionPointers(ValueToValueMapTy &Map,
                                           ValueToValueMapTy &RMap,
-                                          AccessPointerMapT &AMap);
+                                          AccessPointerMapT &AMap,
+                                          ReductionHandler &RH);
 
   /// @brief Create the OpenMP subfunction.
   ///

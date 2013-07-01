@@ -20,6 +20,7 @@
 #include "llvm/IR/BasicBlock.h"
 #include "llvm/IR/Instruction.h"
 #include "llvm/IR/Instructions.h"
+#include "llvm/IR/IRBuilder.h"
 
 namespace llvm {
   class Loop;
@@ -69,8 +70,10 @@ public:
   ///
   /// Commutative and associative binary operations
   enum ReductionType {
-    ADD,            ///< Addition
-    MUL,            ///< Multiplication
+    ADD,            ///< Integer Addition
+    MUL,            ///< Integer Multiplication
+    FADD,           ///< Floating Point Addition
+    FMUL,           ///< Floating Point Multiplication
     MAX,            ///< Maximum computation (TODO)
     MIN,            ///< Minimum computation (TODO)
   };
@@ -98,11 +101,19 @@ public:
   llvm::Instruction *getBinaryOperation(llvm::Value *S1, llvm::Value *S2,
                                         llvm::BasicBlock::iterator IP) const;
 
-  /// @brief Test if there is a matching AtomicRMWInst binary operation type
-  bool hasAtomicRMWInstBinOp() const;
-
-  /// @brief Get the matching AtomicRMWInst binary operation type
-  llvm::AtomicRMWInst::BinOp getAtomicRMWInstBinOp() const;
+  /// @brief Create an atomic read-modify-write binary operation
+  ///
+  /// @param Val     The value operand
+  /// @param Ptr     The pointer operand
+  /// @param Builder The instruction builder
+  /// @param Pass    The current pass to update available analyses
+  ///
+  /// Creates Instruction(s) using @p Builder to compute:
+  ///   *Pointer := *Pointer Type Value
+  /// atomically
+  void createAtomicBinOp(llvm::Value *Val, llvm::Value *Ptr,
+                         llvm::IRBuilder<> &Builder,
+                         llvm::Pass *P = 0) const;
 
 private:
 
@@ -123,6 +134,11 @@ private:
   ReductionAccess(const llvm::Value *BaseValue,
                   const llvm::Loop  *ReductionLoop,
                   llvm::Instruction::BinaryOps BinOpcode);
+
+  /// @brief Get the AtomicRMWInst binary opcode matching the reduction type
+  ///
+  /// This might fail if no such opcode exists
+  llvm::AtomicRMWInst::BinOp getAtomicRMWInstBinOp() const;
 
   /// @brief The base value
   ///

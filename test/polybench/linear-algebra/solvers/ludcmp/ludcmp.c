@@ -38,7 +38,7 @@ DATA_TYPE* b = (DATA_TYPE*)malloc((N + 1) * sizeof(DATA_TYPE));
 }
 #endif
 
-inline
+
 void init_array()
 {
   int i, j;
@@ -54,7 +54,7 @@ void init_array()
 
 /* Define the live-out variables. Code is not executed unless
    POLYBENCH_DUMP_ARRAYS is defined. */
-inline
+
 void print_array(int argc, char** argv)
 {
   int i, j;
@@ -143,3 +143,5 @@ int main(int argc, char** argv)
 
   return 0;
 }
+
+

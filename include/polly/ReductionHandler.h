@@ -144,6 +144,9 @@ class ReductionHandler : public ScopPass {
   LoopInfo      *LI;
   ReductionInfo *RI;
 
+  /// @brief Entry and exit block of the current subfunction
+  BasicBlock *SubFnExitBB;
+
   /// @brief Set of detected reduction accesses
   typedef DenseSet<const ReductionAccess *> ReductionSetT;
   ReductionSetT ReductionSet;
@@ -153,10 +156,14 @@ class ReductionHandler : public ScopPass {
   typedef llvm::DenseMap<const llvm::Loop *, StmtPair> LoopStatementMap;
   LoopStatementMap LoopRedStmts;
 
+  /// @brief Map to change reduction prepare statements for OpenMP sub-functions
+  typedef DenseMap<const ScopStmt *, BasicBlock *> SubFnRemappingT;
+  SubFnRemappingT SubFnRemapping;
+
   /// @brief Map from old pointers to new reduction pointers
   typedef DenseMap<const Value *, AllocaInst *> PointerToVecMapT;
   /// @brief Per reduction prepare statement 'pointer to vector' map
-  typedef DenseMap<const ScopStmt *, PointerToVecMapT> ReductionPointerMapT;
+  typedef DenseMap<const BasicBlock *, PointerToVecMapT> ReductionPointerMapT;
   ReductionPointerMapT ReductionPointers;
 
   /// @brief Map reduction access instructions to reduction prepare statements
@@ -165,6 +172,7 @@ class ReductionHandler : public ScopPass {
 
   /// @brief Helper function to get a pointer value
   const Value *getPointerValue(const Instruction *Inst);
+
 
   /// @brief Internal interface to model reduction dependences
   //@{
@@ -229,9 +237,11 @@ class ReductionHandler : public ScopPass {
   /// @brief Create a new memory access and add it to the given SCoP statement
   ///
   /// @param Stmt The parent SCoP statement for the new memory access
+  /// @param dim TODO
+  /// @param free TODO
   ///
   /// A new 'fresh' matrix will be accessed, thus no dependences are introduced
-  void insertFreshMemoryAccess(ScopStmt *Stmt);
+  void insertFreshMemoryAccess(ScopStmt *Stmt, int dim = -1, int free = 0);
 
   /// @brief Create a new reduction statement from the given template
   ///
@@ -257,11 +267,25 @@ class ReductionHandler : public ScopPass {
 
   //@}
 
+  /// @brief TODO
+  //@{
+
+  /// @brief TODO
+  void aggregateReductionResult(llvm::Value *Pointer,
+                                llvm::Value *VecPointer,
+                                llvm::IRBuilder<> &Builder,
+                                llvm::Type *ScalarType,
+                                const ReductionAccess &RA,
+                                unsigned VectorDim);
+
+  //@}
+
 public:
   static char ID;
 
   explicit ReductionHandler() : ScopPass(ID) {}
   ~ReductionHandler() {}
+
 
   /// @brief ScopPass interface
   //@{
@@ -297,19 +321,21 @@ public:
   llvm::Value *getReductionVecPointer(const llvm::Instruction *Inst,
                                       unsigned VectorWidth);
 
-
   /// @brief Aggregate the reduction vectors defined in a prepare statement
   ///
-  /// @param Builder  A LLVM-IR builder
-  /// @param PrepStmt The prepare statement
-  /// @param ValueMap A mapping from old to new values
+  /// @param Builder     A LLVM-IR builder
+  /// @param PrepareStmt The reduction prepare statements
+  /// @param ValueMap    A mapping from old to new values
   ///
   /// Using the @p Builder a binary tree is constructed which combines the
   /// elements in the reduction vector. The final result is stored at the
   /// new value for the reduction base value.
-  void createReductionResult(llvm::IRBuilder<> &Builder, ScopStmt *PrepStmt,
+  void createReductionResult(llvm::IRBuilder<> &Builder,
+                             const ScopStmt *PrepareStmt,
                              ValueMapT &ValueMap);
+
   //@}
+
 
   /// @brief Parallel code generation interface
   //@{
@@ -320,7 +346,19 @@ public:
   /// @brief Get the reduction access for a given instruction
   const ReductionAccess& getReductionAccess(const llvm::Instruction *Inst);
 
+  /// @brief Inform the reduction handler about a new sub-function
+  ///
+  /// @param Builder An LLVM-IR builder to the sub-function entry block
+  /// @param ExitBB  The sub-function exit block
+  ///
+  /// TODO
+  void setSubFunction(IRBuilder<> &Builder, BasicBlock *ExitBB);
+
+  /// @brief Clear the last sub-function
+  void unsetSubFunction(ValueMapT &ValueMap);
+
   //@}
+
 
 };
 

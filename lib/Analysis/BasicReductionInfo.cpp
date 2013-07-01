@@ -36,6 +36,7 @@
 #include "llvm/IR/Instructions.h"
 #include "llvm/Analysis/LoopInfo.h"
 #include "llvm/ADT/STLExtras.h"
+#include "llvm/Analysis/ScalarEvolution.h"
 
 #define DEBUG_TYPE "polly-basic-ri"
 #include "llvm/Support/Debug.h"
@@ -65,6 +66,7 @@ namespace {
 
     /// We need LoopInfo to find maximal reduction loops
     LoopInfo *LI;
+    ScalarEvolution *SE;
 
     /// Container for identified reduction accesses
     typedef std::pair<const Value *, const Loop *> ReductionLocation;
@@ -82,11 +84,13 @@ namespace {
     virtual void getAnalysisUsage(AnalysisUsage &AU) const {
       ScopPass::getAnalysisUsage(AU);
       AU.addRequired<LoopInfo>();
+      AU.addRequired<ScalarEvolution>();
       AU.setPreservesAll();
     }
 
     bool runOnScop(Scop &S) {
       LI = &getAnalysis<LoopInfo>();
+      SE = &getAnalysis<ScalarEvolution>();
       return false;
     }
 
@@ -305,6 +309,7 @@ namespace {
         return ReductionAccesses[RL];
       }
 
+      dbgs() << *BinOp << "\n\n";
       // Otherwise, use the generator of the ReductionInfo class to
       // create a new reduction access which will be cached and returned
       const ReductionAccess *RA = createReductionAccess(BaseValue,
@@ -405,6 +410,12 @@ namespace {
         BRI_INVALID(LOOP);
       }
 
+      dbgs() << *CurrentLoop  << "\n";
+      const SCEV *BaseSCEV = SE->getSCEV(const_cast<Value*>(Producer->getPointerOperand()));
+      dbgs() << "BASE SCEV: " << *BaseSCEV << "\n";
+      bool BaseValueIsLoopInv = SE->isLoopInvariant(BaseSCEV, CurrentLoop);
+      dbgs() << "BASE value is loopinv: " << BaseValueIsLoopInv << "\n";
+
       // If there is an invalid use of the pointer operand within the
       // current loop we need to consider a smaller loop
       const Instruction *InvalidUse = 0;
@@ -426,7 +437,7 @@ namespace {
 
       // If no invalid use was found we are done and the current loop is
       // the maximal reduction loop we are looking for
-      if (!InvalidUse)
+      if (!InvalidUse && BaseValueIsLoopInv)
         return CurrentLoop;
 
       // Otherwise, we try to get the maximal loop not containing
@@ -434,7 +445,8 @@ namespace {
       // This might fail if there is no loop around the producer or if the
       // smallest loop contains the invalid use.
       const Loop *NewLoop = LI->getLoopFor(Producer->getParent());
-      if (!NewLoop || NewLoop->contains(InvalidUse)) {
+      if (!NewLoop || (InvalidUse && NewLoop->contains(InvalidUse)) ||
+          !SE->isLoopInvariant(BaseSCEV, NewLoop)) {
         BRI_DEBUG("No reduction loop possible");
         BRI_INVALID(LOOP);
       }
@@ -445,7 +457,9 @@ namespace {
 
         // But stop the bottom up search when the current loop was found or
         // the invalid use is contained
-        if (CurrentLoop == TmpLoop || TmpLoop->contains(InvalidUse))
+        if (CurrentLoop == TmpLoop ||
+            (InvalidUse && TmpLoop->contains(InvalidUse)) ||
+            !SE->isLoopInvariant(BaseSCEV, TmpLoop))
           break;
 
         NewLoop = TmpLoop;
@@ -469,6 +483,7 @@ INITIALIZE_AG_PASS_BEGIN(BasicReductionInfo, ReductionInfo,
                          "Polly - Basic Reduction Info",
                          false, true, true)
 INITIALIZE_PASS_DEPENDENCY(LoopInfo)
+INITIALIZE_PASS_DEPENDENCY(ScalarEvolution)
 INITIALIZE_AG_PASS_END(BasicReductionInfo, ReductionInfo,
                        "polly-basic-ri",
                        "Polly - Basic Reduction Info",
