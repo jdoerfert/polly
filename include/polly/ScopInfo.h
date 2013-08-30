@@ -60,11 +60,6 @@ class Comparison;
 //===----------------------------------------------------------------------===//
 /// @brief Represent memory accesses in statements.
 class MemoryAccess {
-  // DO NOT IMPLEMENT
-  MemoryAccess(const MemoryAccess &);
-  // DO NOT IMPLEMENT
-  const MemoryAccess &operator=(const MemoryAccess &);
-
 public:
   /// @brief The access type of a memory access
   ///
@@ -75,24 +70,29 @@ public:
   /// A certain set of memory locations are read and may be used for internal
   /// calculations.
   ///
-  /// * A write access
+  /// * A must-write access
   ///
   /// A certain set of memory locactions is definitely written. The old value is
   /// replaced by a newly calculated value. The old value is not read or used at
   /// all.
   ///
-  /// * A may write access
+  /// * A may-write access
   ///
   /// A certain set of memory locactions may be written. The memory location may
   /// contain a new value if there is actually a write or the old value may
   /// remain, if no write happens.
   enum AccessType {
-    Read,
-    Write,
-    MayWrite
+    READ,
+    MUST_WRITE,
+    MAY_WRITE
   };
 
 private:
+  // DO NOT IMPLEMENT
+  MemoryAccess(const MemoryAccess &);
+  // DO NOT IMPLEMENT
+  const MemoryAccess &operator=(const MemoryAccess &);
+
   isl_map *AccessRelation;
   enum AccessType Type;
 
@@ -141,11 +141,22 @@ public:
 
   ~MemoryAccess();
 
+  /// @brief Get the type of a memory access.
+  enum AccessType getType() { return Type; }
+
   /// @brief Is this a read memory access?
-  bool isRead() const { return Type == MemoryAccess::Read; }
+  bool isRead() const { return Type == MemoryAccess::READ; }
+
+  /// @brief Is this a must-write memory access?
+  bool isMustWrite() const { return Type == MemoryAccess::MUST_WRITE; }
+
+  /// @brief Is this a may-write memory access?
+  bool isMayWrite() const { return Type == MemoryAccess::MAY_WRITE; }
 
   /// @brief Is this a write memory access?
-  bool isWrite() const { return Type == MemoryAccess::Write; }
+  bool isWrite() const {
+    return Type == MemoryAccess::MUST_WRITE || Type == MemoryAccess::MAY_WRITE;
+  }
 
   /// @brief Get the original access type for this memory access
   ///
@@ -402,8 +413,10 @@ public:
   /// @return The BasicBlock represented by this ScopStmt.
   BasicBlock *getBasicBlock() const { return BB; }
 
-  MemoryAccess &getAccessFor(const Instruction *Inst) {
-    return *InstructionToAccess[Inst];
+  const MemoryAccess &getAccessFor(const Instruction *Inst) const {
+    MemoryAccess *A = lookupAccessFor(Inst);
+    assert(A && "Cannot get memory access because it does not exist!");
+    return *A;
   }
 
   MemoryAccess *lookupAccessFor(const Instruction *Inst) const {
@@ -742,7 +755,7 @@ public:
   //@}
 };
 
-} //end namespace polly
+} // end namespace polly
 
 namespace llvm {
 class PassRegistry;

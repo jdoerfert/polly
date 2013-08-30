@@ -22,7 +22,9 @@
 #include "llvm/Analysis/RegionPass.h"
 #include "llvm/IR/Instructions.h"
 
-namespace llvm { class DataLayout; }
+namespace llvm {
+class DataLayout;
+}
 
 using namespace llvm;
 
@@ -72,6 +74,8 @@ public:
   bool isWrite() const { return Type & WRITE; }
 
   bool isScalar() const { return Type & SCALAR; }
+
+  void print(raw_ostream &OS) const;
 };
 
 class Comparison {
@@ -288,7 +292,10 @@ class TempScopInfo : public FunctionPass {
   ///
   /// @param Inst The instruction to be analyzed
   /// @param R    The SCoP region
-  void buildScalarDependences(Instruction *Inst, Region *R);
+  ///
+  /// @return     True if the Instruction is used in other BB and a scalar write
+  ///             Access is required.
+  bool buildScalarDependences(Instruction *Inst, Region *R);
 
   void buildAccessFunctions(Region &RefRegion, BasicBlock &BB);
 

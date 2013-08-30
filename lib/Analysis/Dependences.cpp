@@ -30,6 +30,9 @@
 #include <isl/map.h>
 #include <isl/set.h>
 
+#define DEBUG_TYPE "polly-dependence"
+#include "llvm/Support/Debug.h"
+
 using namespace polly;
 using namespace llvm;
 
@@ -38,10 +41,20 @@ LegalityCheckDisabled("disable-polly-legality",
                       cl::desc("Disable polly legality check"), cl::Hidden,
                       cl::init(false), cl::cat(PollyCategory));
 
-static cl::opt<bool>
-ValueDependences("polly-value-dependences",
-                 cl::desc("Use value instead of memory based dependences"),
-                 cl::Hidden, cl::init(true), cl::cat(PollyCategory));
+enum AnalysisType {
+  VALUE_BASED_ANALYSIS,
+  MEMORY_BASED_ANALYSIS
+};
+
+static cl::opt<enum AnalysisType> OptAnalysisType(
+    "polly-dependences-analysis-type",
+    cl::desc("The kind of dependence analysis to use"),
+    cl::values(clEnumValN(VALUE_BASED_ANALYSIS, "value-based",
+                          "Exact dependences without transitive dependences"),
+               clEnumValN(MEMORY_BASED_ANALYSIS, "memory-based",
+                          "Overapproximation of dependences"),
+               clEnumValEnd),
+    cl::Hidden, cl::init(VALUE_BASED_ANALYSIS), cl::cat(PollyCategory));
 
 //===----------------------------------------------------------------------===//
 Dependences::Dependences() : ScopPass(ID) { RAW = WAR = WAW = NULL; }
@@ -78,9 +91,20 @@ void Dependences::collectInfo(Scop &S, isl_union_map **Read,
 void Dependences::calculateDependences(Scop &S) {
   isl_union_map *Read, *Write, *MayWrite, *Schedule;
 
+  DEBUG(dbgs() << "Scop: " << S << "\n");
+
   collectInfo(S, &Read, &Write, &MayWrite, &Schedule);
 
-  if (ValueDependences) {
+  Read = isl_union_map_coalesce(Read);
+  Write = isl_union_map_coalesce(Write);
+  MayWrite = isl_union_map_coalesce(MayWrite);
+
+  DEBUG(dbgs() << "Read: " << Read << "\n";
+        dbgs() << "Write: " << Write << "\n";
+        dbgs() << "MayWrite: " << MayWrite << "\n";
+        dbgs() << "Schedule: " << Schedule << "\n");
+
+  if (OptAnalysisType == VALUE_BASED_ANALYSIS) {
     isl_union_map_compute_flow(
         isl_union_map_copy(Read), isl_union_map_copy(Write),
         isl_union_map_copy(MayWrite), isl_union_map_copy(Schedule), &RAW, NULL,
@@ -121,6 +145,8 @@ void Dependences::calculateDependences(Scop &S) {
   RAW = isl_union_map_coalesce(RAW);
   WAW = isl_union_map_coalesce(WAW);
   WAR = isl_union_map_coalesce(WAR);
+
+  DEBUG(printScop(dbgs()));
 }
 
 bool Dependences::runOnScop(Scop &S) {
@@ -264,15 +290,9 @@ bool Dependences::isParallelDimension(__isl_take isl_set *ScheduleSubset,
 }
 
 void Dependences::printScop(raw_ostream &OS) const {
-  std::string RAWString, WARString, WAWString;
-
-  RAWString = polly::stringFromIslObj(RAW);
-  WARString = polly::stringFromIslObj(WAR);
-  WAWString = polly::stringFromIslObj(WAW);
-
-  OS << "\tRAW dependences:\n\t\t" << RAWString << "\n";
-  OS << "\tWAR dependences:\n\t\t" << WARString << "\n";
-  OS << "\tWAW dependences:\n\t\t" << WAWString << "\n";
+  OS << "\tRAW dependences:\n\t\t" << RAW << "\n";
+  OS << "\tWAR dependences:\n\t\t" << WAR << "\n";
+  OS << "\tWAW dependences:\n\t\t" << WAW << "\n";
 }
 
 void Dependences::releaseMemory() {

@@ -159,18 +159,23 @@ BlockGenerator::BlockGenerator(IRBuilder<> &B, ScopStmt &Stmt, Pass *P)
     : Builder(B), Statement(Stmt), P(P), SE(P->getAnalysis<ScalarEvolution>()) {
 }
 
-Value *BlockGenerator::getNewValue(const Value *Old, ValueMapT &BBMap,
-                                   ValueMapT &GlobalMap, LoopToScevMapT &LTS,
-                                   Loop *L) {
+Value *BlockGenerator::lookupAvailableValue(const Value *Old, ValueMapT &BBMap,
+                                            ValueMapT &GlobalMap) const {
   // We can't assume constants never change. For reductions on global constants
   // we have a mapping from the constant to the local reduction vector.
-  ValueMapT::iterator GI = GlobalMap.find(Old), GE = GlobalMap.end();
-  if (GI == GE && isa<Constant>(Old))
+  //ValueMapT::iterator GI = GlobalMap.find(Old), GE = GlobalMap.end();
+  //if (GI == GE && isa<Constant>(Old))
+    //return const_cast<Value *>(Old);
+
+  //if (GI != GE) {
+    //Value *New = GI->second;
+
+  // We assume constants never change.
+  // This avoids map lookups for many calls to this function.
+  if (isa<Constant>(Old))
     return const_cast<Value *>(Old);
 
-  if (GI != GE) {
-    Value *New = GI->second;
-
+  if (Value *New = GlobalMap.lookup(Old)) {
     if (Old->getType()->getScalarSizeInBits() <
         New->getType()->getScalarSizeInBits())
       New = Builder.CreateTruncOrBitCast(New, Old->getType());
@@ -178,10 +183,26 @@ Value *BlockGenerator::getNewValue(const Value *Old, ValueMapT &BBMap,
     return New;
   }
 
-  if (BBMap.count(Old)) {
-    assert(BBMap[Old] && "BBMap[Old] should not be NULL!");
-    return BBMap[Old];
-  }
+  // Or it is probably a scop-constant value defined as global, function
+  // parameter or an instruction not within the scop.
+  if (isa<GlobalValue>(Old) || isa<Argument>(Old))
+    return const_cast<Value *>(Old);
+
+  if (const Instruction *Inst = dyn_cast<Instruction>(Old))
+    if (!Statement.getParent()->getRegion().contains(Inst->getParent()))
+      return const_cast<Value *>(Old);
+
+  if (Value *New = BBMap.lookup(Old))
+    return New;
+
+  return NULL;
+}
+
+Value *BlockGenerator::getNewValue(const Value *Old, ValueMapT &BBMap,
+                                   ValueMapT &GlobalMap, LoopToScevMapT &LTS,
+                                   Loop *L) {
+  if (Value *New = lookupAvailableValue(Old, BBMap, GlobalMap))
+    return New;
 
   if (SCEVCodegen && SE.isSCEVable(Old->getType()))
     if (const SCEV *Scev = SE.getSCEVAtScope(const_cast<Value *>(Old), L)) {
@@ -200,15 +221,10 @@ Value *BlockGenerator::getNewValue(const Value *Old, ValueMapT &BBMap,
       }
     }
 
-  if (const Instruction *Inst = dyn_cast<Instruction>(Old)) {
-    (void) Inst;
-    assert(!Statement.getParent()->getRegion().contains(Inst->getParent()) &&
-           "unexpected scalar dependence in region");
-  }
-
-  // Everything else is probably a scop-constant value defined as global,
-  // function parameter or an instruction not within the scop.
-  return const_cast<Value *>(Old);
+  // Now the scalar dependence is neither available nor SCEVCodegenable, this
+  // should never happen in the current code generator.
+  llvm_unreachable("Unexpected scalar dependence in region!");
+  return NULL;
 }
 
 void BlockGenerator::copyInstScalar(const Instruction *Inst, ValueMapT &BBMap,
@@ -283,7 +299,7 @@ Value *BlockGenerator::generateLocationAccessed(const Instruction *Inst,
                                                 ValueMapT &BBMap,
                                                 ValueMapT &GlobalMap,
                                                 LoopToScevMapT &LTS) {
-  MemoryAccess &Access = Statement.getAccessFor(Inst);
+  const MemoryAccess &Access = Statement.getAccessFor(Inst);
   isl_map *CurrentAccessRelation = Access.getAccessRelation();
   isl_map *NewAccessRelation = Access.getNewAccessRelation();
 
@@ -397,8 +413,8 @@ Value *VectorBlockGenerator::getVectorValue(const Value *Old,
                                             ValueMapT &VectorMap,
                                             VectorValueMapT &ScalarMaps,
                                             Loop *L) {
-  if (VectorMap.count(Old))
-    return VectorMap[Old];
+  if (Value *NewValue = VectorMap.lookup(Old))
+    return NewValue;
 
   int Width = getVectorWidth();
 
@@ -521,7 +537,7 @@ void VectorBlockGenerator::generateLoad(const LoadInst *Load,
     return;
   }
 
-  MemoryAccess &Access = Statement.getAccessFor(Load);
+  const MemoryAccess &Access = Statement.getAccessFor(Load);
   bool reductionAccess = Access.isReductionAccess();
 
   Value *NewLoad;
@@ -572,7 +588,7 @@ void VectorBlockGenerator::copyStore(const StoreInst *Store,
                                      VectorValueMapT &ScalarMaps) {
   int VectorWidth = getVectorWidth();
 
-  MemoryAccess &Access = Statement.getAccessFor(Store);
+  const MemoryAccess &Access = Statement.getAccessFor(Store);
   bool reductionAccess = Access.isReductionAccess();
 
   const Value *Pointer = Store->getPointerOperand();

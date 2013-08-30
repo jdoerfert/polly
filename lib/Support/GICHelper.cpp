@@ -19,8 +19,6 @@
 #include "isl/union_set.h"
 #include "isl/val.h"
 
-#include "llvm/Support/raw_ostream.h"
-
 using namespace llvm;
 
 void polly::MPZ_from_APInt(mpz_t v, const APInt apint, bool is_signed) {
@@ -70,7 +68,7 @@ APInt polly::APInt_from_MPZ(const mpz_t mpz) {
   p = (uint64_t *)mpz_export(p, &sz, -1, sizeof(uint64_t), 0, 0, mpz);
 
   if (p) {
-    APInt A((unsigned) mpz_sizeinbase(mpz, 2), (unsigned) sz, p);
+    APInt A((unsigned)mpz_sizeinbase(mpz, 2), (unsigned)sz, p);
     A = A.zext(A.getBitWidth() + 1);
     free(p);
 
@@ -90,7 +88,7 @@ APInt polly::APIntFromVal(__isl_take isl_val *Val) {
 
   NumChunks = isl_val_n_abs_num_chunks(Val, sizeof(uint64_t));
 
-  Data = (uint64_t*) malloc(NumChunks * sizeof(uint64_t));
+  Data = (uint64_t *)malloc(NumChunks * sizeof(uint64_t));
   isl_val_get_abs_num_chunks(Val, sizeof(uint64_t), Data);
   APInt A(8 * sizeof(uint64_t) * NumChunks, NumChunks, Data);
 
