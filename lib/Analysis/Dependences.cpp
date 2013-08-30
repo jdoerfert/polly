@@ -58,6 +58,7 @@ static cl::opt<enum AnalysisType> OptAnalysisType(
 
 //===----------------------------------------------------------------------===//
 Dependences::Dependences() : ScopPass(ID) { RAW = WAR = WAW = NULL; }
+Dependences::Dependences(char &ID) : ScopPass(ID) { RAW = WAR = WAW = NULL; }
 
 void Dependences::collectInfo(Scop &S, isl_union_map **Read,
                               isl_union_map **Write, isl_union_map **MayWrite,

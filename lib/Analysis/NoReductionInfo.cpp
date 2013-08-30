@@ -21,11 +21,11 @@ using namespace llvm;
 using namespace polly;
 
 namespace {
-  /// NoRI - This class implements the -polly-no-ri pass, which will never
+  /// NoReductionInfo - This class implements the -polly-no-ri pass, which will never
   /// detect any reduction accesses, thus it disables reduction handling
-  struct NoRI : public ImmutablePass, public ReductionInfo {
+  struct NoReductionInfo : public ImmutablePass, public ReductionInfo {
     static char ID;
-    NoRI() : ImmutablePass(ID) {}
+    NoReductionInfo() : ImmutablePass(ID) {}
 
     virtual void getAnalysisUsage(AnalysisUsage &AU) const {
     }
@@ -35,7 +35,7 @@ namespace {
 
     const ReductionAccess &getReductionAccess(const Value*,
                                               const Loop*) {
-      llvm_unreachable("Invalid reduction access required (NoRI)");
+      llvm_unreachable("Invalid reduction access required (NoReductionInfo)");
     }
 
     const ReductionAccess *getReductionAccess(const Instruction*,
@@ -57,9 +57,10 @@ namespace {
 }  // End of anonymous namespace
 
 // Register this pass...
-char NoRI::ID = 0;
-INITIALIZE_AG_PASS(NoRI, ReductionInfo, "polly-no-ri",
+char NoReductionInfo::ID = 0;
+
+INITIALIZE_AG_PASS(NoReductionInfo, ReductionInfo, "polly-no-ri",
                    "Polly - No Reduction Info",
                    true, true, false)
 
-Pass *polly::createNoRIPass() { return new NoRI(); }
+Pass *polly::createNoReductionInfoPass() { return new NoReductionInfo(); }

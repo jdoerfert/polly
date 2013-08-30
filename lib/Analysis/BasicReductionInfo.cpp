@@ -476,7 +476,6 @@ namespace {
 
 // Register this pass...
 char BasicReductionInfo::ID = 0;
-char &polly::BasicReductionInfoID = BasicReductionInfo::ID;
 
 INITIALIZE_AG_PASS_BEGIN(BasicReductionInfo, ReductionInfo,
                          "polly-basic-ri",

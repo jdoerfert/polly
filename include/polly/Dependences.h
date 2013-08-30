@@ -96,18 +96,20 @@ public:
   virtual void releaseMemory();
   virtual void getAnalysisUsage(AnalysisUsage &AU) const;
 
-private:
+protected:
+  Dependences(char &ID);
+
   // The different kinds of dependences we calculate.
   isl_union_map *RAW;
   isl_union_map *WAR;
   isl_union_map *WAW;
 
   /// @brief Collect information about the SCoP.
-  void collectInfo(Scop &S, isl_union_map **Read, isl_union_map **Write,
+  virtual void collectInfo(Scop &S, isl_union_map **Read, isl_union_map **Write,
                    isl_union_map **MayWrite, isl_union_map **Schedule);
 
   // @brief Calculate the dependences for a certain SCoP.
-  void calculateDependences(Scop &S);
+  virtual void calculateDependences(Scop &S);
 };
 
 } // End polly namespace.

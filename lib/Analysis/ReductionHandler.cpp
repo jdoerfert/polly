@@ -33,6 +33,7 @@
 #define DEBUG_TYPE "polly-reductions"
 #include "llvm/Support/Debug.h"
 
+#if 0
 STATISTIC(ReductionsVectorized, "Number of vectorized reduction accesses");
 
 using namespace llvm;
@@ -688,3 +689,5 @@ INITIALIZE_AG_DEPENDENCY(ReductionInfo);
 INITIALIZE_PASS_DEPENDENCY(ScopInfo);
 INITIALIZE_PASS_END(ReductionHandler, "polly-reductions",
                       "Polly - Handle reduction dependences", false, true);
+
+#endif

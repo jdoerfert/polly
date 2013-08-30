@@ -13,7 +13,7 @@
 
 #include "polly/ImplicitReductionHandler.h"
 
-#include "polly/ReductionDependences.h"
+#include "polly/ImplicitReductionDependences.h"
 
 #include "polly/ScopInfo.h"
 #include "polly/LinkAllPasses.h"
@@ -45,7 +45,7 @@ void ImplicitReductionHandler::releaseMemory() {
 
 void ImplicitReductionHandler::getAnalysisUsage(AnalysisUsage &AU) const {
   ScopPass::getAnalysisUsage(AU);
-  AU.addRequired<ReductionDependences>();
+  AU.addRequired<ImplicitReductionDependences>();
 }
 
 Pass *polly::createImplicitReductionHandlerPass() {
@@ -54,6 +54,6 @@ Pass *polly::createImplicitReductionHandlerPass() {
 
 INITIALIZE_PASS_BEGIN(ImplicitReductionHandler, "polly-implicit-reductions",
                       "Polly - Handle implicit reduction dependences", false, false);
-INITIALIZE_PASS_DEPENDENCY(ReductionDependences);
+INITIALIZE_PASS_DEPENDENCY(ImplicitReductionDependences);
 INITIALIZE_PASS_END(  ImplicitReductionHandler, "polly-implicit-reductions",
                       "Polly - Handle implicit reduction dependences", false, false)
