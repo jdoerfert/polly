@@ -334,7 +334,7 @@ INITIALIZE_PASS_BEGIN(JSONExporter, "polly-export-jscop",
                       "Polly - Export Scops as JSON"
                       " (Writes a .jscop file for each Scop)",
                       false, false);
-INITIALIZE_PASS_DEPENDENCY(Dependences)
+INITIALIZE_AG_DEPENDENCY(Dependences)
 INITIALIZE_PASS_END(JSONExporter, "polly-export-jscop",
                     "Polly - Export Scops as JSON"
                     " (Writes a .jscop file for each Scop)",
@@ -344,7 +344,7 @@ INITIALIZE_PASS_BEGIN(JSONImporter, "polly-import-jscop",
                       "Polly - Import Scops from JSON"
                       " (Reads a .jscop file for each Scop)",
                       false, false);
-INITIALIZE_PASS_DEPENDENCY(Dependences)
+INITIALIZE_AG_DEPENDENCY(Dependences)
 INITIALIZE_PASS_END(JSONImporter, "polly-import-jscop",
                     "Polly - Import Scops from JSON"
                     " (Reads a .jscop file for each Scop)",

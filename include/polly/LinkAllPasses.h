@@ -33,7 +33,7 @@ llvm::Pass *createCodeGenerationPass();
 #endif
 llvm::Pass *createCodePreparationPass();
 llvm::Pass *createDeadCodeElimPass();
-llvm::Pass *createDependencesPass();
+llvm::Pass *createScopDependencesPass();
 llvm::Pass *createDOTOnlyPrinterPass();
 llvm::Pass *createDOTOnlyViewerPass();
 llvm::Pass *createDOTPrinterPass();
@@ -92,7 +92,7 @@ struct PollyForcePassLinking {
 #endif
     createCodePreparationPass();
     createDeadCodeElimPass();
-    createDependencesPass();
+    createScopDependencesPass();
     createDOTOnlyPrinterPass();
     createDOTOnlyViewerPass();
     createDOTPrinterPass();

@@ -463,8 +463,15 @@ bool IslScheduleOptimizer::runOnScop(Scop &S) {
   if (!Domain)
     return false;
 
-  isl_union_map *Validity = D->getDependences(ValidityKinds);
-  isl_union_map *Proximity = D->getDependences(ProximityKinds);
+  // Get the Validity and Proximity dependences. The former ones do not need
+  // to include all dependeces as e.g., implicit reduction handling might fix
+  // those not respected. The latter one should consist of all dependences as
+  // the scheduler will minimize the number of dependences not respected in the
+  // first place.
+  isl_union_map *Validity =
+      D->getDependences(ValidityKinds, /* AllDeps */ false);
+  isl_union_map *Proximity =
+      D->getDependences(ProximityKinds, /* AllDeps */ true);
 
   // Simplify the dependences by removing the constraints introduced by the
   // domains. This can speed up the scheduling time significantly, as large
@@ -536,6 +543,8 @@ bool IslScheduleOptimizer::runOnScop(Scop &S) {
   DEBUG(dbgs() << "Schedule := "; isl_schedule_dump(Schedule); dbgs() << ";\n");
 
   isl_union_map *ScheduleMap = getScheduleMap(Schedule);
+  DEBUG(dbgs() << "ScheduleMap := "; isl_union_map_dump(ScheduleMap); dbgs() << ";\n");
+
 
   for (Scop::iterator SI = S.begin(), SE = S.end(); SI != SE; ++SI) {
     ScopStmt *Stmt = *SI;
@@ -605,7 +614,7 @@ Pass *polly::createIslScheduleOptimizerPass() {
 
 INITIALIZE_PASS_BEGIN(IslScheduleOptimizer, "polly-opt-isl",
                       "Polly - Optimize schedule of SCoP", false, false);
-INITIALIZE_PASS_DEPENDENCY(Dependences);
+INITIALIZE_AG_DEPENDENCY(Dependences)
 INITIALIZE_PASS_DEPENDENCY(ScopInfo);
 INITIALIZE_PASS_END(IslScheduleOptimizer, "polly-opt-isl",
                     "Polly - Optimize schedule of SCoP", false, false)

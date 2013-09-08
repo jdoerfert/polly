@@ -24,6 +24,8 @@
 #include "polly/CodeGen/Cloog.h"
 #include "polly/CodeGen/CodeGeneration.h"
 #include "polly/Dependences.h"
+#include "polly/ImplicitReductionDependences.h"
+#include "polly/ImplicitReductionHandler.h"
 #include "polly/LinkAllPasses.h"
 #include "polly/Options.h"
 #include "polly/ScopDetection.h"
@@ -176,7 +178,7 @@ static void initializePollyPasses(PassRegistry &Registry) {
   initializeIslCodeGenerationPass(Registry);
   initializeCodePreparationPass(Registry);
   initializeDeadCodeElimPass(Registry);
-  initializeDependencesPass(Registry);
+  initializeScopDependencesPass(Registry);
   initializeIndependentBlocksPass(Registry);
   initializeJSONExporterPass(Registry);
   initializeJSONImporterPass(Registry);
@@ -189,9 +191,12 @@ static void initializePollyPasses(PassRegistry &Registry) {
   initializeScopDetectionPass(Registry);
   initializeScopInfoPass(Registry);
   initializeTempScopInfoPass(Registry);
-  initializeNoRIPass(Registry);
+
+  initializeReductionInfoAnalysisGroup(Registry);
+  initializeNoReductionInfoPass(Registry);
   initializeBasicReductionInfoPass(Registry);
-  initializeReductionHandlerPass(Registry);
+  initializeImplicitReductionDependencesPass(Registry);
+  initializeImplicitReductionHandlerPass(Registry);
 }
 
 /// @brief Initialize Polly passes when library is loaded.

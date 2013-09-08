@@ -309,7 +309,6 @@ namespace {
         return ReductionAccesses[RL];
       }
 
-      dbgs() << *BinOp << "\n\n";
       // Otherwise, use the generator of the ReductionInfo class to
       // create a new reduction access which will be cached and returned
       const ReductionAccess *RA = createReductionAccess(BaseValue,
@@ -410,11 +409,8 @@ namespace {
         BRI_INVALID(LOOP);
       }
 
-      dbgs() << *CurrentLoop  << "\n";
       const SCEV *BaseSCEV = SE->getSCEV(const_cast<Value*>(Producer->getPointerOperand()));
-      dbgs() << "BASE SCEV: " << *BaseSCEV << "\n";
       bool BaseValueIsLoopInv = SE->isLoopInvariant(BaseSCEV, CurrentLoop);
-      dbgs() << "BASE value is loopinv: " << BaseValueIsLoopInv << "\n";
 
       // If there is an invalid use of the pointer operand within the
       // current loop we need to consider a smaller loop

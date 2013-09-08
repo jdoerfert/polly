@@ -1219,8 +1219,8 @@ Pass *polly::createCodeGenerationPass() { return new CodeGeneration(); }
 
 INITIALIZE_PASS_BEGIN(CodeGeneration, "polly-codegen",
                       "Polly - Create LLVM-IR from SCoPs", false, false);
+INITIALIZE_AG_DEPENDENCY(Dependences);
 INITIALIZE_PASS_DEPENDENCY(CloogInfo);
-INITIALIZE_PASS_DEPENDENCY(Dependences);
 INITIALIZE_PASS_DEPENDENCY(DominatorTree);
 INITIALIZE_PASS_DEPENDENCY(RegionInfo);
 INITIALIZE_PASS_DEPENDENCY(ScalarEvolution);

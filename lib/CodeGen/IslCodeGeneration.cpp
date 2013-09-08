@@ -1078,7 +1078,7 @@ Pass *polly::createIslCodeGenerationPass() { return new IslCodeGeneration(); }
 
 INITIALIZE_PASS_BEGIN(IslCodeGeneration, "polly-codegen-isl",
                       "Polly - Create LLVM-IR from SCoPs", false, false);
-INITIALIZE_PASS_DEPENDENCY(Dependences);
+INITIALIZE_AG_DEPENDENCY(Dependences);
 INITIALIZE_PASS_DEPENDENCY(DominatorTree);
 INITIALIZE_PASS_DEPENDENCY(LoopInfo);
 INITIALIZE_PASS_DEPENDENCY(RegionInfo);

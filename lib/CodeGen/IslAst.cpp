@@ -437,6 +437,6 @@ INITIALIZE_PASS_BEGIN(IslAstInfo, "polly-ast",
                       "Polly - Generate an AST of the SCoP (isl)", false,
                       false);
 INITIALIZE_PASS_DEPENDENCY(ScopInfo);
-INITIALIZE_PASS_DEPENDENCY(Dependences);
+INITIALIZE_AG_DEPENDENCY(Dependences);
 INITIALIZE_PASS_END(IslAstInfo, "polly-ast",
                     "Polly - Generate an AST from the SCoP (isl)", false, false)

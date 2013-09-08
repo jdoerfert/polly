@@ -23,6 +23,7 @@
 #define DEBUG_TYPE "polly-reduction-dependences"
 #include "llvm/Support/Debug.h"
 
+#include <utility>
 #include <isl/aff.h>
 #include <isl/flow.h>
 #include <isl/map.h>
@@ -31,12 +32,81 @@
 using namespace polly;
 using namespace llvm;
 
-ImplicitReductionDependences::ImplicitReductionDependences() : Dependences(ID) {}
+ImplicitReductionDependences::ImplicitReductionDependences()
+    : ScopDependences(ID) {
+  WEAKENED_RAW = NULL;
+  WEAKENED_WAW = NULL;
+  WEAKENED_WAR = NULL;
+}
+
+void ImplicitReductionDependences::swapDependences() {
+  std::swap(RAW, WEAKENED_RAW);
+  std::swap(WAW, WEAKENED_WAW);
+  std::swap(WAR, WEAKENED_WAR);
+}
+
+bool ImplicitReductionDependences::isValidScattering(ScopStmt *Stmt,
+                                                     bool AllDeps) {
+  if (!AllDeps)
+    swapDependences();
+
+  bool result = ScopDependences::isValidScattering(Stmt);
+
+  if (!AllDeps)
+    swapDependences();
+
+  return result;
+}
+
+bool ImplicitReductionDependences::isValidScattering(
+    StatementToIslMapTy *NewScatterings, bool AllDeps) {
+
+  if (!AllDeps)
+    swapDependences();
+
+  bool result = ScopDependences::isValidScattering(NewScatterings);
+
+  if (!AllDeps)
+    swapDependences();
+
+  return result;
+}
+
+bool ImplicitReductionDependences::isParallelDimension(
+    __isl_take isl_set *LoopDomain, unsigned ParallelDimension, bool AllDeps) {
+
+  if (!AllDeps)
+    swapDependences();
+
+  bool result =
+      ScopDependences::isParallelDimension(LoopDomain, ParallelDimension);
+
+  if (!AllDeps)
+    swapDependences();
+
+  return result;
+}
+
+isl_union_map *ImplicitReductionDependences::getDependences(int Kinds,
+                                                            bool AllDeps) {
+  if (!AllDeps)
+    swapDependences();
+
+  isl_union_map *result = ScopDependences::getDependences(Kinds);
+
+  if (!AllDeps)
+    swapDependences();
+
+  return result;
+}
 
 void ImplicitReductionDependences::collectInfo(Scop &S, isl_union_map **Read,
-                                       isl_union_map **Write,
-                                       isl_union_map **MayWrite,
-                                       isl_union_map **Schedule) {
+                                               isl_union_map **Write,
+                                               isl_union_map **MayWrite,
+                                               isl_union_map **Schedule) {
+
+  if (WEAKENED_RAW != 0)
+    return ScopDependences::collectInfo(S, Read, Write, MayWrite, Schedule);
 
   LoopInfo *LI = &getAnalysis<LoopInfo>();
   ReductionInfo *RI = &getAnalysis<ReductionInfo>();
@@ -83,34 +153,71 @@ void ImplicitReductionDependences::collectInfo(Scop &S, isl_union_map **Read,
 void ImplicitReductionDependences::calculateDependences(Scop &S) {
 
   /// First calculate reduction dependences only
-  Dependences::calculateDependences(S);
+  ScopDependences::calculateDependences(S);
 
-  /// Now use the original dependency analysis to calculate all dependences
-  Dependences &DP = getAnalysis<Dependences>();
+  /// Move them, and compute all dependences
+  WEAKENED_RAW = RAW;
+  WEAKENED_WAW = WAW;
+  WEAKENED_WAR = WAR;
 
-  /// And substract reduction dependences from all dependences
-  RAW = isl_union_map_subtract(DP.getDependences(TYPE_RAW), RAW);
-  WAW = isl_union_map_subtract(DP.getDependences(TYPE_WAW), WAW);
-  WAR = isl_union_map_subtract(DP.getDependences(TYPE_WAR), WAR);
+  ScopDependences::calculateDependences(S);
+
+  /// Last, substract reduction dependences from all dependences
+  WEAKENED_RAW = isl_union_map_subtract(isl_union_map_copy(RAW), WEAKENED_RAW);
+  WEAKENED_WAW = isl_union_map_subtract(isl_union_map_copy(WAW), WEAKENED_WAW);
+  WEAKENED_WAR = isl_union_map_subtract(isl_union_map_copy(WAR), WEAKENED_WAR);
+}
+
+void ImplicitReductionDependences::printScop(raw_ostream &OS) const {
+  OS << "\n\tOriginal Dependences:\n";
+  ScopDependences::printScop(OS);
+
+  if (WEAKENED_RAW == 0)
+    return;
+
+  OS << "\n\tWeakened Dependences:\n";
+  OS << "\tRAW dependences:\n\t\t" << WEAKENED_RAW << "\n";
+  OS << "\tWAR dependences:\n\t\t" << WEAKENED_WAR << "\n";
+  OS << "\tWAW dependences:\n\t\t" << WEAKENED_WAW << "\n";
+}
+
+void ImplicitReductionDependences::releaseMemory() {
+  ScopDependences::releaseMemory();
+
+  isl_union_map_free(WEAKENED_RAW);
+  isl_union_map_free(WEAKENED_WAR);
+  isl_union_map_free(WEAKENED_WAW);
+
+  WEAKENED_RAW = WEAKENED_WAW = WEAKENED_WAR = NULL;
+}
+
+void ImplicitReductionDependences::getAnalysisUsage(AnalysisUsage &AU) const {
+  ScopDependences::getAnalysisUsage(AU);
+  AU.addRequired<LoopInfo>();
+  AU.addRequired<ReductionInfo>();
+}
+
+void *ImplicitReductionDependences::getAdjustedAnalysisPointer(const void *ID) {
+  if (ID == &Dependences::ID)
+    return (Dependences *)(this);
+  return this;
 }
 
 char ImplicitReductionDependences::ID = 0;
-
-void ImplicitReductionDependences::getAnalysisUsage(AnalysisUsage &AU) const {
-  ScopPass::getAnalysisUsage(AU);
-  AU.addRequired<LoopInfo>();
-  AU.addRequired<Dependences>();
-  AU.addRequired<ReductionInfo>();
-}
 
 Pass *polly::createImplicitReductionDependencesPass() {
   return new ImplicitReductionDependences();
 }
 
-INITIALIZE_PASS_BEGIN(ImplicitReductionDependences, "polly-reduction-dependences",
-                      "Polly - Calculate reduction dependences", false, false);
+
+INITIALIZE_AG_PASS_BEGIN(ImplicitReductionDependences, Dependences,
+                         "polly-implicit-reduction-dependences",
+                         "Polly - Calculate reduction dependences", false,
+                         false, false);
 INITIALIZE_PASS_DEPENDENCY(LoopInfo);
-INITIALIZE_PASS_DEPENDENCY(Dependences);
+INITIALIZE_PASS_DEPENDENCY(ScopDependences);
 INITIALIZE_AG_DEPENDENCY(ReductionInfo);
-INITIALIZE_PASS_END(ImplicitReductionDependences, "polly-reduction-dependences",
-                    "Polly - Calculate reduction dependences", false, false)
+INITIALIZE_AG_PASS_END(ImplicitReductionDependences, Dependences,
+                       "polly-implicit-reduction-dependences",
+                       "Polly - Calculate reduction dependences", false, false,
+                       false)

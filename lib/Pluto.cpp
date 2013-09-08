@@ -182,8 +182,7 @@ Pass *polly::createPlutoOptimizerPass() { return new PlutoOptimizer(); }
 INITIALIZE_PASS_BEGIN(PlutoOptimizer, "polly-opt-pluto",
                       "Polly - Optimize schedule of SCoP (Pluto)", false,
                       false);
-INITIALIZE_PASS_DEPENDENCY(ReductionHandler);
-INITIALIZE_PASS_DEPENDENCY(Dependences);
+INITIALIZE_AG_DEPENDENCY(Dependences)
 INITIALIZE_PASS_DEPENDENCY(ScopInfo);
 INITIALIZE_PASS_END(PlutoOptimizer, "polly-opt-pluto",
                     "Polly - Optimize schedule of SCoP (Pluto)", false, false)

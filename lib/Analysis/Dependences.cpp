@@ -57,12 +57,17 @@ static cl::opt<enum AnalysisType> OptAnalysisType(
     cl::Hidden, cl::init(VALUE_BASED_ANALYSIS), cl::cat(PollyCategory));
 
 //===----------------------------------------------------------------------===//
-Dependences::Dependences() : ScopPass(ID) { RAW = WAR = WAW = NULL; }
-Dependences::Dependences(char &ID) : ScopPass(ID) { RAW = WAR = WAW = NULL; }
+Dependences::~Dependences() {}
 
-void Dependences::collectInfo(Scop &S, isl_union_map **Read,
-                              isl_union_map **Write, isl_union_map **MayWrite,
-                              isl_union_map **Schedule) {
+ScopDependences::ScopDependences() : ScopPass(ID) { RAW = WAR = WAW = NULL; }
+ScopDependences::ScopDependences(char &ID) : ScopPass(ID) {
+  RAW = WAR = WAW = NULL;
+}
+
+void ScopDependences::collectInfo(Scop &S, isl_union_map **Read,
+                                  isl_union_map **Write,
+                                  isl_union_map **MayWrite,
+                                  isl_union_map **Schedule) {
   isl_space *Space = S.getParamSpace();
   *Read = isl_union_map_empty(isl_space_copy(Space));
   *Write = isl_union_map_empty(isl_space_copy(Space));
@@ -89,7 +94,7 @@ void Dependences::collectInfo(Scop &S, isl_union_map **Read,
   }
 }
 
-void Dependences::calculateDependences(Scop &S) {
+void ScopDependences::calculateDependences(Scop &S) {
   isl_union_map *Read, *Write, *MayWrite, *Schedule;
 
   DEBUG(dbgs() << "Scop: " << S << "\n");
@@ -150,14 +155,52 @@ void Dependences::calculateDependences(Scop &S) {
   DEBUG(printScop(dbgs()));
 }
 
-bool Dependences::runOnScop(Scop &S) {
+bool ScopDependences::runOnScop(Scop &S) {
+  //Dependences::InitializeDependences(this);
+
   releaseMemory();
   calculateDependences(S);
   printScop(errs());
   return false;
 }
 
-bool Dependences::isValidScattering(StatementToIslMapTy *NewScattering) {
+bool ScopDependences::isValidScattering(ScopStmt *Stmt, bool) {
+
+  if (LegalityCheckDisabled)
+    return true;
+
+  Scop &S = getCurScop();
+
+  isl_union_map *Dependences = getDependences(TYPE_ALL);
+
+  isl_map *StmtScat = Stmt->getScattering();
+  isl_space *ScatteringSpace = isl_space_range(isl_map_get_space(StmtScat));
+
+  isl_space *Space = S.getParamSpace();
+  isl_union_map *Scattering = isl_union_map_empty(Space);
+  Scattering = isl_union_map_add_map(Scattering, StmtScat);
+
+  Dependences =
+      isl_union_map_apply_domain(Dependences, isl_union_map_copy(Scattering));
+  Dependences = isl_union_map_apply_range(Dependences, Scattering);
+
+  isl_set *Zero = isl_set_universe(isl_space_copy(ScatteringSpace));
+  for (unsigned i = 0; i < isl_set_dim(Zero, isl_dim_set); i++)
+    Zero = isl_set_fix_si(Zero, isl_dim_set, i, 0);
+
+  isl_union_set *UDeltas = isl_union_map_deltas(Dependences);
+  isl_set *Deltas = isl_union_set_extract_set(UDeltas, ScatteringSpace);
+  isl_union_set_free(UDeltas);
+
+  isl_map *NonPositive = isl_set_lex_le_set(Deltas, Zero);
+  bool IsValid = isl_map_is_empty(NonPositive);
+  isl_map_free(NonPositive);
+
+  return IsValid;
+}
+
+bool ScopDependences::isValidScattering(StatementToIslMapTy *NewScattering,
+                                        bool) {
   Scop &S = getCurScop();
 
   if (LegalityCheckDisabled)
@@ -219,8 +262,8 @@ isl_union_map *getCombinedScheduleForSpace(Scop *scop, unsigned dimLevel) {
   return schedule;
 }
 
-bool Dependences::isParallelDimension(__isl_take isl_set *ScheduleSubset,
-                                      unsigned ParallelDim) {
+bool ScopDependences::isParallelDimension(__isl_take isl_set *ScheduleSubset,
+                                          unsigned ParallelDim, bool) {
   // To check if a loop is parallel, we perform the following steps:
   //
   // o Move dependences from 'Domain -> Domain' to 'Schedule -> Schedule' space.
@@ -290,13 +333,13 @@ bool Dependences::isParallelDimension(__isl_take isl_set *ScheduleSubset,
   return IsParallel;
 }
 
-void Dependences::printScop(raw_ostream &OS) const {
+void ScopDependences::printScop(raw_ostream &OS) const {
   OS << "\tRAW dependences:\n\t\t" << RAW << "\n";
   OS << "\tWAR dependences:\n\t\t" << WAR << "\n";
   OS << "\tWAW dependences:\n\t\t" << WAW << "\n";
 }
 
-void Dependences::releaseMemory() {
+void ScopDependences::releaseMemory() {
   isl_union_map_free(RAW);
   isl_union_map_free(WAR);
   isl_union_map_free(WAW);
@@ -304,7 +347,7 @@ void Dependences::releaseMemory() {
   RAW = WAR = WAW = NULL;
 }
 
-isl_union_map *Dependences::getDependences(int Kinds) {
+isl_union_map *ScopDependences::getDependences(int Kinds, bool) {
   isl_space *Space = isl_union_map_get_space(RAW);
   isl_union_map *Deps = isl_union_map_empty(Space);
 
@@ -322,16 +365,28 @@ isl_union_map *Dependences::getDependences(int Kinds) {
   return Deps;
 }
 
-void Dependences::getAnalysisUsage(AnalysisUsage &AU) const {
+void *ScopDependences::getAdjustedAnalysisPointer(const void *ID) {
+  if (ID == &Dependences::ID)
+    return (Dependences *)(this);
+  return this;
+}
+
+void ScopDependences::getAnalysisUsage(AnalysisUsage &AU) const {
+  //Dependences::getAnalysisUsage(AU);
   ScopPass::getAnalysisUsage(AU);
 }
 
 char Dependences::ID = 0;
+char ScopDependences::ID = 0;
 
-Pass *polly::createDependencesPass() { return new Dependences(); }
+Pass *polly::createScopDependencesPass() { return new ScopDependences(); }
 
-INITIALIZE_PASS_BEGIN(Dependences, "polly-dependences",
-                      "Polly - Calculate dependences", false, false);
+// Register the ReductionInfo interface, providing a nice name to refer to.
+INITIALIZE_ANALYSIS_GROUP(Dependences, "Dependences Analysis Group",
+                          ScopDependences)
+
+INITIALIZE_AG_PASS_BEGIN(ScopDependences, Dependences, "polly-dependences",
+                         "Polly - Calculate dependences", false, false, true);
 INITIALIZE_PASS_DEPENDENCY(ScopInfo);
-INITIALIZE_PASS_END(Dependences, "polly-dependences",
-                    "Polly - Calculate dependences", false, false)
+INITIALIZE_AG_PASS_END(ScopDependences, Dependences, "polly-dependences",
+                       "Polly - Calculate dependences", false, false, true)
