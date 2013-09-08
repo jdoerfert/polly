@@ -94,6 +94,11 @@ printParallelFor(__isl_keep isl_ast_node *Node, __isl_take isl_printer *Printer,
       Printer = isl_printer_print_str(Printer, "#pragma omp parallel for");
       Printer = isl_printer_end_line(Printer);
     }
+    if (Info->IsReduction) {
+      Printer = isl_printer_start_line(Printer);
+      Printer = isl_printer_print_str(Printer, "#is reduction");
+      Printer = isl_printer_end_line(Printer);
+    }
   }
   return isl_ast_node_for_print(Node, Printer, PrintOptions);
 }
@@ -121,6 +126,7 @@ static struct IslAstUser *allocateIslAstUser() {
   NodeInfo->Context = 0;
   NodeInfo->IsOutermostParallel = 0;
   NodeInfo->IsInnermostParallel = 0;
+  NodeInfo->IsReduction = 0;
   return NodeInfo;
 }
 
@@ -130,6 +136,36 @@ static void freeIslAstUser(void *Ptr) {
   isl_ast_build_free(UserStruct->Context);
   isl_pw_multi_aff_free(UserStruct->PMA);
   free(UserStruct);
+}
+
+static bool astScheduleDimIsParallelTestDeps(__isl_keep isl_ast_build *Build,
+                                             Dependences *D,
+                                             __isl_take isl_union_map *Deps) {
+  isl_map *ScheduleDeps, *Test;
+  isl_space *ScheduleSpace;
+  unsigned Dimension, IsParallel;
+
+  ScheduleSpace = isl_ast_build_get_schedule_space(Build);
+  Dimension = isl_space_dim(ScheduleSpace, isl_dim_out) - 1;
+  isl_space_free(ScheduleSpace);
+
+  ScheduleDeps = isl_map_from_union_map(Deps);
+
+  for (unsigned i = 0; i < Dimension; i++) {
+    ScheduleDeps = isl_map_equate(ScheduleDeps, isl_dim_out, i, isl_dim_in, i);
+  }
+
+  Test = isl_map_universe(isl_map_get_space(ScheduleDeps));
+  Test = isl_map_equate(Test, isl_dim_out, Dimension, isl_dim_in, Dimension);
+
+  IsParallel = isl_map_is_subset(ScheduleDeps, Test);
+
+  isl_map_free(Test);
+  isl_map_free(ScheduleDeps);
+
+  dbgs() << "IsParallel: " << IsParallel << "\n";
+
+  return IsParallel;
 }
 
 // Check if the current scheduling dimension is parallel.
@@ -146,41 +182,40 @@ static void freeIslAstUser(void *Ptr) {
 // dimension if it is a subset of a map with equal values for the current
 // dimension.
 static bool astScheduleDimIsParallel(__isl_keep isl_ast_build *Build,
-                                     Dependences *D) {
-  isl_union_map *Schedule, *Deps;
-  isl_map *ScheduleDeps, *Test;
-  isl_space *ScheduleSpace;
-  unsigned Dimension, IsParallel;
+                                     Dependences *D, bool &IsReduction) {
+  isl_union_map *Schedule, *Deps, *AllDeps;
 
   Schedule = isl_ast_build_get_schedule(Build);
-  ScheduleSpace = isl_ast_build_get_schedule_space(Build);
+  AllDeps = D->getDependences(Dependences::TYPE_ALL, /* allDeps? */ true);
+  AllDeps = isl_union_map_apply_range(AllDeps, isl_union_map_copy(Schedule));
+  AllDeps = isl_union_map_apply_domain(AllDeps, Schedule);
 
-  Dimension = isl_space_dim(ScheduleSpace, isl_dim_out) - 1;
-
-  Deps = D->getDependences(Dependences::TYPE_ALL);
-  Deps = isl_union_map_apply_range(Deps, isl_union_map_copy(Schedule));
-  Deps = isl_union_map_apply_domain(Deps, Schedule);
-
-  if (isl_union_map_is_empty(Deps)) {
-    isl_union_map_free(Deps);
-    isl_space_free(ScheduleSpace);
-    return 1;
+  dbgs() << "AllDeps is empty: " << (isl_union_map_is_empty(AllDeps)) << "\n";
+  if (isl_union_map_is_empty(AllDeps)) {
+    isl_union_map_free(AllDeps);
+    IsReduction = false;
+    return true;
+  } else if(astScheduleDimIsParallelTestDeps(Build, D, AllDeps)) {
+    IsReduction = false;
+    return true;
   }
 
-  ScheduleDeps = isl_map_from_union_map(Deps);
+  Schedule = isl_ast_build_get_schedule(Build);
+  Deps = D->getDependences(Dependences::TYPE_ALL, /* allDeps? */ false);
+  Deps = isl_union_map_apply_range(Deps, isl_union_map_copy(Schedule));
+  Deps = isl_union_map_apply_domain(Deps, Schedule);
+  dbgs() << "   Deps is empty: " << (isl_union_map_is_empty(Deps)) << "\n";
+  if (isl_union_map_is_empty(Deps)) {
+    IsReduction = true;
+    isl_union_map_free(Deps);
+    return true;
+  } else if (astScheduleDimIsParallelTestDeps(Build, D, Deps)) {
+    IsReduction = true;
+    return true;
+  }
 
-  for (unsigned i = 0; i < Dimension; i++)
-    ScheduleDeps = isl_map_equate(ScheduleDeps, isl_dim_out, i, isl_dim_in, i);
-
-  Test = isl_map_universe(isl_map_get_space(ScheduleDeps));
-  Test = isl_map_equate(Test, isl_dim_out, Dimension, isl_dim_in, Dimension);
-  IsParallel = isl_map_is_subset(ScheduleDeps, Test);
-
-  isl_space_free(ScheduleSpace);
-  isl_map_free(Test);
-  isl_map_free(ScheduleDeps);
-
-  return IsParallel;
+  IsReduction = false;
+  return false;
 }
 
 // Mark a for node openmp parallel, if it is the outermost parallel for node.
@@ -190,9 +225,11 @@ static void markOpenmpParallel(__isl_keep isl_ast_build *Build,
   if (BuildInfo->InParallelFor)
     return;
 
-  if (astScheduleDimIsParallel(Build, BuildInfo->Deps)) {
+  bool IsReduction = false;
+  if (astScheduleDimIsParallel(Build, BuildInfo->Deps, IsReduction)) {
     BuildInfo->InParallelFor = 1;
     NodeInfo->IsOutermostParallel = 1;
+    NodeInfo->IsReduction = IsReduction;
   }
 }
 
@@ -271,12 +308,15 @@ astBuildAfterFor(__isl_take isl_ast_node *Node, __isl_keep isl_ast_build *Build,
   struct IslAstUser *Info = (struct IslAstUser *)isl_id_get_user(Id);
   struct AstBuildUserInfo *BuildInfo = (struct AstBuildUserInfo *)User;
 
+  bool IsReduction = false;
   if (Info) {
     if (Info->IsOutermostParallel)
       BuildInfo->InParallelFor = 0;
     if (!containsLoops(isl_ast_node_for_get_body(Node)))
-      if (astScheduleDimIsParallel(Build, BuildInfo->Deps))
+      if (astScheduleDimIsParallel(Build, BuildInfo->Deps, IsReduction)) {
         Info->IsInnermostParallel = 1;
+        Info->IsReduction = IsReduction;
+      }
     if (!Info->Context)
       Info->Context = isl_ast_build_copy(Build);
   }

@@ -829,6 +829,7 @@ void IslNodeBuilder::createForSequential(__isl_take isl_ast_node *For) {
 void IslNodeBuilder::createFor(__isl_take isl_ast_node *For) {
   bool Vector = PollyVectorizerChoice != VECTORIZER_NONE;
 
+  dbgs() << "Vec: " << Vector << "  InnermostParallel: " << isInnermostParallel(For) << "\n";
   if (Vector && isInnermostParallel(For)) {
     int VectorWidth = getNumberOfIterations(For);
     if (1 < VectorWidth && VectorWidth <= 16) {

@@ -16,7 +16,6 @@
 #include "polly/ScopInfo.h"
 #include "isl/aff.h"
 #include "isl/set.h"
-#include "polly/ReductionHandler.h"
 #include "polly/CodeGen/BlockGenerators.h"
 #include "polly/CodeGen/CodeGeneration.h"
 #include "polly/Options.h"
@@ -161,15 +160,6 @@ BlockGenerator::BlockGenerator(IRBuilder<> &B, ScopStmt &Stmt, Pass *P)
 
 Value *BlockGenerator::lookupAvailableValue(const Value *Old, ValueMapT &BBMap,
                                             ValueMapT &GlobalMap) const {
-  // We can't assume constants never change. For reductions on global constants
-  // we have a mapping from the constant to the local reduction vector.
-  //ValueMapT::iterator GI = GlobalMap.find(Old), GE = GlobalMap.end();
-  //if (GI == GE && isa<Constant>(Old))
-    //return const_cast<Value *>(Old);
-
-  //if (GI != GE) {
-    //Value *New = GI->second;
-
   // We assume constants never change.
   // This avoids map lookups for many calls to this function.
   if (isa<Constant>(Old))
@@ -441,31 +431,6 @@ Type *VectorBlockGenerator::getVectorPtrTy(const Value *Val, int Width) {
   return PointerType::getUnqual(VectorType);
 }
 
-Value *
-VectorBlockGenerator::generateStrideOneReductionLoad(const LoadInst *Load,
-                                                     ValueMapT &BBMap) {
-  unsigned VectorWidth = getVectorWidth();
-  const Value *Pointer = Load->getPointerOperand();
-  ReductionHandler &RH = P->getAnalysis<ReductionHandler>();
-  Value *VectorPtr     = RH.getReductionVecPointer(Load, VectorWidth);
-  LoadInst *VecLoad =
-    Builder.CreateLoad(VectorPtr, Load->getName() + "_r_vec_full");
-
-  // To generate fixup code we need to copy the original pointer too
-  Value *NewPointer    = generateLocationAccessed(Load, Pointer, BBMap,
-                                                  GlobalMaps[0], VLTS[0]);
-  GlobalMaps[0][Pointer] = NewPointer;
-
-  PointerType *VecPtrTy = dyn_cast<PointerType>(VectorPtr->getType());
-  assert(VecPtrTy && "Reduction vector pointer has no pointer type");
-  VectorType  *VectorTy = dyn_cast<VectorType>(VecPtrTy->getElementType());
-  assert(VectorTy && "Reduction vector pointer has no pointer to vector type");
-
-  //VecLoad->setAlignment(VectorTy->getBitWidth() / 8);
-
-  return VecLoad;
-}
-
 Value *VectorBlockGenerator::generateStrideOneLoad(const LoadInst *Load,
                                                    ValueMapT &BBMap) {
   const Value *Pointer = Load->getPointerOperand();
@@ -538,12 +503,9 @@ void VectorBlockGenerator::generateLoad(const LoadInst *Load,
   }
 
   const MemoryAccess &Access = Statement.getAccessFor(Load);
-  bool reductionAccess = Access.isReductionAccess();
 
   Value *NewLoad;
-  if (reductionAccess)
-    NewLoad = generateStrideOneReductionLoad(Load, ScalarMaps[0]);
-  else if (Access.isStrideZero(isl_map_copy(Schedule)))
+  if (Access.isStrideZero(isl_map_copy(Schedule)))
     NewLoad = generateStrideZeroLoad(Load, ScalarMaps[0]);
   else if (Access.isStrideOne(isl_map_copy(Schedule)))
     NewLoad = generateStrideOneLoad(Load, ScalarMaps[0]);
@@ -589,27 +551,12 @@ void VectorBlockGenerator::copyStore(const StoreInst *Store,
   int VectorWidth = getVectorWidth();
 
   const MemoryAccess &Access = Statement.getAccessFor(Store);
-  bool reductionAccess = Access.isReductionAccess();
 
   const Value *Pointer = Store->getPointerOperand();
   Value *Vector = getVectorValue(Store->getValueOperand(), VectorMap,
                                  ScalarMaps, getLoopForInst(Store));
-  if (reductionAccess) {
-    assert(Access.isRead() && Access.getOriginalType() == MemoryAccess::Write);
 
-    ReductionHandler &RH = P->getAnalysis<ReductionHandler>();
-    Value     *VectorPtr = RH.getReductionVecPointer(Store, VectorWidth);
-    StoreInst     *Store = Builder.CreateStore(Vector, VectorPtr);
-    (void) Store;
-
-    PointerType *VecPtrTy = dyn_cast<PointerType>(VectorPtr->getType());
-    assert(VecPtrTy && "Reduction vector pointer has no pointer type");
-    VectorType  *VectorTy = dyn_cast<VectorType>(VecPtrTy->getElementType());
-    assert(VectorTy && "Reduction vector pointer has no pointer to vector type");
-
-    //Store->setAlignment(VectorTy->getBitWidth() / 8);
-
-  } else if (Access.isStrideOne(isl_map_copy(Schedule))) {
+  if (Access.isStrideOne(isl_map_copy(Schedule))) {
     Type *VectorPtrType = getVectorPtrTy(Pointer, VectorWidth);
     Value *NewPointer = getNewValue(Pointer, ScalarMaps[0], GlobalMaps[0],
                                     VLTS[0], getLoopForInst(Store));

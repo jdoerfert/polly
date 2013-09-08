@@ -49,6 +49,9 @@ struct IslAstUser {
 
   // The node is the innermost parallel loop.
   int IsInnermostParallel;
+
+  // The node is the innermost parallel loop.
+  int IsReduction;
 };
 
 class IslAstInfo : public ScopPass {
