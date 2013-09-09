@@ -29,6 +29,8 @@
 #include "polly/Options.h"
 #include "polly/ScopInfo.h"
 #include "polly/TempScopInfo.h"
+#include "polly/ReductionInfo.h"
+#include "polly/ReductionHandler.h"
 #include "polly/CodeGen/CodeGeneration.h"
 #include "polly/CodeGen/BlockGenerators.h"
 #include "polly/CodeGen/LoopGenerators.h"
@@ -65,6 +67,25 @@ static cl::opt<bool>
 OpenMP("enable-polly-openmp", cl::desc("Generate OpenMP parallel code"),
        cl::value_desc("OpenMP code generation enabled if true"),
        cl::init(false), cl::ZeroOrMore, cl::cat(PollyCategory));
+
+// Use AtomicRMWInst instructions to aggregate the thread local reduction
+// variables at the end of OpenMP sub-functions. An alternative is to limit
+// the number of OpenMP threads. This is the default and usually supersedes
+// the vector aggregation enabled when the number of OpenMP threads is limited.
+bool AtomicReductions;
+static cl::opt<bool, true>
+AtomicReductionsF("polly-openmp-reductions-atomic",
+             cl::desc("Use atomic instructions for parallel code generation."),
+             cl::Hidden, cl::location(AtomicReductions), cl::init(false),
+             cl::ZeroOrMore, cl::cat(PollyCategory));
+
+// Allow the user to limit the number of OpenMP threads.
+unsigned NoOpenMPThreads;
+static cl::opt<unsigned, true>
+NoOpenMPThreadsF("polly-openmp-threads",
+        cl::desc("Limit the number of OpenMP threads"),
+        cl::location(NoOpenMPThreads), cl::init(0),
+        cl::ZeroOrMore, cl::cat(PollyCategory));
 
 #ifdef GPU_CODEGEN
 static cl::opt<bool>
@@ -257,6 +278,12 @@ private:
   // Codegenerator for clast expressions.
   ClastExpCodeGen ExpGen;
 
+  /// @brief Vector to store reduction prepare statements
+  ///
+  /// Prepare statements, not yet matched by a fixup statement, are stored in
+  /// the order they are encountered (from front to back).
+  SmallVector<ScopStmt *, 8> PrepareStatements;
+
   // Do we currently generate parallel code?
   bool parallelCodeGeneration;
 
@@ -285,9 +312,11 @@ private:
 
   /// @brief Create OpenMP structure values.
   ///
-  /// Create a list of values that has to be stored into the OpenMP subfuncition
-  /// structure.
-  SetVector<Value *> getOMPValues(const clast_stmt *Body);
+  /// Create a set of values that has to be stored into the OpenMP subfuncition
+  /// structure. Additionally prepare thread local variables for contained
+  /// reduction memory accesses.
+  SetVector<Value *> getOMPValues(const clast_stmt *Body,
+                                  OMPGenerator::ValueToValueMapTy &RMap);
 
   /// @brief Update ClastVars and ValueMap according to a value map.
   ///
@@ -329,7 +358,7 @@ private:
   ///
   /// @return bool Returns true if the incoming clast_for statement can
   ///              execute in parallel.
-  bool isParallelFor(const clast_for *For);
+  bool isParallelFor(const clast_for *For, bool allDeps = true);
 
   bool isInnermostLoop(const clast_for *f);
 
@@ -438,6 +467,46 @@ void ClastStmtCodeGen::codegen(const clast_user_stmt *u,
   if (u->substitutions)
     codegenSubstitutions(u->substitutions, Statement);
 
+  if (Statement->isReductionStatement()) {
+
+    // Reduction statements need an empty basic block as entry point
+    // in case we have to generate code later on.
+    BasicBlock *ReductionBB = SplitBlock(Builder.GetInsertBlock(),
+                                         Builder.GetInsertPoint(), P);
+    StringRef StatementName = StringRef(Statement->getBaseName());
+    ReductionBB->setName("polly.red." + StatementName);
+
+    Builder.SetInsertPoint(ReductionBB->begin());
+    Statement->setBasicBlock(ReductionBB);
+
+    if (Statement->isReductionPrepareStatement()) {
+
+      // Preparation statements are just stored as we dont know if we need to
+      // create any reductions vectors or not
+      PrepareStatements.push_back(Statement);
+
+    } else if (Statement->isReductionFixupStatement()) {
+
+      // For a fixup statement we find the matching prepare statement and
+      // generate code to combine the results stored in the reduction vectors
+      assert(!PrepareStatements.empty() &&
+             "Cannot create fixup code without prepare statements");
+
+      // Pop the corresponding (last) prepare statement
+      ScopStmt *PrepareStmt = PrepareStatements.back();
+      PrepareStatements.pop_back();
+
+      // Combine and store the results stored in the reduction vectors
+      ReductionHandler &RH = P->getAnalysis<ReductionHandler>();
+      RH.createReductionResult(Builder, PrepareStmt, ValueMap);
+
+    } else {
+      llvm_unreachable("Unknown ScopStmt type !");
+    }
+
+    return;
+  }
+
   int VectorDimensions = IVS ? IVS->size() : 1;
 
   if (VectorDimensions == 1) {
@@ -462,6 +531,10 @@ void ClastStmtCodeGen::codegen(const clast_user_stmt *u,
   isl_map *Schedule = extractPartialSchedule(Statement, Domain);
   VectorBlockGenerator::generate(Builder, *Statement, VectorMap, VLTS, Schedule,
                                  P);
+
+  // As for scalar code we store the mapping from old to new values
+  ValueMap.insert(VectorMap[0].begin(), VectorMap[0].end());
+
   isl_map_free(Schedule);
 }
 
@@ -495,11 +568,73 @@ void ClastStmtCodeGen::codegenForSequential(const clast_for *f) {
 
 // Helper class to determine all scalar parameters used in the basic blocks of a
 // clast. Scalar parameters are scalar variables defined outside of the SCoP.
+// It will also collect all reduction accesses inside the basic blocks and
+// prepare thread local variables to compute the reduction separately.
 class ParameterVisitor : public ClastVisitor {
   std::set<Value *> Values;
+  ReductionHandler &RH;
+  OMPGenerator::ValueToValueMapTy &RMap;
 
 public:
-  ParameterVisitor() : ClastVisitor(), Values() {}
+  ParameterVisitor(ReductionHandler &RH, OMPGenerator::ValueToValueMapTy &RMap)
+    : ClastVisitor(), Values(), RH(RH), RMap(RMap) {}
+
+  /// @brief Visit a reduction memory access
+  ///
+  /// This prepares a thread local pointer for the reduction access
+  void visitReductionMemoryAccess(MemoryAccess &Access, Instruction *Inst) {
+    assert(Inst == Access.getAccessInstruction());
+
+    // Get the pointer used by this memory access
+    Value *Pointer = 0;
+    if (LoadInst *Load = dyn_cast<LoadInst>(Inst))
+      Pointer = Load->getPointerOperand();
+    else if (StoreInst *Store = dyn_cast<StoreInst>(Inst))
+      Pointer = Store->getPointerOperand();
+    assert(Pointer && "Reduction memory access has no pointer operand");
+
+    // Check for atomic reduction handling (via AtomicRMWInst) first, then
+    // for a limited number of OpenMP threads. If none is true warn the user
+    // and enable atomic reduction handling.
+    if (AtomicReductions) {
+
+      // For atomic reduction handling we map the current access instruction
+      // to the used pointer. We need the instruction to get the reduction
+      // access, which 'knows' the identity element and the AtomicRMWBinOp.
+      RMap[Pointer] = const_cast<Instruction*>(Inst);
+
+    } else if (NoOpenMPThreads != 0) {
+
+      // For a limited number of OpenMP threads we can utilize the vector
+      // interface of the reduction handler. It can create #Threads locations
+      // in a vector and aggregate them later on in log(#Threads) instructions.
+      Value *VectorPtr  = RH.getReductionVecPointer(Inst, NoOpenMPThreads);
+      // The original pointer will be mapped to the vector pointer here,
+      // then to the re-loaded vector pointer (from the OpenMP struct) and
+      // then to a GEP instruction which selects the local pointer using the
+      // thread ID.
+      RMap[Pointer] = VectorPtr;
+      // This will cause the OpenMP struct to contain the new vector pointer
+      Values.insert(VectorPtr);
+
+    } else {
+
+      // Atomic reduction handling was possible but not enabled and no limit
+      // on the number of threads was set. To preserve soundness the former
+      // one will be enabled.
+      AtomicReductions = true;
+
+      errs() << "\n"
+        << "Reduction detection and OpenMP code generation are enabled, but:\n"
+        << " * no limit on the #OpenMP threads (-polly-openmp-threads=<uint>)\n"
+        << " * no atomic reduction handling (-polly-openmp-reductions-atomic)\n"
+        << "Fall back to atomic reduction handling!\n\n";
+
+      // This will avoid code duplication
+      visitReductionMemoryAccess(Access, Inst);
+    }
+
+  }
 
   void visitUser(const clast_user_stmt *Stmt) {
     const ScopStmt *S = static_cast<const ScopStmt *>(Stmt->statement->usr);
@@ -509,6 +644,12 @@ public:
     for (BasicBlock::const_iterator BI = BB->begin(), BE = BB->end(); BI != BE;
          ++BI) {
       const Instruction &Inst = *BI;
+
+      // Check for reduction memory accesses inside the basic block
+      MemoryAccess *Access = S->lookupAccessFor(&Inst);
+      if (Access && Access->isReductionAccess())
+        visitReductionMemoryAccess(*Access, const_cast<Instruction*>(&Inst));
+
       for (Instruction::const_op_iterator II = Inst.op_begin(),
                                           IE = Inst.op_end();
            II != IE; ++II) {
@@ -530,7 +671,9 @@ public:
   inline const_iterator end() const { return Values.end(); }
 };
 
-SetVector<Value *> ClastStmtCodeGen::getOMPValues(const clast_stmt *Body) {
+SetVector<Value *>
+ClastStmtCodeGen::getOMPValues(const clast_stmt *Body,
+                               OMPGenerator::ValueToValueMapTy &RMap) {
   SetVector<Value *> Values;
 
   // The clast variables
@@ -541,8 +684,10 @@ SetVector<Value *> ClastStmtCodeGen::getOMPValues(const clast_stmt *Body) {
   // Find the temporaries that are referenced in the clast statements'
   // basic blocks but are not defined by these blocks (e.g., references
   // to function arguments or temporaries defined before the start of
-  // the SCoP).
-  ParameterVisitor Params;
+  // the SCoP). Also collect information about reduction memory accesses
+  // inside those blocks and prepare thread local variables for them.
+  ReductionHandler &RH = P->getAnalysis<ReductionHandler>();
+  ParameterVisitor Params(RH, RMap);
   Params.visit(Body);
 
   for (ParameterVisitor::const_iterator PI = Params.begin(), PE = Params.end();
@@ -592,6 +737,7 @@ void ClastStmtCodeGen::codegenForOpenMP(const clast_for *For) {
   IntegerType *IntPtrTy = getIntPtrTy();
   SetVector<Value *> Values;
   OMPGenerator::ValueToValueMapTy VMap;
+  OMPGenerator::ValueToValueMapTy RMap;
   OMPGenerator OMPGen(Builder, P);
 
   Stride = Builder.getInt(APInt_from_MPZ(For->stride));
@@ -599,9 +745,9 @@ void ClastStmtCodeGen::codegenForOpenMP(const clast_for *For) {
   LB = ExpGen.codegen(For->LB, IntPtrTy);
   UB = ExpGen.codegen(For->UB, IntPtrTy);
 
-  Values = getOMPValues(For->body);
+  Values = getOMPValues(For->body, RMap);
 
-  IV = OMPGen.createParallelLoop(LB, UB, Stride, Values, VMap, &LoopBody);
+  IV = OMPGen.createParallelLoop(LB, UB, Stride, Values, VMap, RMap, &LoopBody);
   BasicBlock::iterator AfterLoop = Builder.GetInsertPoint();
   Builder.SetInsertPoint(LoopBody);
 
@@ -614,6 +760,10 @@ void ClastStmtCodeGen::codegenForOpenMP(const clast_for *For) {
 
   if (For->body)
     codegen(For->body);
+
+  // Notify the reduction handler that the sub-function was generated completely
+  ReductionHandler &RH = P->getAnalysis<ReductionHandler>();
+  RH.unsetSubFunction(ValueMap);
 
   // Restore the original values.
   ValueMap = ValueMapCopy;
@@ -840,29 +990,77 @@ void ClastStmtCodeGen::codegenForVector(const clast_for *F) {
   ClastVars.erase(F->iterator);
 }
 
-bool ClastStmtCodeGen::isParallelFor(const clast_for *f) {
+bool ClastStmtCodeGen::isParallelFor(const clast_for *f, bool allDeps) {
   isl_set *Domain = isl_set_copy(isl_set_from_cloog_domain(f->domain));
   assert(Domain && "Cannot access domain of loop");
 
   Dependences &D = P->getAnalysis<Dependences>();
 
-  return D.isParallelDimension(Domain, isl_set_n_dim(Domain));
+  return D.isParallelDimension(Domain, isl_set_n_dim(Domain), allDeps);
 }
 
 void ClastStmtCodeGen::codegen(const clast_for *f) {
   bool Vector = PollyVectorizerChoice != VECTORIZER_NONE;
-  if ((Vector || OpenMP) && isParallelFor(f)) {
+  bool IsParallel = isParallelFor(f, true);
+  bool IsReductionParallel = isParallelFor(f, false);
+  dbgs() << "CG: Vector: " << Vector << " isParallel: " << IsParallel
+         << " isReductionParallel: " << IsReductionParallel
+         << " isInnerMost: " << isInnermostLoop(f) << "\n";
+
+  if ((Vector || OpenMP) && IsReductionParallel) {
     if (Vector && isInnermostLoop(f) && (-1 != getNumberOfIterations(f)) &&
         (getNumberOfIterations(f) <= 16)) {
+
+      ReductionHandler &RH = P->getAnalysis<ReductionHandler>();
+      StringRef StatementName = StringRef(Builder.GetInsertBlock()->getName());
+
+      if (IsReductionParallel && !IsParallel) {
+        BasicBlock *RedPrepBB =
+            SplitBlock(Builder.GetInsertBlock(), Builder.GetInsertPoint(), P);
+        RedPrepBB->setName("polly.red.prep." + StatementName);
+        Builder.SetInsertPoint(RedPrepBB->begin());
+        RH.setReductionPrepareBlock(RedPrepBB);
+      }
+
       codegenForVector(f);
+
+      if (IsReductionParallel && !IsParallel) {
+        BasicBlock *RedFixBB =
+            SplitBlock(Builder.GetInsertBlock(), Builder.GetInsertPoint(), P);
+        RedFixBB->setName("polly.red.fix." + StatementName);
+        Builder.SetInsertPoint(RedFixBB->begin());
+
+        RH.createReductionResult(Builder, 0, ValueMap);
+        RH.setReductionPrepareBlock(0);
+      }
       return;
     }
 
     if (OpenMP && !parallelCodeGeneration) {
+
+      ReductionHandler &RH = P->getAnalysis<ReductionHandler>();
+      StringRef StatementName = StringRef(Builder.GetInsertBlock()->getName());
+
+      if (IsReductionParallel && !IsParallel) {
+        dbgs() << "\nBBB\n";
+        RH.setReductionPrepareBlock(Builder.GetInsertBlock());
+      }
+
       parallelCodeGeneration = true;
       parallelLoops.push_back(f->iterator);
       codegenForOpenMP(f);
       parallelCodeGeneration = false;
+
+      if (IsReductionParallel && !IsParallel) {
+        BasicBlock *RedFixBB =
+            SplitBlock(Builder.GetInsertBlock(), Builder.GetInsertPoint(), P);
+        RedFixBB->setName("polly.red.fix." + StatementName);
+        Builder.SetInsertPoint(RedFixBB->begin());
+
+        RH.createReductionResult(Builder, 0, ValueMap);
+        RH.setReductionPrepareBlock(0);
+      }
+
       return;
     }
   }
@@ -932,7 +1130,7 @@ void ClastStmtCodeGen::codegen(const clast_guard *g) {
   Loop *L = LI.getLoopFor(CondBB);
   if (L) {
     L->addBasicBlockToLoop(ThenBB, LI.getBase());
-    L->addBasicBlockToLoop(MergeBB, LI.getBase());
+    //L->addBasicBlockToLoop(MergeBB, LI.getBase());
   }
 
   codegen(g->then);
@@ -1001,6 +1199,7 @@ public:
 
   bool runOnScop(Scop &S) {
     ParallelLoops.clear();
+    S.dump();
 
     assert(!S.getRegion().isTopLevelRegion() &&
            "Top level regions are not supported");
@@ -1013,11 +1212,13 @@ public:
 
     ClastStmtCodeGen CodeGen(&S, Builder, this);
     CloogInfo &C = getAnalysis<CloogInfo>();
+    C.printScop(errs());
     CodeGen.codegen(C.getClast());
 
     ParallelLoops.insert(ParallelLoops.begin(),
                          CodeGen.getParallelLoops().begin(),
                          CodeGen.getParallelLoops().end());
+    StartBlock->getParent()->getParent()->dump();
     return true;
   }
 
@@ -1038,6 +1239,7 @@ public:
     AU.addRequired<ScopInfo>();
     AU.addRequired<DataLayout>();
     AU.addRequired<LoopInfo>();
+    AU.addRequired<ReductionHandler>();
 
     AU.addPreserved<CloogInfo>();
     AU.addPreserved<Dependences>();
@@ -1045,6 +1247,9 @@ public:
     AU.addPreserved<DominatorTree>();
     AU.addPreserved<ScopDetection>();
     AU.addPreserved<ScalarEvolution>();
+    AU.addPreserved<ReductionInfo>();
+    AU.addPreserved<ReductionHandler>();
+    AU.addPreservedID(BasicReductionInfoID);
 
     // FIXME: We do not yet add regions for the newly generated code to the
     //        region tree.
@@ -1062,8 +1267,8 @@ Pass *polly::createCodeGenerationPass() { return new CodeGeneration(); }
 
 INITIALIZE_PASS_BEGIN(CodeGeneration, "polly-codegen",
                       "Polly - Create LLVM-IR from SCoPs", false, false);
-INITIALIZE_PASS_DEPENDENCY(CloogInfo);
 INITIALIZE_AG_DEPENDENCY(Dependences);
+INITIALIZE_PASS_DEPENDENCY(CloogInfo);
 INITIALIZE_PASS_DEPENDENCY(DominatorTree);
 INITIALIZE_PASS_DEPENDENCY(RegionInfo);
 INITIALIZE_PASS_DEPENDENCY(ScalarEvolution);

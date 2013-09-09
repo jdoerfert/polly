@@ -559,9 +559,10 @@ bool IndependentBlocks::runOnFunction(llvm::Function &F) {
 }
 
 void IndependentBlocks::verifyAnalysis() const {
-  for (ScopDetection::const_iterator I = SD->begin(), E = SD->end(); I != E;
-       ++I)
-    verifyScop(*I);
+  // JD: Disabled this
+  //for (ScopDetection::const_iterator I = SD->begin(), E = SD->end(); I != E;
+       //++I)
+    //verifyScop(*I);
 }
 
 void IndependentBlocks::verifyScop(const Region *R) const {

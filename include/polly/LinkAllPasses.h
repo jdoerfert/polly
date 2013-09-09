@@ -66,9 +66,12 @@ llvm::Pass *createScopLibImporterPass();
 llvm::Pass *createNoReductionInfoPass();
 llvm::Pass *createBasicReductionInfoPass();
 
+llvm::Pass *createExplicitReductionHandlerPass();
+
 llvm::Pass *createImplicitReductionHandlerPass();
 llvm::Pass *createImplicitReductionDependencesPass();
 
+extern char &BasicReductionInfoID;
 extern char &IndependentBlocksID;
 extern char &CodePreparationID;
 }
@@ -124,6 +127,8 @@ struct PollyForcePassLinking {
     createNoReductionInfoPass();
     createBasicReductionInfoPass();
 
+    createExplicitReductionHandlerPass();
+
     createImplicitReductionHandlerPass();
     createImplicitReductionDependencesPass();
   }
@@ -154,6 +159,10 @@ void initializePollyIndVarSimplifyPass(llvm::PassRegistry &);
 void initializeReductionInfoAnalysisGroup(llvm::PassRegistry &);
 void initializeNoReductionInfoPass(llvm::PassRegistry &);
 void initializeBasicReductionInfoPass(llvm::PassRegistry &);
+
+void initializeReductionHandlerAnalysisGroup(llvm::PassRegistry &);
+void initializeExplicitReductionHandlerGroup(llvm::PassRegistry &);
+void initializeImplicitReductionHandlerGroup(llvm::PassRegistry &);
 }
 
 #endif

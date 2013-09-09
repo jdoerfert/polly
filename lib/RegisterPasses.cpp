@@ -24,8 +24,9 @@
 #include "polly/CodeGen/Cloog.h"
 #include "polly/CodeGen/CodeGeneration.h"
 #include "polly/Dependences.h"
-#include "polly/ImplicitReductionDependences.h"
+#include "polly/ExplicitReductionHandler.h"
 #include "polly/ImplicitReductionHandler.h"
+#include "polly/ImplicitReductionDependences.h"
 #include "polly/LinkAllPasses.h"
 #include "polly/Options.h"
 #include "polly/ScopDetection.h"
@@ -75,7 +76,6 @@ enum ReductionInfoChoice {
   NO_RI,
   BASIC_RI
 };
-
 static cl::opt<ReductionInfoChoice> ReductionDetection(
     "polly-reduction-detection", cl::desc("Select the reduction detection"),
     cl::values(
@@ -84,6 +84,21 @@ static cl::opt<ReductionInfoChoice> ReductionDetection(
         clEnumValEnd),
     cl::Hidden, cl::init(BASIC_RI), cl::ZeroOrMore,
     cl::cat(PollyCategory));
+
+
+enum ReductionHandlerChoice {
+  NONE_RH,
+  EXPLICIT_RH,
+  IMPLICIT_RH
+};
+static cl::opt<ReductionHandlerChoice> ReductionHandlerUsed(
+    "polly-reduction-handler", cl::desc("Select the reduction handler"),
+    cl::values(
+        clEnumValN(NONE_RH, "none", "No reduction handler"),
+        clEnumValN(EXPLICIT_RH, "explicit", "Explicit reduction handler"),
+        clEnumValN(IMPLICIT_RH, "implicit", "Implicit reduction handler"),
+        clEnumValEnd),
+    cl::Hidden, cl::init(NONE_RH), cl::ZeroOrMore, cl::cat(PollyCategory));
 
 enum CodeGenChoice {
 #ifdef CLOOG_FOUND
@@ -195,8 +210,11 @@ static void initializePollyPasses(PassRegistry &Registry) {
   initializeReductionInfoAnalysisGroup(Registry);
   initializeNoReductionInfoPass(Registry);
   initializeBasicReductionInfoPass(Registry);
+
   initializeImplicitReductionDependencesPass(Registry);
   initializeImplicitReductionHandlerPass(Registry);
+
+  initializeExplicitReductionHandlerPass(Registry);
 }
 
 /// @brief Initialize Polly passes when library is loaded.
@@ -305,6 +323,16 @@ static void registerPollyPasses(llvm::PassManagerBase &PM) {
   case OPTIMIZER_ISL:
     PM.add(polly::createIslScheduleOptimizerPass());
     break;
+  }
+
+  switch (ReductionHandlerUsed) {
+  case IMPLICIT_RH:
+    PM.add(polly::createBasicReductionInfoPass());
+    PM.add(polly::createImplicitReductionDependencesPass());
+    PM.add(polly::createImplicitReductionHandlerPass());
+    break;
+
+  default:;
   }
 
   if (ExportJScop)

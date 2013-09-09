@@ -68,22 +68,18 @@ public:
   /// @brief Check if a new scattering is valid.
   ///
   /// @param NewScattering The new scatterings
-  /// @param AllDeps Flag for TODO
   ///
   /// @return bool True if the new scattering is valid, false it it reverses
   ///              dependences.
-  virtual bool isValidScattering(StatementToIslMapTy *NewScatterings,
-                                 bool AllDeps = true) = 0;
+  virtual bool isValidScattering(StatementToIslMapTy *NewScatterings) = 0;
 
   /// @brief Check if the scattering of a scop statement is valid
   ///
   /// @param Stmt The scop statement in question
-  /// @param AllDeps Flag for TODO
   ///
   /// @return bool True if the scattering is valid, false it it reverses
   ///              dependences.
-  virtual bool isValidScattering(ScopStmt *Stmt,
-                                 bool AllDeps = true) = 0;
+  virtual bool isValidScattering(ScopStmt *Stmt) = 0;
 
   /// @brief Check if a dimension of the Scop can be executed in parallel.
   ///
@@ -91,7 +87,7 @@ public:
   ///                   parallel.
   /// @param ParallelDimension The scattering dimension that is being executed
   ///                          in parallel.
-  /// @param AllDeps Flag for TODO
+  /// @param AllDeps TODO
   ///
   /// @return bool Returns true, if executing parallelDimension in parallel is
   ///              valid for the scattering domain subset given.
@@ -104,8 +100,15 @@ public:
   /// @param Kinds This integer defines the different kinds of dependences
   ///              that will be returned. To return more than one kind, the
   ///              different kinds are 'ored' together.
-  /// @param AllDeps Flag for TODO
-  virtual isl_union_map *getDependences(int Kinds, bool AllDeps = false) = 0;
+  virtual isl_union_map *getDependences(int Kinds) = 0;
+
+  /// @brief Get the minimal dependences in this Scop.
+  ///
+  /// @param Kinds This integer defines the different kinds of dependences
+  ///              that will be returned. To return more than one kind, the
+  ///              different kinds are 'ored' together.
+  /// TODO
+  virtual isl_union_map *getMinimalDependences(int Kinds) = 0;
 
   /// getAdjustedAnalysisPointer - This method is used when a pass implements
   /// an analysis interface through multiple inheritance. If needed, it
@@ -124,18 +127,16 @@ public:
   /// @brief Dependences interface
   ///
   ///@{
-  virtual bool isValidScattering(StatementToIslMapTy *NewScatterings,
-                                 bool /* unused */ AllDeps = true) override;
+  virtual bool isValidScattering(StatementToIslMapTy *NewScatterings) override;
 
-  virtual bool isValidScattering(ScopStmt *Stmt,
-                                 bool /* unused */ AllDeps = true) override;
+  virtual bool isValidScattering(ScopStmt *Stmt) override;
 
   virtual bool isParallelDimension(__isl_take isl_set *LoopDomain,
                                    unsigned ParallelDimension,
-                                   bool /* unused */ AllDeps = true) override;
+                                   bool AllDeps = true) override;
 
-  virtual isl_union_map *
-  getDependences(int Kinds, bool /* unused */ AllDeps = true) override;
+  virtual isl_union_map * getDependences(int Kinds) override;
+  virtual isl_union_map * getMinimalDependences(int Kinds) override;
 
   ///@}
 

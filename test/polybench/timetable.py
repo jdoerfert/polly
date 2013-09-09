@@ -7,8 +7,8 @@ results = {}
 baseline = 'no_opt'
 
 for filename in files:
-  if 'mm' in filename:
-    continue
+  #if 'mm' in filename:
+    #continue
   fd = open(filename, 'r')
   time = float(fd.read()[:-2])
   fd.close()

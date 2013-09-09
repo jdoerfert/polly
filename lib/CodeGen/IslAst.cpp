@@ -139,8 +139,8 @@ static void freeIslAstUser(void *Ptr) {
 }
 
 static bool astScheduleDimIsParallelTestDeps(__isl_keep isl_ast_build *Build,
-                                             Dependences *D,
-                                             __isl_take isl_union_map *Deps) {
+                                             __isl_take isl_union_map *Deps,
+                                             Dependences *D) {
   isl_map *ScheduleDeps, *Test;
   isl_space *ScheduleSpace;
   unsigned Dimension, IsParallel;
@@ -163,8 +163,6 @@ static bool astScheduleDimIsParallelTestDeps(__isl_keep isl_ast_build *Build,
   isl_map_free(Test);
   isl_map_free(ScheduleDeps);
 
-  dbgs() << "IsParallel: " << IsParallel << "\n";
-
   return IsParallel;
 }
 
@@ -186,30 +184,28 @@ static bool astScheduleDimIsParallel(__isl_keep isl_ast_build *Build,
   isl_union_map *Schedule, *Deps, *AllDeps;
 
   Schedule = isl_ast_build_get_schedule(Build);
-  AllDeps = D->getDependences(Dependences::TYPE_ALL, /* allDeps? */ true);
+  AllDeps = D->getDependences(Dependences::TYPE_ALL);
   AllDeps = isl_union_map_apply_range(AllDeps, isl_union_map_copy(Schedule));
   AllDeps = isl_union_map_apply_domain(AllDeps, Schedule);
 
-  dbgs() << "AllDeps is empty: " << (isl_union_map_is_empty(AllDeps)) << "\n";
   if (isl_union_map_is_empty(AllDeps)) {
     isl_union_map_free(AllDeps);
     IsReduction = false;
     return true;
-  } else if(astScheduleDimIsParallelTestDeps(Build, D, AllDeps)) {
+  } else if(astScheduleDimIsParallelTestDeps(Build, AllDeps, D)) {
     IsReduction = false;
     return true;
   }
 
   Schedule = isl_ast_build_get_schedule(Build);
-  Deps = D->getDependences(Dependences::TYPE_ALL, /* allDeps? */ false);
+  Deps = D->getMinimalDependences(Dependences::TYPE_ALL);
   Deps = isl_union_map_apply_range(Deps, isl_union_map_copy(Schedule));
   Deps = isl_union_map_apply_domain(Deps, Schedule);
-  dbgs() << "   Deps is empty: " << (isl_union_map_is_empty(Deps)) << "\n";
   if (isl_union_map_is_empty(Deps)) {
     IsReduction = true;
     isl_union_map_free(Deps);
     return true;
-  } else if (astScheduleDimIsParallelTestDeps(Build, D, Deps)) {
+  } else if (astScheduleDimIsParallelTestDeps(Build, Deps, D)) {
     IsReduction = true;
     return true;
   }

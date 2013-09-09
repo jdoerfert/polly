@@ -158,7 +158,7 @@ bool ScopDependences::runOnScop(Scop &S) {
   return false;
 }
 
-bool ScopDependences::isValidScattering(ScopStmt *Stmt, bool) {
+bool ScopDependences::isValidScattering(ScopStmt *Stmt) {
 
   if (LegalityCheckDisabled)
     return true;
@@ -193,8 +193,7 @@ bool ScopDependences::isValidScattering(ScopStmt *Stmt, bool) {
   return IsValid;
 }
 
-bool ScopDependences::isValidScattering(StatementToIslMapTy *NewScattering,
-                                        bool) {
+bool ScopDependences::isValidScattering(StatementToIslMapTy *NewScattering) {
   Scop &S = getCurScop();
 
   if (LegalityCheckDisabled)
@@ -273,9 +272,6 @@ bool ScopDependences::isParallelDimension(__isl_take isl_set *ScheduleSubset,
 
   Deps = getDependences(TYPE_ALL);
 
-  errs() << "Deps: ";
-  isl_union_map_dump(Deps);
-
   if (isl_union_map_is_empty(Deps)) {
     isl_union_map_free(Deps);
     isl_set_free(ScheduleSubset);
@@ -341,7 +337,7 @@ void ScopDependences::releaseMemory() {
   RAW = WAR = WAW = NULL;
 }
 
-isl_union_map *ScopDependences::getDependences(int Kinds, bool) {
+isl_union_map *ScopDependences::getDependences(int Kinds) {
   isl_space *Space = isl_union_map_get_space(RAW);
   isl_union_map *Deps = isl_union_map_empty(Space);
 
@@ -357,6 +353,10 @@ isl_union_map *ScopDependences::getDependences(int Kinds, bool) {
   Deps = isl_union_map_coalesce(Deps);
   Deps = isl_union_map_detect_equalities(Deps);
   return Deps;
+}
+
+isl_union_map *ScopDependences::getMinimalDependences(int Kinds) {
+  return getDependences(Kinds);
 }
 
 void *ScopDependences::getAdjustedAnalysisPointer(const void *ID) {

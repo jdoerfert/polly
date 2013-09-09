@@ -13,7 +13,10 @@
 //===----------------------------------------------------------------------===//
 
 #include "polly/ScopDetection.h"
+#include "polly/ReductionInfo.h"
+#include "polly/ReductionHandler.h"
 #include "polly/CodeGen/LoopGenerators.h"
+
 #include "llvm/Analysis/Dominators.h"
 #include "llvm/Analysis/LoopInfo.h"
 #include "llvm/IR/DataLayout.h"
@@ -206,6 +209,26 @@ void OMPGenerator::createCallLoopEndNowait() {
   Builder.CreateCall(F);
 }
 
+Value* OMPGenerator::getThreadID() {
+  if (ThreadID)
+    return ThreadID;
+
+  const char *Name = "omp_get_thread_num";
+  Module *M = getModule();
+  Function *F = M->getFunction(Name);
+
+  // If F is not available, declare it.
+  if (!F) {
+    GlobalValue::LinkageTypes Linkage = Function::ExternalLinkage;
+
+    FunctionType *Ty = FunctionType::get(Builder.getInt32Ty(), false);
+    F = Function::Create(Ty, Linkage, Name, M);
+  }
+
+  ThreadID = Builder.CreateCall(F);
+  return ThreadID;
+}
+
 IntegerType *OMPGenerator::getIntPtrTy() {
   return P->getAnalysis<DataLayout>().getIntPtrType(Builder.getContext());
 }
@@ -257,9 +280,72 @@ void OMPGenerator::extractValuesFromStruct(SetVector<Value *> OldValues,
   }
 }
 
+void OMPGenerator::createThreadLocalReductionPointers(ValueToValueMapTy &Map,
+                                                      ValueToValueMapTy &RMap,
+                                                      AccessPointerMapT &AMap,
+                                                      ReductionHandler &RH) {
+  for (ValueToValueMapTy::iterator I = RMap.begin(), E = RMap.end();
+       I != E; ++I) {
+    Value *LocalReductionPointer = 0;
+    Type   *ReductionPointerType = I->first->getType()->getPointerElementType();
+    const Instruction *RedInst   = cast<Instruction>(I->second);
+
+    // Atomic reduction handling with a local, stack allocated variable
+    // usually supersedes the vector method using the thread ID, but it might
+    // not be possible.
+    if (RedInst && RH.isMappedToReductionAccess(RedInst)) {
+      const ReductionAccess &RA = RH.getReductionAccess(RedInst);
+
+      LocalReductionPointer = Builder.CreateAlloca(ReductionPointerType, 0,
+                               RA.getBaseValue()->getName() + ".thread.local");
+      Builder.CreateStore(RA.getIdentityElement(ReductionPointerType),
+                          LocalReductionPointer);
+
+      // Map the reduction access instruction to the reduction pointer.
+      // We need this later to create AtomicRMW instructions
+      AMap[&RA] = I->first;
+    }
+
+    // If atomic reduction handling is disabled or not available (e.g.,
+    // for reductions with multiplication) we have to use the vector interface,
+    // hence the number of OpenMP threads need to be limited. This should have
+    // been checked and/or corrected earlier as it is to late at this point.
+    if (LocalReductionPointer == 0) {
+      assert(NoOpenMPThreads != 0 &&
+             "No limit for the number of OpenMP threads set");
+      PointerType *PointerTy = dyn_cast<PointerType>(I->second->getType());
+      VectorType  *VectorTy = dyn_cast<VectorType>(PointerTy->getElementType());
+      assert(VectorTy && VectorTy->getNumElements() == NoOpenMPThreads &&
+             "Invalid reduction access pointer mapping");
+      (void) PointerTy;
+      (void) VectorTy;
+
+      // Get the current thread ID and cast the vector to an array
+      Value   *ThreadID = getThreadID();
+      ArrayType *ArrayT = ArrayType::get(ReductionPointerType, NoOpenMPThreads);
+      Value *VecAsArray = Builder.CreateBitCast(Map[I->second],
+                                                ArrayT->getPointerTo());
+      // Select the array element with the thread ID
+      SmallVector<Value *, 2> Indices;
+      Indices.push_back(Builder.getInt32(0));
+      Indices.push_back(ThreadID);
+      LocalReductionPointer = Builder.CreateGEP(VecAsArray, Indices);
+    }
+
+    assert(LocalReductionPointer &&
+           "Could not create thread local reduction variable");
+
+    // Map the old reduction memory access pointer to the thread local
+    // reduction variable. No further changes to block generation needed.
+    Map[I->first] = LocalReductionPointer;
+  }
+
+}
+
 Value *OMPGenerator::createSubfunction(Value *Stride, Value *StructData,
                                        SetVector<Value *> Data,
                                        ValueToValueMapTy &Map,
+                                       ValueToValueMapTy &RMap,
                                        Function **SubFunction) {
   Function *FN = createSubfunctionDefinition();
 
@@ -293,6 +379,14 @@ Value *OMPGenerator::createSubfunction(Value *Stride, Value *StructData,
                                       "omp.userContext");
 
   extractValuesFromStruct(Data, UserContext, Map);
+
+  // Notify the reduction handler about the new sub-function
+  ReductionHandler &RH = P->getAnalysis<ReductionHandler>();
+  RH.setSubFunction(Builder, ExitBB);
+  // Create thread local reduction pointers after we extracted the values
+  AccessPointerMapT AMap;
+  createThreadLocalReductionPointers(Map, RMap, AMap, RH);
+
   Builder.CreateBr(CheckNextBB);
 
   // Add code to check if another set of iterations will be executed.
@@ -323,6 +417,18 @@ Value *OMPGenerator::createSubfunction(Value *Stride, Value *StructData,
   // Add code to terminate this openmp subfunction.
   Builder.SetInsertPoint(ExitBB);
   createCallLoopEndNowait();
+
+  // Aggregate the local alloca instructions just before the return instruction
+  for (AccessPointerMapT::iterator I = AMap.begin(), E = AMap.end();
+       I != E; ++I) {
+      const ReductionAccess *RA = I->first;
+      Value   *ReductionPointer = I->second;
+      Value    *ReductionAlloca = Map[ReductionPointer];
+      Value       *AtomicReload = Builder.CreateLoad(ReductionAlloca,
+                                                     "red.alloca.reload");
+      RA->createAtomicBinOp(AtomicReload, ReductionPointer, Builder);
+  }
+
   Builder.CreateRetVoid();
 
   Builder.SetInsertPoint(LoopBody);
@@ -335,6 +441,7 @@ Value *OMPGenerator::createParallelLoop(Value *LowerBound, Value *UpperBound,
                                         Value *Stride,
                                         SetVector<Value *> &Values,
                                         ValueToValueMapTy &Map,
+                                        ValueToValueMapTy &RMap,
                                         BasicBlock::iterator *LoopBody) {
   Value *Struct, *IV, *SubfunctionParam, *NumberOfThreads;
   Function *SubFunction;
@@ -342,7 +449,7 @@ Value *OMPGenerator::createParallelLoop(Value *LowerBound, Value *UpperBound,
   Struct = loadValuesIntoStruct(Values);
 
   BasicBlock::iterator PrevInsertPoint = Builder.GetInsertPoint();
-  IV = createSubfunction(Stride, Struct, Values, Map, &SubFunction);
+  IV = createSubfunction(Stride, Struct, Values, Map, RMap, &SubFunction);
   *LoopBody = Builder.GetInsertPoint();
   Builder.SetInsertPoint(PrevInsertPoint);
 
@@ -350,7 +457,7 @@ Value *OMPGenerator::createParallelLoop(Value *LowerBound, Value *UpperBound,
   SubfunctionParam =
       Builder.CreateBitCast(Struct, Builder.getInt8PtrTy(), "omp_data");
 
-  NumberOfThreads = Builder.getInt32(0);
+  NumberOfThreads = Builder.getInt32(NoOpenMPThreads);
 
   // Add one as the upper bound provided by openmp is a < comparison
   // whereas the codegenForSequential function creates a <= comparison.

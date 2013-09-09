@@ -107,6 +107,13 @@ private:
   /// Updated access relation read from JSCOP file.
   isl_map *newAccessRelation;
 
+  /// Original access type of this memory access.
+  /// Used as backup in case the access type needs to be temporarily modified.
+  enum AccessType OriginalType;
+
+  /// Flag to indicate reduction accesses
+  bool ReductionAccess;
+
 public:
   // @brief Create a memory access from an access in LLVM-IR.
   //
@@ -121,6 +128,16 @@ public:
   // @param BaseAddress The base address of the memory object.
   // @param Statement   The statement that contains this access.
   MemoryAccess(const Value *BaseAddress, ScopStmt *Statement);
+
+  /// @brief Create a new write memory access
+  ///
+  /// @param Statement The statement that contains this access
+  /// @param AccessRel The access relation for this memory access
+  /// @param BaseName  The base name for this access
+  ///
+  /// TODO
+  MemoryAccess(ScopStmt *Statement, __isl_take isl_map *AccessRel,
+               const std::string &BaseName);
 
   ~MemoryAccess();
 
@@ -141,10 +158,30 @@ public:
     return Type == MemoryAccess::MUST_WRITE || Type == MemoryAccess::MAY_WRITE;
   }
 
+  /// @brief Get the original access type for this memory access
+  ///
+  /// This might differ from the current type, e.g., during reduction handling
+  AccessType getOriginalType() const { return OriginalType; }
+
+  /// @brief Set the access type for this memory access
+  void setType(AccessType type) { this->Type = type; }
+
+  /// @brief Mark this memory access as a reduction access
+  void setReductionAccess() { ReductionAccess = true; }
+
+  /// @brief Is this a reduction access ?
+  bool isReductionAccess() const { return ReductionAccess; }
+
+  /// @brief Get the access relation for this memory access
   isl_map *getAccessRelation() const;
 
   /// @brief Get an isl string representing this access function.
   std::string getAccessRelationStr() const;
+
+  /// @brief Set the name of the accessed memory location in the access relation
+  ///
+  /// This will alter the outcome of the dependency analysis
+  void setAccessedLocationName(std::string &LocationName);
 
   const Value *getBaseAddr() const { return BaseAddr; }
 
@@ -287,6 +324,21 @@ class ScopStmt {
 
   std::string BaseName;
 
+  /// @brief Different types of ScopStmts
+  enum StatementType {
+    BASIC_BLOCK,         ///< Statement representing an LLVM-IR basic block
+    REDUCTION_PREPARE,   ///< Statement to prepare parallel reduction accesses
+    REDUCTION_FIXUP      ///< Statement to combine parallel reduction accesses
+  };
+
+  /// @brief The type of this statement
+  enum StatementType Type;
+
+  /// @brief The reduction loop for reduction statements
+  ///
+  /// The reduction loop is the loop surrounded by two reduction statements
+  const Loop *ReductionLoop;
+
   /// Build the statment.
   //@{
   __isl_give isl_set *buildConditionSet(const Comparison &Cmp);
@@ -308,6 +360,18 @@ class ScopStmt {
   friend class Scop;
 
 public:
+
+  /// @brief Create a new reduction statement from a given template statement
+  ///
+  /// @param Parent   The parent SCoP
+  /// @param Template The template statement for this one
+  /// @param Dim      The dimension up to which the \p Template should be copied
+  /// @param RLoop    The reduction loop for this reduction statement
+  /// @param Prepare  Flag to distinguish between reduction prepare and fixup
+  ///
+  /// This constructor allows to create reduction statements after ScopInfo
+  ScopStmt(Scop &Parent, ScopStmt *Template, unsigned Dim, Loop *RLoop,
+           bool Prepare);
 
   ~ScopStmt();
   /// @brief Get an isl_ctx pointer.
@@ -335,6 +399,10 @@ public:
   ///
   /// @return The scattering function of this ScopStmt.
   __isl_give isl_map *getScattering() const;
+
+  /// @brief Set the scattering function for this ScopStmt.
+  ///
+  /// @param scattering The new scattering function for this ScopStmt.
   void setScattering(isl_map *scattering);
 
   /// @brief Get an isl string representing this scattering.
@@ -356,6 +424,23 @@ public:
         InstructionToAccess.find(Inst);
     return at == InstructionToAccess.end() ? NULL : at->second;
   }
+
+  /// @brief Is this a reduction statement ?
+  bool isReductionStatement() const {
+    return isReductionPrepareStatement() || isReductionFixupStatement();
+  }
+
+  /// @brief Is this a reduction prepare statement ?
+  bool isReductionPrepareStatement() const { return Type == REDUCTION_PREPARE; }
+
+  /// @brief Is this a reduction prepare statement ?
+  bool isReductionFixupStatement() const { return Type == REDUCTION_FIXUP; }
+
+  /// @brief Get the reduction loop for this statement
+  const Loop *getReductionLoop() const { return ReductionLoop; }
+
+  /// @brief Add a new memory access to this statement
+  void addMemoryAccess(MemoryAccess *MA) { MemAccs.push_back(MA); }
 
   void setBasicBlock(BasicBlock *Block) { BB = Block; }
 
@@ -603,6 +688,16 @@ public:
 
   /// @brief Get a union set containing the iteration domains of all statements.
   __isl_give isl_union_set *getDomains();
+
+  /// @brief Insert a new statement \p Stmt at position \p SI
+  ///
+  /// @param SI   The position where the new statement is inserted
+  /// @param Stmt The statement to insert into this SCoP
+  ///
+  /// @return An iterator to the new inserted Statement
+  ///
+  /// This might invalidate all iterators except the one return by this function
+  iterator insertStmt(iterator SI, ScopStmt *Stmt);
 };
 
 /// @brief Print Scop scop to raw_ostream O.

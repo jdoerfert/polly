@@ -122,18 +122,17 @@ private:
   /// @param BaseValue     The base value
   /// @param ReductionLoop The reduction loop
   /// @param Type          The reduction type
-  ReductionAccess(const llvm::Value *BaseValue,
-                  const llvm::Loop  *ReductionLoop,
-                  ReductionType Type);
+  explicit ReductionAccess(const llvm::Value *BaseValue,
+                           const llvm::Loop *ReductionLoop, ReductionType Type);
 
   /// @brief Create a reduction access
   ///
   /// @param BaseValue     The base value
   /// @param ReductionLoop The reduction loop
   /// @param BinOpcode     The reduction type as binary opcode
-  ReductionAccess(const llvm::Value *BaseValue,
-                  const llvm::Loop  *ReductionLoop,
-                  llvm::Instruction::BinaryOps BinOpcode);
+  explicit ReductionAccess(const llvm::Value *BaseValue,
+                           const llvm::Loop *ReductionLoop,
+                           llvm::Instruction::BinaryOps BinOpcode);
 
   /// @brief Get the AtomicRMWInst binary opcode matching the reduction type
   ///
@@ -230,7 +229,7 @@ public:
   ///
   virtual const ReductionAccess &
   getReductionAccess(const llvm::Value *BaseValue,
-                     const llvm::Loop  *ReductionLoop);
+                     const llvm::Loop *ReductionLoop);
 
   /// @brief Find a maximal reduction access for the given base value
   ///

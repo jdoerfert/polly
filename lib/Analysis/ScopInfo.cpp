@@ -267,6 +267,11 @@ void MemoryAccess::setBaseName() {
   BaseName = "MemRef_" + BaseName;
 }
 
+void MemoryAccess::setAccessedLocationName(std::string &LocationName) {
+  AccessRelation = isl_map_set_tuple_name(AccessRelation, isl_dim_out,
+                                          LocationName.c_str());
+}
+
 isl_map *MemoryAccess::getAccessRelation() const {
   return isl_map_copy(AccessRelation);
 }
@@ -291,11 +296,9 @@ isl_basic_map *MemoryAccess::createBasicAccessMap(ScopStmt *Statement) {
 
 MemoryAccess::MemoryAccess(const IRAccess &Access, const Instruction *AccInst,
                            ScopStmt *Statement)
-    : Inst(AccInst) {
-  newAccessRelation = NULL;
-  statement = Statement;
+    : BaseAddr(Access.getBase()), statement(Statement), Inst(AccInst),
+      newAccessRelation(NULL), ReductionAccess(false) {
 
-  BaseAddr = Access.getBase();
   setBaseName();
 
   if (!Access.isAffine()) {
@@ -305,10 +308,12 @@ MemoryAccess::MemoryAccess(const IRAccess &Access, const Instruction *AccInst,
     // differentiate between writes that must happen and writes that may happen.
     AccessRelation = isl_map_from_basic_map(createBasicAccessMap(Statement));
     Type = Access.isRead() ? READ : MAY_WRITE;
+    OriginalType = Type;
     return;
   }
 
   Type = Access.isRead() ? READ : MUST_WRITE;
+  OriginalType = Type;
 
   isl_pw_aff *Affine = SCEVAffinator::getPwAff(Statement, Access.getOffset());
 
@@ -338,11 +343,9 @@ void MemoryAccess::realignParams() {
   AccessRelation = isl_map_align_params(AccessRelation, ParamSpace);
 }
 
-MemoryAccess::MemoryAccess(const Value *BaseAddress, ScopStmt *Statement) {
-  newAccessRelation = NULL;
-  BaseAddr = BaseAddress;
-  Type = READ;
-  statement = Statement;
+MemoryAccess::MemoryAccess(const Value *BaseAddress, ScopStmt *Statement)
+  : Type(READ), BaseAddr(BaseAddress), statement(Statement), Inst(NULL),
+    newAccessRelation(NULL), OriginalType(READ), ReductionAccess(false) {
 
   isl_basic_map *BasicAccessMap = createBasicAccessMap(Statement);
   AccessRelation = isl_map_from_basic_map(BasicAccessMap);
@@ -350,7 +353,16 @@ MemoryAccess::MemoryAccess(const Value *BaseAddress, ScopStmt *Statement) {
   AccessRelation = isl_map_align_params(AccessRelation, ParamSpace);
 }
 
+MemoryAccess::MemoryAccess(ScopStmt *Statement, __isl_take isl_map *AccessRel,
+                           const std::string &BaseName)
+    : AccessRelation(AccessRel), Type(MUST_WRITE), BaseAddr(NULL),
+      BaseName(BaseName), statement(Statement), Inst(NULL),
+      newAccessRelation(NULL), OriginalType(MUST_WRITE), ReductionAccess(true) {
+}
+
 void MemoryAccess::print(raw_ostream &OS) const {
+  if (isReductionAccess())
+    OS << "(Reduction" << (isRead() ? " Read" : " Write") << "Access) ";
   switch (Type) {
   case READ:
     OS.indent(12) << "ReadAccess := \n";
@@ -614,10 +626,42 @@ __isl_give isl_set *ScopStmt::buildDomain(TempScop &tempScop,
   return Domain;
 }
 
+ScopStmt::ScopStmt(Scop &Parent, ScopStmt *Template,
+                   unsigned Dim, Loop *RLoop, bool Prepare)
+  : Parent(Parent), BB(NULL), IVS(Dim), NestLoops(Dim), ReductionLoop(RLoop) {
+
+  Type     = (Prepare ? REDUCTION_PREPARE : REDUCTION_FIXUP);
+  BaseName =  (RLoop->getHeader()->getName().str() + "." +(Prepare ? "RedPrep" : "RedFix"));
+
+  assert(ReductionLoop && "Each reduction statement needs a reduction loop");
+  assert(Dim <= Template->getNumIterators() && "Not enough dimensions to copy");
+
+  // Copy the first Dim induction variables and loops
+  for (unsigned u = 0; u < Dim; u++) {
+    IVS[u]       = Template->IVS[u];
+    NestLoops[u] = Template->NestLoops[u];
+  }
+
+  // Copy the domain of the template statement
+  Domain = Template->getDomain();
+  // But remove all dimensions greater than Dim
+  Domain = isl_set_remove_dims(Domain, isl_dim_out, getNumIterators(),
+                               Template->getNumIterators() - getNumIterators());
+  // And change the identifier
+  isl_id  *Id    = isl_id_alloc(getIslCtx(), BaseName.c_str(), this);
+  Domain = isl_set_set_tuple_id(Domain, Id);
+
+  // The scattering needs to be adjusted later on anyway, but the scattering
+  // of the template is a good starting point.
+  Scattering = Template->getScattering();
+}
+
 ScopStmt::ScopStmt(Scop &parent, TempScop &tempScop, const Region &CurRegion,
                    BasicBlock &bb, SmallVectorImpl<Loop *> &Nest,
                    SmallVectorImpl<unsigned> &Scatter)
-    : Parent(parent), BB(&bb), IVS(Nest.size()), NestLoops(Nest.size()) {
+    : Parent(parent), BB(&bb), IVS(Nest.size()), NestLoops(Nest.size()),
+      Type(BASIC_BLOCK) {
+
   // Setup the induction variables.
   for (unsigned i = 0, e = Nest.size(); i < e; ++i) {
     if (!SCEVCodegen) {
@@ -650,7 +694,7 @@ unsigned ScopStmt::getNumParams() const { return Parent.getNumParams(); }
 
 unsigned ScopStmt::getNumIterators() const {
   // The final read has one dimension with one element.
-  if (!BB)
+  if (!BB && !isReductionStatement())
     return 1;
 
   return NestLoops.size();
@@ -692,7 +736,15 @@ ScopStmt::~ScopStmt() {
 }
 
 void ScopStmt::print(raw_ostream &OS) const {
-  OS << "\t" << getBaseName() << "\n";
+  OS << "\t"   << getBaseName();
+  switch(Type) {
+  case BASIC_BLOCK:
+    OS << " (LLVM-IR BB)" << "\n"; break;
+  case REDUCTION_PREPARE:
+    OS << " (Reduction Prepare)" << "\n"; break;
+  case REDUCTION_FIXUP:
+    OS << " (Reduction Fixup)" << "\n"; break;
+  }
 
   OS.indent(12) << "Domain :=\n";
 
@@ -904,12 +956,15 @@ isl_ctx *Scop::getIslCtx() const { return IslCtx; }
 __isl_give isl_union_set *Scop::getDomains() {
   isl_union_set *Domain = NULL;
 
-  for (Scop::iterator SI = begin(), SE = end(); SI != SE; ++SI)
+  for (Scop::iterator SI = begin(), SE = end(); SI != SE; ++SI) {
+    //if ((*SI)->isReductionStatement())
+      //continue;
     if (!Domain)
       Domain = isl_union_set_from_set((*SI)->getDomain());
     else
       Domain = isl_union_set_union(Domain,
                                    isl_union_set_from_set((*SI)->getDomain()));
+  }
 
   return Domain;
 }
@@ -960,6 +1015,10 @@ void Scop::buildScop(TempScop &tempScop, const Region &CurRegion,
   Scatter[loopDepth] = 0;
   NestLoops.pop_back();
   ++Scatter[loopDepth - 1];
+}
+
+Scop::iterator Scop::insertStmt(iterator SI, ScopStmt *Stmt) {
+  return Stmts.insert(SI, Stmt);
 }
 
 //===----------------------------------------------------------------------===//

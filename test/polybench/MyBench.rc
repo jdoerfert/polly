@@ -1,7 +1,8 @@
-OPT                  = 'LD_LIBRARY_PATH=/home/johannes/git/POLLY/install/lib /home/johannes/git/POLLY/llvm/Debug+Asserts/bin/opt'
-LLC                  = '/home/johannes/git/POLLY/llvm/Debug+Asserts/bin/llc'
-CLANG                = '/home/johannes/git/POLLY/llvm/Debug+Asserts/bin/clang'
-POLLY                = '/home/johannes/git/POLLY/llvm/tools/polly/Debug+Asserts/lib/LLVMPolly.so'
+BIN_DIR              = '/home/johannes/Projects/RIL-Hack/llvm/llvm/Debug+Asserts/bin/'
+OPT                  = '<BIN_DIR>/opt'
+LLC                  = '<BIN_DIR>/llc'
+CLANG                = '<BIN_DIR>/clang'
+POLLY                = '/home/johannes/Projects/RIL-Hack/polly/Debug+Asserts/lib/LLVMPolly.so'
 POLLY_OPTIONS        = '-polly -polly-vectorizer=polly -polly-optimizer=isl -polly-code-generator=cloog'
 GCC                  = 'gcc'
 
@@ -27,6 +28,7 @@ FILTER_INCLUDE       = '\\.c$'
 FILTER_EXCLUDE       = None
 BASE_DIR             = None
 OUTPUT_DIR           = 'LLVM_IR/NO_OPT'
+PRE_FILE_COMMAND     = ''
 PRE_STEP_COMMAND     = 'mkdir -p <OUTPUT_DIR>'
 ERROR_FILE           = '<OUTPUT_DIR>/ERRORS'
 OUTPUT_FILE          = '<OUTPUT_DIR>/OUTPUT'
@@ -72,7 +74,7 @@ OUTPUT_DIR           = 'LLVM_IR/POLLY_REDUCTIONS'
 PRE_STEP_COMMAND     = 'mkdir -p <OUTPUT_DIR>'
 ERROR_FILE           = '<OUTPUT_DIR>/ERRORS'
 OUTPUT_FILE          = '<OUTPUT_DIR>/OUTPUT'
-COMMAND              = '<OPT> -load <POLLY> -O3 <POLLY_OPTIONS> <FILE> -o <OUTPUT_DIR>/<FILE_NO_EXT>_polly_reductions_O3.ll -S 2>> <ERROR_FILE> >> <OUTPUT_FILE>'
+COMMAND              = '<OPT> -load <POLLY> -O3 -polly-reduction-handler=implicit <POLLY_OPTIONS> <FILE> -o <OUTPUT_DIR>/<FILE_NO_EXT>_polly_reductions_O3.ll -S 2>> <ERROR_FILE> >> <OUTPUT_FILE>'
 
 # STEP 5
 STEP_NAME            = '.ll == llc ==> .s'

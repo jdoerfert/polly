@@ -182,6 +182,7 @@ namespace {
     virtual const ReductionAccess *
     getReductionAccess(const Instruction *BaseInst,
                        const Loop        *OuterLoop) {
+      assert(BaseInst && OuterLoop);
       BRI_DEBUG("");
       BRI_DEBUG("Get reduction access for:");
       BRI_DEBUG("    BaseInst: " << *BaseInst);
@@ -472,6 +473,7 @@ namespace {
 
 // Register this pass...
 char BasicReductionInfo::ID = 0;
+char &polly::BasicReductionInfoID = BasicReductionInfo::ID;
 
 INITIALIZE_AG_PASS_BEGIN(BasicReductionInfo, ReductionInfo,
                          "polly-basic-ri",

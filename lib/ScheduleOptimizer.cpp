@@ -380,8 +380,6 @@ IslScheduleOptimizer::getScheduleForBandList(isl_band_list *BandList) {
   NumBands = isl_band_list_n_band(BandList);
   Schedule = isl_union_map_empty(isl_space_params_alloc(ctx, 0));
 
-  dbgs() << "Vectorize ? " << (PollyVectorizerChoice != VECTORIZER_NONE) << "\n";
-  dbgs() << "NumBands: "<< NumBands << "\n";
   for (int i = 0; i < NumBands; i++) {
     isl_band *Band;
     isl_union_map *PartialSchedule;
@@ -392,8 +390,6 @@ IslScheduleOptimizer::getScheduleForBandList(isl_band_list *BandList) {
     PartialSchedule = getScheduleForBand(Band, &ScheduleDimensions);
     Space = isl_union_map_get_space(PartialSchedule);
 
-    isl_band_dump(Band);
-    dbgs() << "Band "<<i<<" has children ? "<< (isl_band_has_children(Band)) << "\n";
     if (isl_band_has_children(Band)) {
       isl_band_list *Children;
       isl_union_map *SuffixSchedule;
@@ -404,24 +400,18 @@ IslScheduleOptimizer::getScheduleForBandList(isl_band_list *BandList) {
           isl_union_map_flat_range_product(PartialSchedule, SuffixSchedule);
       isl_band_list_free(Children);
     } else if (PollyVectorizerChoice != VECTORIZER_NONE) {
-      dbgs() << "Band "<<i<<" has n members ? "<< (isl_band_n_member(Band)) << "\n";
       for (int j = 0; j < isl_band_n_member(Band); j++) {
-        dbgs() << "Member " << j << " has zero distance? "
-               << (isl_band_member_is_zero_distance(Band, j)) << "\n";
         if (isl_band_member_is_zero_distance(Band, j)) {
           isl_map *TileMap;
           isl_union_map *TileUMap;
 
           TileMap = getPrevectorMap(ctx, ScheduleDimensions - j - 1,
                                     ScheduleDimensions);
-          isl_map_dump(TileMap);
           TileUMap = isl_union_map_from_map(TileMap);
           TileUMap =
               isl_union_map_align_params(TileUMap, isl_space_copy(Space));
-          isl_union_map_dump(TileUMap);
           PartialSchedule =
               isl_union_map_apply_range(PartialSchedule, TileUMap);
-          isl_union_map_dump(PartialSchedule);
           break;
         }
       }
@@ -477,9 +467,9 @@ bool IslScheduleOptimizer::runOnScop(Scop &S) {
   // the scheduler will minimize the number of dependences not respected in the
   // first place.
   isl_union_map *Validity =
-      D->getDependences(ValidityKinds, /* AllDeps */ true);
+      D->getMinimalDependences(ValidityKinds);
   isl_union_map *Proximity =
-      D->getDependences(ProximityKinds, /* AllDeps */ true);
+      D->getMinimalDependences(ProximityKinds);
 
   // Simplify the dependences by removing the constraints introduced by the
   // domains. This can speed up the scheduling time significantly, as large

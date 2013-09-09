@@ -100,6 +100,20 @@ static inline bool isOutermostParallel(__isl_keep isl_ast_node *Node) {
   isl_id_free(Id);
   return Res;
 }
+
+// Returns true when Node has been tagged as reduction.
+static inline bool isReduction(__isl_keep isl_ast_node *Node) {
+  isl_id *Id = isl_ast_node_get_annotation(Node);
+  if (!Id)
+    return false;
+  struct IslAstUser *Info = (struct IslAstUser *)isl_id_get_user(Id);
+
+  bool Res = false;
+  if (Info)
+    Res = Info->IsReduction;
+  isl_id_free(Id);
+  return Res;
+}
 }
 
 namespace llvm {

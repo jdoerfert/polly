@@ -578,7 +578,8 @@ private:
   unsigned getNumberOfIterations(__isl_keep isl_ast_node *For);
 
   void createFor(__isl_take isl_ast_node *For);
-  void createForVector(__isl_take isl_ast_node *For, int VectorWidth);
+  void createForVector(__isl_take isl_ast_node *For, int VectorWidth,
+                       bool IsReduction);
   void createForSequential(__isl_take isl_ast_node *For);
   void createSubstitutions(__isl_take isl_pw_multi_aff *PMA,
                            __isl_take isl_ast_build *Context, ScopStmt *Stmt,
@@ -700,7 +701,8 @@ void IslNodeBuilder::createUserVector(__isl_take isl_ast_node *User,
 }
 
 void IslNodeBuilder::createForVector(__isl_take isl_ast_node *For,
-                                     int VectorWidth) {
+                                     int VectorWidth, bool IsReduction) {
+  assert(!IsReduction);
   isl_ast_node *Body = isl_ast_node_for_get_body(For);
   isl_ast_expr *Init = isl_ast_node_for_get_init(For);
   isl_ast_expr *Inc = isl_ast_node_for_get_inc(For);
@@ -833,7 +835,7 @@ void IslNodeBuilder::createFor(__isl_take isl_ast_node *For) {
   if (Vector && isInnermostParallel(For)) {
     int VectorWidth = getNumberOfIterations(For);
     if (1 < VectorWidth && VectorWidth <= 16) {
-      createForVector(For, VectorWidth);
+      createForVector(For, VectorWidth, isReduction(For));
       return;
     }
   }
