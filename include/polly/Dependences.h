@@ -110,12 +110,24 @@ public:
   /// TODO
   virtual isl_union_map *getMinimalDependences(int Kinds) = 0;
 
+  /// TODO
+  virtual void *getHandlerInfo(__isl_take isl_set *LoopDomain,
+                               unsigned ParallelDimension);
+  virtual void resetHandlerInfo(void *);
+
+  virtual bool hasConditionalValidityConditions() const = 0;
+  virtual isl_union_map **
+  getConditionalValidityConditions(unsigned &CondNumber) const = 0;
+  virtual void setCondV(int *condV) {};
   /// getAdjustedAnalysisPointer - This method is used when a pass implements
   /// an analysis interface through multiple inheritance. If needed, it
   /// should override this to adjust the this pointer as needed for the
   /// specified pass info.
   virtual void *getAdjustedAnalysisPointer(const void *ID) = 0;
 
+protected:
+  __isl_give isl_union_map *getCombinedScheduleForSpace(Scop *S,
+                                                        unsigned dimLevel);
 };
 
 class ScopDependences : public ScopPass, public Dependences {
@@ -147,6 +159,10 @@ public:
 
   /// @brief Virtual destructor to force subclassing
   virtual ~ScopDependences() { releaseMemory(); }
+
+  virtual bool hasConditionalValidityConditions() const;
+  virtual isl_union_map **
+  getConditionalValidityConditions(unsigned &CondNumber) const;
 
   /// getAdjustedAnalysisPointer - This method is used when a pass implements
   /// an analysis interface through multiple inheritance. If needed, it

@@ -142,7 +142,7 @@ private:
   /// @brief The base value
   ///
   /// This might either be a memory location or a PHI node
-  const llvm::Value *BaseValue;
+  const llvm::Value * const BaseValue;
 
   /// @brief The reduction loop
   ///
@@ -248,6 +248,32 @@ public:
 
   //@}
 };
+
+inline llvm::raw_ostream &operator<<(llvm::raw_ostream &OS,
+                                     ReductionAccess::ReductionType T) {
+  switch (T) {
+  case ReductionAccess::ReductionType::ADD: ///< Integer Addition
+    OS << " ADD ";
+    break;
+  case ReductionAccess::ReductionType::MUL: ///< Integer Multiplication
+    OS << " MUL ";
+    break;
+  case ReductionAccess::ReductionType::FADD: ///< Floating Point Addition
+    OS << " FADD ";
+    break;
+  case ReductionAccess::ReductionType::FMUL: ///< Floating Point Multiplication
+    OS << " FMUL ";
+    break;
+  case ReductionAccess::ReductionType::MAX: ///< Maximum computation (TODO)
+    OS << " MAX ";
+    break;
+  case ReductionAccess::ReductionType::MIN: ///< Minimum computation (TODO)
+    OS << " MIN ";
+    break;
+  }
+
+  return OS;
+}
 
 }
 #endif /* REDUCTION_INFO_H */

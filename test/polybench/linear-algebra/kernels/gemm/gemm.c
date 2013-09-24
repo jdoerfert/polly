@@ -16,7 +16,15 @@
 #ifndef NK
 # define NK 512
 #endif
-
+/*#ifndef NI*/
+/*# define NI 2048*/
+/*#endif*/
+/*#ifndef NJ*/
+/*# define NJ 2048*/
+/*#endif*/
+/*#ifndef NK*/
+/*# define NK 2048*/
+/*#endif*/
 
 /* Default data type is double (dgemm). */
 #ifndef DATA_TYPE

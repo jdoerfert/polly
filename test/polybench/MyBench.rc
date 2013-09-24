@@ -1,22 +1,34 @@
+START_STEP           = 0
+SKIP_STEPS           = []
+SHOW_FIRST           = False
+
 BIN_DIR              = '/home/johannes/Projects/RIL-Hack/llvm/llvm/Debug+Asserts/bin/'
 OPT                  = '<BIN_DIR>/opt'
 LLC                  = '<BIN_DIR>/llc'
 CLANG                = '<BIN_DIR>/clang'
 POLLY                = '/home/johannes/Projects/RIL-Hack/polly/Debug+Asserts/lib/LLVMPolly.so'
-POLLY_OPTIONS        = '-polly -polly-vectorizer=polly -polly-optimizer=isl -polly-code-generator=cloog'
+POLLY_OP             = ' -polly -polly-use-feautrier=0 -polly-optimizer=isl -polly-code-generator=cloog '
+POLLY_VEC            = ' -polly-vectorizer=polly '
+POLLY_NO_RED         = ' -polly-reduction-detection=none '
+RED_IMP              = ' -polly-reduction-handler=implicit '
+RED_EXP              = ' -polly-reduction-handler=explicit '
+POLLY_OMP            = ' -enable-polly-openmp '
+POLLY_OMP_RED        = ' <POLLY_OMP> -polly-openmp-threads=4 '
 GCC                  = 'gcc'
-
-START_STEP           = 0
-SKIP_STEPS           = []
+DIFF                 = 'diff'
+PYDIFF               = 'python2 ../diff.py'
+DEV_NULL             = '/dev/null'
+BASE_DIR_SAVE        = '<BASE_DIR>'
+LINK_FLAGS           = ' -lgomp -lm '
 
 # STEP 0
 STEP_NAME            = ' == clean ==> '
 VERBOSE              = False
 RECURSIVE            = True
 ABSOLUTE_PATHS       = False
+BASE_DIR             = '.'
 FILTER_INCLUDE       = 'ERRORS$|OUTPUT$|\\.ll$|\\.s$|\\.ex$|\\.out$|\\.time$'
 FILTER_EXCLUDE       = 'instrument\\.s'
-BASE_DIR             = None
 COMMAND              = 'rm <FILE>'
 
 # STEP 1
@@ -26,13 +38,14 @@ RECURSIVE            = True
 ABSOLUTE_PATHS       = False
 FILTER_INCLUDE       = '\\.c$'
 FILTER_EXCLUDE       = None
-BASE_DIR             = None
-OUTPUT_DIR           = 'LLVM_IR/NO_OPT'
+BASE_DIR             = '<BASE_DIR_SAVE>'
+OUTPUT_DIR           = './LLVM_IR/NO_OPT'
 PRE_FILE_COMMAND     = ''
 PRE_STEP_COMMAND     = 'mkdir -p <OUTPUT_DIR>'
 ERROR_FILE           = '<OUTPUT_DIR>/ERRORS'
 OUTPUT_FILE          = '<OUTPUT_DIR>/OUTPUT'
-COMMAND              = '<CLANG> <FILE> -o <OUTPUT_DIR>/<FILE_NO_EXT>.ll -S -emit-llvm 2>> <ERROR_FILE> >> <OUTPUT_FILE> -Iutilities -DPOLYBENCH_TIME -DPOLYBENCH_DUMP_ARRAYS'
+DUMP                 = ' -DPOLYBENCH_DUMP_ARRAYS '
+COMMAND              = '<CLANG> <FILE> -o <OUTPUT_DIR>/<FILE_NO_EXT>.ll -S -emit-llvm 2>> <ERROR_FILE> >> <OUTPUT_FILE> -I<BASE_DIR>/utilities -DPOLYBENCH_TIME <DUMP> '
 
 # STEP 2
 STEP_NAME            = '.ll == opt -O3 ==> .ll'
@@ -46,10 +59,38 @@ OUTPUT_DIR           = 'LLVM_IR/NO_POLLY'
 PRE_STEP_COMMAND     = 'mkdir -p <OUTPUT_DIR>'
 ERROR_FILE           = '<OUTPUT_DIR>/ERRORS'
 OUTPUT_FILE          = '<OUTPUT_DIR>/OUTPUT'
-COMMAND              = '<OPT> -O3 <FILE> -o <OUTPUT_DIR>/<FILE_NO_EXT>_opt_O3.ll -S 2>> <ERROR_FILE> >> <OUTPUT_FILE>'
+COMMAND              = '<OPT> -O3 <FILE> -o <OUTPUT_DIR>/<FILE_NO_EXT>_opt.ll -S 2>> <ERROR_FILE> >> <OUTPUT_FILE>'
 
 # STEP 3
-STEP_NAME            = '.ll == opt -O3 -polly -no-reductions ==> .ll'
+STEP_NAME            = '.ll == opt -O3 -polly -no-reductions -vec ==> .ll'
+VERBOSE              = '<_1_VERBOSE>'
+RECURSIVE            = False
+ABSOLUTE_PATHS       = False
+FILTER_INCLUDE       = '\\.ll$'
+FILTER_EXCLUDE       = None
+BASE_DIR             = '<_1_OUTPUT_DIR>'
+OUTPUT_DIR           = 'LLVM_IR/POLLY_VEC'
+PRE_STEP_COMMAND     = 'mkdir -p <OUTPUT_DIR>'
+ERROR_FILE           = '<OUTPUT_DIR>/ERRORS'
+OUTPUT_FILE          = '<OUTPUT_DIR>/OUTPUT'
+COMMAND              = '<OPT> -load <POLLY> <POLLY_OP> -O3 <POLLY_VEC> <POLLY_NO_RED> <FILE> -o <OUTPUT_DIR>/<FILE_NO_EXT>_vec.ll -S 2>> <ERROR_FILE> >> <OUTPUT_FILE>'
+
+# STEP 4
+STEP_NAME            = '.ll == opt -O3 -polly -no-reductions -omp ==> .ll'
+VERBOSE              = '<_1_VERBOSE>'
+RECURSIVE            = False
+ABSOLUTE_PATHS       = False
+FILTER_INCLUDE       = '\\.ll$'
+FILTER_EXCLUDE       = None
+BASE_DIR             = '<_1_OUTPUT_DIR>'
+OUTPUT_DIR           = 'LLVM_IR/POLLY_OMP'
+PRE_STEP_COMMAND     = 'mkdir -p <OUTPUT_DIR>'
+ERROR_FILE           = '<OUTPUT_DIR>/ERRORS'
+OUTPUT_FILE          = '<OUTPUT_DIR>/OUTPUT'
+COMMAND              = '<OPT> -load <POLLY> -O3 <POLLY_OP> <POLLY_OMP> <POLLY_NO_RED> <FILE> -o <OUTPUT_DIR>/<FILE_NO_EXT>_omp.ll -S 2>> <ERROR_FILE> >> <OUTPUT_FILE>'
+
+# STEP 5
+STEP_NAME            = '.ll == opt -O3 -polly -no-reductions -all ==> .ll'
 VERBOSE              = '<_1_VERBOSE>'
 RECURSIVE            = False
 ABSOLUTE_PATHS       = False
@@ -60,10 +101,38 @@ OUTPUT_DIR           = 'LLVM_IR/POLLY'
 PRE_STEP_COMMAND     = 'mkdir -p <OUTPUT_DIR>'
 ERROR_FILE           = '<OUTPUT_DIR>/ERRORS'
 OUTPUT_FILE          = '<OUTPUT_DIR>/OUTPUT'
-COMMAND              = '<OPT> -load <POLLY> -O3 <POLLY_OPTIONS> --polly-reduction-detection=none <FILE> -o <OUTPUT_DIR>/<FILE_NO_EXT>_polly_O3.ll -S 2>> <ERROR_FILE> >> <OUTPUT_FILE>'
+COMMAND              = '<OPT> -load <POLLY> -O3 <POLLY_OP> <POLLY_VEC> <POLLY_OMP> <POLLY_NO_RED> <FILE> -o <OUTPUT_DIR>/<FILE_NO_EXT>_all.ll -S 2>> <ERROR_FILE> >> <OUTPUT_FILE>'
 
-# STEP 4
-STEP_NAME            = '.ll == opt -O3 -polly -reductions ==> .ll'
+# STEP 6
+STEP_NAME            = '.ll == opt -O3 -polly -reductions -imp -vec ==> .ll'
+VERBOSE              = '<_1_VERBOSE>'
+RECURSIVE            = False
+ABSOLUTE_PATHS       = False
+FILTER_INCLUDE       = '\\.ll$'
+FILTER_EXCLUDE       = None
+BASE_DIR             = '<_1_OUTPUT_DIR>'
+OUTPUT_DIR           = 'LLVM_IR/POLLY_REDUCTIONS_VEC'
+PRE_STEP_COMMAND     = 'mkdir -p <OUTPUT_DIR>'
+ERROR_FILE           = '<OUTPUT_DIR>/<FILE_NO_EXT>_red_imp_vec_ERRORS'
+OUTPUT_FILE          = '<OUTPUT_DIR>/<FILE_NO_EXT>_red_imp_vec_OUTPUT'
+COMMAND              = '<OPT> -load <POLLY> -O3 <POLLY_OP> <RED_IMP> <POLLY_VEC> <FILE> -o <OUTPUT_DIR>/<FILE_NO_EXT>_red_imp_vec.ll -S 2>> <ERROR_FILE> >> <OUTPUT_FILE>'
+
+# STEP 7
+STEP_NAME            = '.ll == opt -O3 -polly -reductions -imp -omp ==> .ll'
+VERBOSE              = '<_1_VERBOSE>'
+RECURSIVE            = False
+ABSOLUTE_PATHS       = False
+FILTER_INCLUDE       = '\\.ll$'
+FILTER_EXCLUDE       = None
+BASE_DIR             = '<_1_OUTPUT_DIR>'
+OUTPUT_DIR           = 'LLVM_IR/POLLY_REDUCTIONS_OMP'
+PRE_STEP_COMMAND     = 'mkdir -p <OUTPUT_DIR>'
+ERROR_FILE           = '<OUTPUT_DIR>/<FILE_NO_EXT>_red_imp_omp_ERRORS'
+OUTPUT_FILE          = '<OUTPUT_DIR>/<FILE_NO_EXT>_red_imp_omp_OUTPUT'
+COMMAND              = '<OPT> -load <POLLY> -O3 <POLLY_OP> <RED_IMP> <POLLY_OMP_RED> <FILE> -o <OUTPUT_DIR>/<FILE_NO_EXT>_red_imp_omp.ll -S 2>> <ERROR_FILE> >> <OUTPUT_FILE>'
+
+# STEP 8
+STEP_NAME            = '.ll == opt -O3 -polly -reductions -imp -all ==> .ll'
 VERBOSE              = '<_1_VERBOSE>'
 RECURSIVE            = False
 ABSOLUTE_PATHS       = False
@@ -72,11 +141,81 @@ FILTER_EXCLUDE       = None
 BASE_DIR             = '<_1_OUTPUT_DIR>'
 OUTPUT_DIR           = 'LLVM_IR/POLLY_REDUCTIONS'
 PRE_STEP_COMMAND     = 'mkdir -p <OUTPUT_DIR>'
+ERROR_FILE           = '<OUTPUT_DIR>/<FILE_NO_EXT>_red_imp_all_ERRORS'
+OUTPUT_FILE          = '<OUTPUT_DIR>/<FILE_NO_EXT>_red_imp_all_OUTPUT'
+COMMAND              = '<OPT> -load <POLLY> -O3 <POLLY_OP> <RED_IMP> <POLLY_VEC> <POLLY_OMP_RED> <FILE> -o <OUTPUT_DIR>/<FILE_NO_EXT>_red_imp_all.ll -S 2>> <ERROR_FILE> >> <OUTPUT_FILE>'
+
+# STEP 9
+STEP_NAME            = '.ll == opt -O3 -polly -reductions -exp -vec ==> .ll'
+VERBOSE              = '<_1_VERBOSE>'
+RECURSIVE            = False
+ABSOLUTE_PATHS       = False
+FILTER_INCLUDE       = '\\.ll$'
+FILTER_EXCLUDE       = None
+BASE_DIR             = '<_1_OUTPUT_DIR>'
+OUTPUT_DIR           = 'LLVM_IR/POLLY_REDUCTIONS_VEC'
+PRE_STEP_COMMAND     = 'mkdir -p <OUTPUT_DIR>'
+ERROR_FILE           = '<OUTPUT_DIR>/<FILE_NO_EXT>_red_exp_vec_ERRORS'
+OUTPUT_FILE          = '<OUTPUT_DIR>/<FILE_NO_EXT>_red_exp_vec_OUTPUT'
+COMMAND              = '<OPT> -load <POLLY> -O3 <POLLY_OP> <RED_EXP> <POLLY_VEC> <FILE> -o <OUTPUT_DIR>/<FILE_NO_EXT>_red_exp_vec.ll -S 2>> <ERROR_FILE> >> <OUTPUT_FILE>'
+
+# STEP 10
+STEP_NAME            = '.ll == opt -O3 -polly -reductions -exp -omp ==> .ll'
+VERBOSE              = '<_1_VERBOSE>'
+RECURSIVE            = False
+ABSOLUTE_PATHS       = False
+FILTER_INCLUDE       = '\\.ll$'
+FILTER_EXCLUDE       = None
+BASE_DIR             = '<_1_OUTPUT_DIR>'
+OUTPUT_DIR           = 'LLVM_IR/POLLY_REDUCTIONS_OMP'
+PRE_STEP_COMMAND     = 'mkdir -p <OUTPUT_DIR>'
+ERROR_FILE           = '<OUTPUT_DIR>/<FILE_NO_EXT>_red_exp_omp_ERRORS'
+OUTPUT_FILE          = '<OUTPUT_DIR>/<FILE_NO_EXT>_red_exp_omp_OUTPUT'
+COMMAND              = '<OPT> -load <POLLY> -O3 <POLLY_OP> <RED_EXP> <POLLY_OMP_RED> <FILE> -o <OUTPUT_DIR>/<FILE_NO_EXT>_red_exp_omp.ll -S 2>> <ERROR_FILE> >> <OUTPUT_FILE>'
+
+# STEP 11
+STEP_NAME            = '.ll == opt -O3 -polly -reductions -exp -all ==> .ll'
+VERBOSE              = '<_1_VERBOSE>'
+RECURSIVE            = False
+ABSOLUTE_PATHS       = False
+FILTER_INCLUDE       = '\\.ll$'
+FILTER_EXCLUDE       = None
+BASE_DIR             = '<_1_OUTPUT_DIR>'
+OUTPUT_DIR           = 'LLVM_IR/POLLY_REDUCTIONS'
+PRE_STEP_COMMAND     = 'mkdir -p <OUTPUT_DIR>'
+ERROR_FILE           = '<OUTPUT_DIR>/<FILE_NO_EXT>_red_exp_all_ERRORS'
+OUTPUT_FILE          = '<OUTPUT_DIR>/<FILE_NO_EXT>_red_exp_all_OUTPUT'
+COMMAND              = '<OPT> -load <POLLY> -O3 <POLLY_OP> <RED_EXP> <POLLY_VEC> <POLLY_OMP_RED> <FILE> -o <OUTPUT_DIR>/<FILE_NO_EXT>_red_exp_all.ll -S 2>> <ERROR_FILE> >> <OUTPUT_FILE>'
+
+# STEP 12
+STEP_NAME            = '.ll == opt -O3 -polly -reductions -none ==> .ll'
+VERBOSE              = '<_1_VERBOSE>'
+RECURSIVE            = False
+ABSOLUTE_PATHS       = False
+FILTER_INCLUDE       = '\\.ll$'
+FILTER_EXCLUDE       = None
+BASE_DIR             = '<_1_OUTPUT_DIR>'
+OUTPUT_DIR           = 'LLVM_IR/POLLY_REDUCTIONS'
+PRE_STEP_COMMAND     = 'mkdir -p <OUTPUT_DIR>'
+ERROR_FILE           = '<OUTPUT_DIR>/<FILE_NO_EXT>_red_ERRORS'
+OUTPUT_FILE          = '<OUTPUT_DIR>/<FILE_NO_EXT>_red_OUTPUT'
+COMMAND              = '<OPT> -load <POLLY> -O3 <POLLY_OP> <RED_IMP> <FILE> -o <OUTPUT_DIR>/<FILE_NO_EXT>_red.ll -S 2>> <ERROR_FILE> >> <OUTPUT_FILE>'
+
+# STEP 13
+STEP_NAME            = '.ll == opt -O3 -polly -no-reductions -none ==> .ll'
+VERBOSE              = '<_1_VERBOSE>'
+RECURSIVE            = False
+ABSOLUTE_PATHS       = False
+FILTER_INCLUDE       = '\\.ll$'
+FILTER_EXCLUDE       = None
+BASE_DIR             = '<_1_OUTPUT_DIR>'
+OUTPUT_DIR           = 'LLVM_IR/POLLY'
+PRE_STEP_COMMAND     = 'mkdir -p <OUTPUT_DIR>'
 ERROR_FILE           = '<OUTPUT_DIR>/ERRORS'
 OUTPUT_FILE          = '<OUTPUT_DIR>/OUTPUT'
-COMMAND              = '<OPT> -load <POLLY> -O3 -polly-reduction-handler=implicit <POLLY_OPTIONS> <FILE> -o <OUTPUT_DIR>/<FILE_NO_EXT>_polly_reductions_O3.ll -S 2>> <ERROR_FILE> >> <OUTPUT_FILE>'
+COMMAND              = '<OPT> -load <POLLY> -O3 <POLLY_OP> <POLLY_NO_RED> <FILE> -o <OUTPUT_DIR>/<FILE_NO_EXT>_polly.ll -S 2>> <ERROR_FILE> >> <OUTPUT_FILE>'
 
-# STEP 5
+# STEP 14
 STEP_NAME            = '.ll == llc ==> .s'
 VERBOSE              = '<_1_VERBOSE>'
 RECURSIVE            = True
@@ -90,40 +229,54 @@ ERROR_FILE           = '<OUTPUT_DIR>/ERRORS'
 OUTPUT_FILE          = '<OUTPUT_DIR>/OUTPUT'
 COMMAND              = '<LLC> <FILE> -o <OUTPUT_DIR>/<FILE_NO_EXT>.s 2>> <ERROR_FILE> >> <OUTPUT_FILE>'
 
-# STEP 6
+# STEP 15
 STEP_NAME            = '.s == gcc ==> .ex'
 VERBOSE              = False
 RECURSIVE            = True
 ABSOLUTE_PATHS       = False
 FILTER_INCLUDE       = '\\.s$'
 FILTER_EXCLUDE       = None
-BASE_DIR             = '<_5_OUTPUT_DIR>/..'
+BASE_DIR             = '<_14_OUTPUT_DIR>/..'
 OUTPUT_DIR           = 'EXECUTABLE/<LAST_FILE_DIR>'
 PRE_FILE_COMMAND     = 'mkdir -p <OUTPUT_DIR>'
 ERROR_FILE           = '<OUTPUT_DIR>/ERRORS'
 OUTPUT_FILE          = '<OUTPUT_DIR>/OUTPUT'
-COMMAND              = '<GCC> <FILE> -o <OUTPUT_DIR>/<FILE_NO_EXT>.ex instrument.s 2>> <ERROR_FILE> >> <OUTPUT_FILE>'
+COMMAND              = '<GCC> <LINK_FLAGS> <FILE> -o <OUTPUT_DIR>/<FILE_NO_EXT>.ex <BASE_DIR_SAVE>/instrument.s 2>> <ERROR_FILE> >> <OUTPUT_FILE>'
 
-# STEP 7
+# STEP 16
 STEP_NAME            = '.ex == execute ==> time, output'
 VERBOSE              = False
 RECURSIVE            = True
 ABSOLUTE_PATHS       = False
 FILTER_INCLUDE       = '\\.ex$'
 FILTER_EXCLUDE       = None
-BASE_DIR             = '<_6_OUTPUT_DIR>/..'
+A ='^[A-Z]*/[A-Z_]*/jacobi.*'
+BASE_DIR             = '<_15_OUTPUT_DIR>/..'
 OUTPUT_DIR           = 'OUTPUT'
 TIME_DIR             = 'TIME'
-PRE_STEP_COMMAND     = 'mkdir -p <OUTPUT_DIR> <TIME_DIR>'
-COMMAND              = '<FILE> 2> <OUTPUT_DIR>/<FILE_NO_EXT>.out > <TIME_DIR>/<FILE_NO_EXT>.time'
+PRE_STEP_COMMAND     = 'mkdir -p <OUTPUT_DIR> <TIME_DIR>; rm <TIME_DIR>/* <OUTPUT_DIR>/*'
+REPEAT               = '10'
+COMMAND              = '<FILE> 2> <OUTPUT_DIR>/<FILE_NO_EXT>.out >> <TIME_DIR>/<FILE_NO_EXT>.time'
 
-# STEP 8
+# STEP 17
+STEP_NAME            = ' output == diff -q ==> result'
+VERBOSE              = False
+RECURSIVE            = True
+ABSOLUTE_PATHS       = False
+FILTER_INCLUDE       = '\\.out$'
+FILTER_EXCLUDE       = None
+BASE_DIR             = '<_16_OUTPUT_DIR>/'
+OUTPUT_DIR           = 'OUTPUT'
+COMMAND              = '<DIFF> -q <FILE> <OUTPUT_DIR>/<FILE_NO_UNDERSCORE>.out &> <DEV_NULL> || <PYDIFF> <FILE> <OUTPUT_DIR>/<FILE_NO_UNDERSCORE>.out 0.001'
+
+# STEP 18
 STEP_NAME            = '.time == summarize ==> table'
 VERBOSE              = False
 RECURSIVE            = False
 ABSOLUTE_PATHS       = False
 FILTER_INCLUDE       = '\\.time$'
 FILTER_EXCLUDE       = None
-BASE_DIR             = '<_7_TIME_DIR>'
+A = '^TIME/jacobi'
+BASE_DIR             = '<_16_TIME_DIR>'
 ALL_FILES_AT_ONCE    = True
-COMMAND              = './timetable.py'
+COMMAND              = '<BASE_DIR_SAVE>/timetable.py'

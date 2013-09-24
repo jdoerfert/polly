@@ -173,8 +173,10 @@ Value *BlockGenerator::lookupAvailableValue(const Value *Old, ValueMapT &BBMap,
   if (GI != GE) {
     Value *New = GI->second;
     if (Old->getType()->getScalarSizeInBits() <
-        New->getType()->getScalarSizeInBits())
+            New->getType()->getScalarSizeInBits() &&
+        Old->getType() != New->getType()) {
       New = Builder.CreateTruncOrBitCast(New, Old->getType());
+    }
 
     return New;
   }
@@ -247,6 +249,9 @@ void BlockGenerator::copyInstScalar(const Instruction *Inst, ValueMapT &BBMap,
 
   Builder.Insert(NewInst);
   BBMap[Inst] = NewInst;
+  if (GlobalMap.count(Inst)) {
+    GlobalMap[GlobalMap[Inst]] = NewInst;
+  }
 
   if (!NewInst->getType()->isVoidTy())
     NewInst->setName("p_" + Inst->getName());
@@ -437,26 +442,17 @@ Type *VectorBlockGenerator::getVectorPtrTy(const Value *Val, int Width) {
   return PointerType::getUnqual(VectorType);
 }
 
-Value *
-VectorBlockGenerator::generateStrideOneReductionLoad(const LoadInst *Load,
-                                                     ValueMapT &BBMap) {
-  unsigned VectorWidth = getVectorWidth();
+Value *VectorBlockGenerator::generateStrideOneReductionLoad(const LoadInst *Load,
+                                                            Value *VectorPtr,
+                                                            ValueMapT &BBMap) {
   const Value *Pointer = Load->getPointerOperand();
-  ReductionHandler &RH = P->getAnalysis<ReductionHandler>();
-  Value *VectorPtr     = RH.getReductionVecPointer(Load, VectorWidth);
   LoadInst *VecLoad =
-    Builder.CreateLoad(VectorPtr, Load->getName() + "_r_vec_full");
+      Builder.CreateLoad(VectorPtr, Load->getName() + "_r_vec_full");
 
-  // To generate fixup code we need to copy the original pointer too
+  //// To generate fixup code we need to copy the original pointer too
   Value *NewPointer    = generateLocationAccessed(Load, Pointer, BBMap,
                                                   GlobalMaps[0], VLTS[0]);
   GlobalMaps[0][Pointer] = NewPointer;
-
-  PointerType *VecPtrTy = dyn_cast<PointerType>(VectorPtr->getType());
-  assert(VecPtrTy && "Reduction vector pointer has no pointer type");
-  VectorType  *VectorTy = dyn_cast<VectorType>(VecPtrTy->getElementType());
-  assert(VectorTy && "Reduction vector pointer has no pointer to vector type");
-
   //VecLoad->setAlignment(VectorTy->getBitWidth() / 8);
 
   return VecLoad;
@@ -533,13 +529,12 @@ void VectorBlockGenerator::generateLoad(const LoadInst *Load,
     return;
   }
 
-  const MemoryAccess &Access = Statement.getAccessFor(Load);
-  bool reductionAccess = Access.isReductionAccess();
-  ReductionHandler &RH = P->getAnalysis<ReductionHandler>();
-
   Value *NewLoad;
-  if (reductionAccess && RH.getReductionPrepareBlock())
-    NewLoad = generateStrideOneReductionLoad(Load, ScalarMaps[0]);
+  const MemoryAccess &Access = Statement.getAccessFor(Load);
+
+  ReductionHandler &RH = P->getAnalysis<ReductionHandler>();
+  if (Value *VectorPtr = RH.getReductionVecPointer(Load->getPointerOperand()))
+    NewLoad = generateStrideOneReductionLoad(Load, VectorPtr, ScalarMaps[0]);
   else if (Access.isStrideZero(isl_map_copy(Schedule)))
     NewLoad = generateStrideZeroLoad(Load, ScalarMaps[0]);
   else if (Access.isStrideOne(isl_map_copy(Schedule)))
@@ -585,25 +580,15 @@ void VectorBlockGenerator::copyStore(const StoreInst *Store,
   int VectorWidth = getVectorWidth();
 
   const MemoryAccess &Access = Statement.getAccessFor(Store);
-  bool reductionAccess = Access.isReductionAccess();
-
   const Value *Pointer = Store->getPointerOperand();
   Value *Vector = getVectorValue(Store->getValueOperand(), VectorMap,
                                  ScalarMaps, getLoopForInst(Store));
+
   ReductionHandler &RH = P->getAnalysis<ReductionHandler>();
-  if (reductionAccess && RH.getReductionPrepareBlock()) {
-    ReductionHandler &RH = P->getAnalysis<ReductionHandler>();
-    Value     *VectorPtr = RH.getReductionVecPointer(Store, VectorWidth);
-    StoreInst     *Store = Builder.CreateStore(Vector, VectorPtr);
+  if (Value *VectorPtr = RH.getReductionVecPointer(Pointer)) {
+    StoreInst *Store = Builder.CreateStore(Vector, VectorPtr);
     (void) Store;
-
-    PointerType *VecPtrTy = dyn_cast<PointerType>(VectorPtr->getType());
-    assert(VecPtrTy && "Reduction vector pointer has no pointer type");
-    VectorType  *VectorTy = dyn_cast<VectorType>(VecPtrTy->getElementType());
-    assert(VectorTy && "Reduction vector pointer has no pointer to vector type");
-
     //Store->setAlignment(VectorTy->getBitWidth() / 8);
-
   } else if (Access.isStrideOne(isl_map_copy(Schedule))) {
     Type *VectorPtrType = getVectorPtrTy(Pointer, VectorWidth);
     Value *NewPointer = getNewValue(Pointer, ScalarMaps[0], GlobalMaps[0],

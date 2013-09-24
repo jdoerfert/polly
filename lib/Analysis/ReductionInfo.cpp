@@ -115,6 +115,7 @@ Instruction *ReductionAccess::getBinaryOperation(Value *S1, Value *S2,
     llvm_unreachable("TODO: Min/Max not supported yet");
   }
 
+  dbgs() << Type << " " << *S1 << " " << *S2 << "\n";
   llvm_unreachable("Cannot construct binary operation");
 }
 
@@ -131,6 +132,7 @@ Value *ReductionAccess::getIdentityElement(llvm::Type *Ty) const {
     llvm_unreachable("TODO: Min/Max not supported yet");
   }
 
+  dbgs() << Type << " " << *Ty << "\n";
   llvm_unreachable("Cannot construct identity element");
 }
 

@@ -124,9 +124,11 @@
 
 #include "polly/ScopPass.h"
 #include "polly/ScopInfo.h"
-#include "polly/ReductionHandler.h"
+#include "polly/ImplicitReductionHandler.h"
 
 #include "llvm/ADT/DenseSet.h"
+
+#include <isl/map.h>
 
 namespace polly {
 
@@ -135,140 +137,16 @@ class ReductionAccess;
 
 /// @brief The ReductionHandler models reduction access dependences and
 ///        eases vector code generation
-class ExplicitReductionHandler : public ScopPass, public ReductionHandler {
+class ExplicitReductionHandler : public ImplicitReductionHandler {
 
-  /// @brief The currently visited SCoP
-  Scop *S;
-
-  /// @brief LoopInfo and ReductionInfo to detect maximal reduction accesses
-  LoopInfo      *LI;
-  ReductionInfo *RI;
-
-  /// @brief Entry and exit block of the current subfunction
-  BasicBlock *SubFnExitBB;
-
-  /// @brief Set of detected reduction accesses
-  typedef llvm::DenseSet<const ReductionAccess *> ReductionSetT;
-  ReductionSetT ReductionSet;
-
-  /// @brief Map reduction loops to the enclosing reduction statements
-  typedef std::pair<ScopStmt *, ScopStmt *> StmtPair;
-  typedef llvm::DenseMap<const llvm::Loop *, StmtPair> LoopStatementMap;
-  LoopStatementMap LoopRedStmts;
-
-  /// @brief Map to change reduction prepare statements for OpenMP sub-functions
-  typedef DenseMap<const ScopStmt *, BasicBlock *> SubFnRemappingT;
-  SubFnRemappingT SubFnRemapping;
-
-  /// @brief Map from old pointers to new reduction pointers
-  typedef DenseMap<const Value *, AllocaInst *> PointerToVecMapT;
-  /// @brief Per reduction prepare statement 'pointer to vector' map
-  typedef DenseMap<const BasicBlock *, PointerToVecMapT> ReductionPointerMapT;
-  ReductionPointerMapT ReductionPointers;
-
-  /// @brief Map reduction access instructions to reduction prepare statements
-  typedef DenseMap<const Instruction *, const ScopStmt *> InstToPrepMapT;
-  InstToPrepMapT InstToPrepMap;
-
-  /// @brief Internal interface to model reduction dependences
-  //@{
-
-  /// @brief Get the first statement with loop @p L at dimension @p D
-  ///
-  /// @returns The position stored in @p SI
-  void getFirstLoopStatementPosition(int D, const Loop *L, Scop::iterator &SI);
-
-  /// @brief Get the statement after the last with loop @p L at dimension @p D
-  ///
-  /// @returns The position stored in @p SI
-  void getPostLoopStatementPosition(int D, const Loop *L, Scop::iterator &SI);
-
-  /// @brief Get the outermost loop contained in the current SCoP and
-  ///        containing @p Inst
-  const Loop* getOuterMostLoop(const Instruction *Inst);
-
-  /// @brief Get the value of dimension @p D in the @p Scattering
-  ///
-  /// @returns The value stored in @p Val
-  ///
-  /// This will assert out if dimension @p D in the @p Scattering is not fixed.
-  void getScatteringValue(int D, __isl_keep isl_map *Scattering, isl_int &Val);
-
-  /// @brief Replace the scattering of the @p Stmt
-  ///
-  /// @param D          The dimension to change
-  /// @param Scattering The scattering to change
-  /// @param Stmt       The statement to change
-  /// @param Val        The new value for the changed dimension
-  ///
-  /// Replace the value of dimension @p D in the @p Scattering by @p Val and
-  /// use this new scattering for the statement @p Stmt. All scattering values
-  /// higher than 2x the iterator count of @p Stmt will be set to 0.
-  void replaceScattering(int D, ScopStmt *Stmt,  __isl_take isl_map *Scattering,
-                         isl_int &Val);
-
-  /// @brief Increment scattering values
-  ///
-  /// @param D         The dimension to incremenent
-  /// @param PrepStmt  The reduction prepare statement
-  /// @param FixupStmt The reduction fixup statement
-  /// @param PostStmt  The position we stop incrementing
-  ///
-  /// This function will increment the scattering value of dimension @p D:
-  ///   * for all statements in (PrepStmt, FixupStmt) by 1
-  ///   * for all statements in [FixupStmt, PostStmt) by 2
-  /// All scattering values higher than 2x the iterator count of a statement
-  /// will be set to 0.
-  void incrementScattering(int D, ScopStmt *PrepStmt,
-                           ScopStmt *FixupStmt, Scop::iterator &PostStmt);
-
-  /// @brief Create a new memory access and add it to the given SCoP statement
-  ///
-  /// @param MA   A template memory access
-  /// @param Stmt The parent SCoP statement for the new memory access
-  ///
-  /// The new memory access will access the same memory location(s) as @p MA
-  void insertMemoryAccess(MemoryAccess *MA, ScopStmt *Stmt);
-
-  /// @brief Create a new memory access and add it to the given SCoP statement
-  ///
-  /// @param Stmt The parent SCoP statement for the new memory access
-  /// @param dim TODO
-  /// @param free TODO
-  ///
-  /// A new 'fresh' matrix will be accessed, thus no dependences are introduced
-  void insertFreshMemoryAccess(ScopStmt *Stmt, int dim = -1, int free = 0);
-
-  /// @brief Create a new reduction statement from the given template
-  ///
-  /// @param D         The dimension up to which @p Template should be copied
-  /// @param Template  The template statement
-  /// @param SI        The insert point in the parent SCoP
-  /// @param RLoop     The reduction loop for the new reduction statement
-  /// @param isPrepare Flag to distinguish between reduction prepare and fixup
-  ///
-  /// @returns The new reduction statement (also pointed at by @p SI)
-  ScopStmt* createEmptyStatement(int D, ScopStmt *Template, Scop::iterator &SI,
-                                 Loop *RLoop,  bool isPrepare);
-
-  /// @brief Create the reduction statements for the given reduction loop
-  ///
-  /// @param D     The depth of the @p ReductionLoop in the current SCoP
-  /// @param RLoop The reduction loop to create reduction statements for
-  ///
-  /// @returns The new created reduction prepare and reduction fixup statement
-  ///
-  /// This function will ensure a valid scattering of the current SCoP
-  const StmtPair& createReductionStmts(int D, const Loop *RLoop);
-
-  //@}
+  using ScopStmtCallbackFn = std::function<void (IRBuilder<> &, ScopStmt &)>;
+  std::map<ScopStmt *, ScopStmtCallbackFn> FixupCallbacks;
 
 public:
   static char ID;
 
-  explicit ExplicitReductionHandler() : ScopPass(ID) {}
+  explicit ExplicitReductionHandler() : ImplicitReductionHandler(ID) {}
   virtual ~ExplicitReductionHandler() {}
-
 
   /// @brief ScopPass interface
   //@{
@@ -281,8 +159,6 @@ public:
   /// models the dependences accordingly. This introduces new memory accesses
   /// and new SCoP statements.
   bool runOnScop(Scop &S);
-
-  void printScop(llvm::raw_ostream &OS) const;
   void getAnalysisUsage(llvm::AnalysisUsage &AU) const;
   virtual void releaseMemory();
   //@}
@@ -291,55 +167,17 @@ public:
   /// @brief Vector code generation interface
   //@{
 
-  /// @brief Get the reduction vector pointer
-  ///
-  /// @param Inst        A instruction using a reduction access base value
-  /// @param VectorWidth The vector width
-  ///
-  /// @return The vector memory location for the reduction access identified by
-  ///         @p Inst. This locations is a vector of length @p VectorWidth.
-  ///
-  /// A vector memory locations for a reduction access is initially an alloca
-  /// instructions in the reduction prepare statement of the reduction loop.
-  virtual llvm::Value *getReductionVecPointer(const llvm::Instruction *Inst,
-                                              unsigned VectorWidth);
-
-  /// @brief Aggregate the reduction vectors defined in a prepare statement
-  ///
-  /// @param Builder     A LLVM-IR builder
-  /// @param PrepareStmt The reduction prepare statements
-  /// @param ValueMap    A mapping from old to new values
-  ///
-  /// Using the @p Builder a binary tree is constructed which combines the
-  /// elements in the reduction vector. The final result is stored at the
-  /// new value for the reduction base value.
-  virtual void createReductionResult(llvm::IRBuilder<> &Builder,
-                                     const ScopStmt *PrepareStmt,
-                                     ValueMapT &ValueMap);
-  //@}
-
-
-  /// @brief Parallel code generation interface
   //@{
+  virtual void handleVector(llvm::IRBuilder<> &Builder, ValueMapT &ValueMap,
+                            int VectorWidth, void *HI, CallbackFn fn);
+  virtual void handleOpenMP(llvm::IRBuilder<> &Builder, ValueMapT &ValueMap,
+                            void *HI, CallbackFn fn, int OpenMPThreads);
+  virtual void fillOpenMPValues(llvm::SetVector<llvm::Value *> &Values);
+  virtual void visitOpenMPSubFunction(llvm::IRBuilder<> &Builder,
+                                      ValueToValueMapTy &ValueMap,
+                                      llvm::BasicBlock *ExitBB);
 
-  /// @brief Check if an instruction is mapped to a reduction access
-  virtual bool isMappedToReductionAccess(const llvm::Instruction *Inst) const;
-
-  /// @brief Get the reduction access for a given instruction
-  virtual const ReductionAccess &
-  getReductionAccess(const llvm::Instruction *Inst);
-
-  /// @brief Inform the reduction handler about a new sub-function
-  ///
-  /// @param Builder An LLVM-IR builder to the sub-function entry block
-  /// @param ExitBB  The sub-function exit block
-  ///
-  /// TODO
-  virtual void setSubFunction(IRBuilder<> &Builder, BasicBlock *ExitBB);
-
-  /// @brief Clear the last sub-function
-  virtual void unsetSubFunction(ValueMapT &ValueMap);
-
+  virtual void visitScopStmt(llvm::IRBuilder<> &Builder, ScopStmt &Statement);
   //@}
 
   /// getAdjustedAnalysisPointer - This method is used when a pass implements

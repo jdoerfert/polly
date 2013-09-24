@@ -701,6 +701,7 @@ bool ScopDetection::runOnFunction(llvm::Function &F) {
   if (!isValidFunction(F))
     return false;
 
+  F.dump();
   findScops(*TopRegion);
 
   if (ReportLevel >= 1)

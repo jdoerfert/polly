@@ -20,9 +20,12 @@
 #include "polly/LinkAllPasses.h"
 #include "polly/Support/GICHelper.h"
 
+#include "llvm/IR/Module.h"
 #include "llvm/Analysis/LoopInfo.h"
+#include "llvm/Analysis/ScalarEvolution.h"
+#include "llvm/Analysis/ScalarEvolutionExpressions.h"
 
-#define DEBUG_TYPE "polly-implicit-reductions"
+#define DEBUG_TYPE "polly-reduction-handler"
 #include "llvm/Support/Debug.h"
 
 #include <isl/aff.h>
@@ -33,151 +36,391 @@
 using namespace polly;
 using namespace llvm;
 
-ImplicitReductionHandler::ImplicitReductionHandler()
-    : ScopPass(ID), PrepBB(0), SubFnExitBB(0) {}
+using RAptrT = const ReductionAccess *;
+namespace {
 
-void ImplicitReductionHandler::setReductionPrepareBlock(BasicBlock *RedPrepBB) {
-  PrepBB = RedPrepBB;
 }
 
-BasicBlock *ImplicitReductionHandler::getReductionPrepareBlock() {
-  return PrepBB;
+Value *getBasePtr(Value *Ptr, const Loop *L, ScalarEvolution &SE) {
+  //auto PI = dyn_cast<Instruction>(Ptr);
+  //SmallVector<Instruction *, 4> MV;
+  //BasicBlock *BB;
+  //if (PI) {
+    //BB = PI->getParent();
+    //for (auto BI = BB->begin(), BE = BB->end(); BI != BE;) {
+      //bool c = false;
+      //auto I = BI++;
+      //L->makeLoopInvariant(I, c);
+      //if (c)
+        //MV.push_back(I);
+    //}
+  //}
+  if (L->isLoopInvariant(Ptr) && !isa<GetElementPtrInst>(Ptr)) {
+    //for (auto IR = MV.rbegin(), ER = MV.rend(); IR != ER; IR++) {
+      //(*IR)->moveBefore(BB->getFirstInsertionPt());
+    //}
+    return Ptr;
+  }
+
+  assert(isa<GetElementPtrInst>(Ptr) &&
+          "Assumed loop variant pointer to be a GEP");
+  // TODO This is an overestimation. We might not need to copy all
+  //      dimensions...
+  const SCEV *ScevPtr = SE.getSCEVAtScope(Ptr, L);
+  const SCEV *ScevBase = SE.getPointerBase(ScevPtr);
+  return cast<SCEVUnknown>(ScevBase)->getValue();
 }
 
-Value *ImplicitReductionHandler::getReductionVecPointer(const Instruction *Inst,
-                                                        unsigned VectorWidth) {
-  assert(isa<LoadInst>(Inst) || isa<StoreInst>(Inst) &&
-         "Instruction is no load nor store");
-  assert(PrepBB && "Prepare BasicBlock not set");
+ImplicitReductionHandler::ImplicitReductionHandler() : ScopPass(ID) {}
+ImplicitReductionHandler::ImplicitReductionHandler(char &ID) : ScopPass(ID) {}
 
-  const Value *Pointer = getPointerValue(Inst);
-  assert(Pointer && "Instruction has no pointer operand");
+Value *ImplicitReductionHandler::copyBasePtr(IRBuilder<> &Builder,
+                                             ValueMapT &ValueMap, Value *Ptr) {
+  Instruction *PtrInst = dyn_cast<Instruction>(Ptr);
+  if (!PtrInst)
+    return Ptr;
+  Value *OrigVal = ValueMap[Ptr];
+  if (!OrigVal)
+    return Ptr;
 
-  PointerToVecMapT::iterator I = PointerToVecMap.find(Pointer);
-  if (I != PointerToVecMap.end())
-    return I->second;
+  Instruction *OrigInst = dyn_cast<Instruction>(OrigVal);
+  assert(OrigInst);
 
+  //std::set<Instruction *> GepInsts;
+  Function *SubFn = OrigInst->getParent()->getParent();
+  dbgs() << SubFn->getName() << "\n";
+  auto &ArgList = SubFn->getArgumentList();
+  assert(ArgList.size() == 1);
+  auto OmpUserCtxArg = ArgList.begin();
+  assert(isa<PointerType>(OmpUserCtxArg->getType()));
+  Instruction *OmpUserCtx = cast<Instruction>(*OmpUserCtxArg->use_begin());
+  Instruction *Ctx = nullptr;
+  for (auto UI = SubFn->use_begin(), UE = SubFn->use_end(); UI != UE; ++UI) {
+    CallInst *UInst = cast<CallInst>(*UI);
+    dbgs() << "Call: " << *UInst << "\n";
+    if (UInst->getCalledFunction() != SubFn)
+      continue;
+    assert(UInst->getNumArgOperands() == 1);
+    auto Arg = cast<BitCastInst>(UInst->getArgOperand(0));
+    dbgs() << "Arg: " << *Arg << "\n";
+    Ctx = cast<Instruction>(Arg->getOperand(0));
+  }
+  dbgs() << "CTX: " << *Ctx << "\n";
+  assert(Ctx);
+
+  //for (auto UI = OmpUserCtx->use_begin(), UE = OmpUserCtx->use_end(); UI != UE; ++UI) {
+    //GetElementPtrInst *GEP = cast<GetElementPtrInst>(*UI);
+    //GepInsts.insert(GEP);
+  //}
+
+  std::map<Instruction *, Instruction *> Map;
+  //dbgs() << "OUCtx: " << *OmpUserCtx << "\n";
+  Map[OmpUserCtx] = Ctx;
+
+  std::set<Instruction *> TodoInsts, Done;
+  std::vector<Instruction *>  Insts;
+  TodoInsts.insert(OrigInst);
+  while (!TodoInsts.empty()) {
+    auto Todo = *TodoInsts.begin();
+    TodoInsts.erase(Todo);
+    //dbgs() << "TD: " << *Todo << " : " << TodoInsts.size() << "\n";
+    Insts.push_back(Todo);
+    Done.insert(Todo);
+    for (auto OI = Todo->op_begin(), OE = Todo->op_end(); OI != OE; OI++) {
+      auto OInst = dyn_cast<Instruction>(OI);
+      //dbgs() << "OInst: " << *OInst << "\n";
+      if (!OInst || OInst == OmpUserCtx || Done.count(OInst))
+        continue;
+      TodoInsts.insert(OInst);
+    }
+  }
+
+  for (auto II = Insts.rbegin(), IE = Insts.rend(); II != IE; II++) {
+    auto Inst = *II;
+    auto Copy = Inst->clone();
+    Map[Inst] = Copy;
+    for (auto OI = Inst->op_begin(), OE = Inst->op_end(); OI != OE; OI++) {
+      auto OInst = dyn_cast<Instruction>(OI);
+      if (OInst && Map.count(OInst))
+        Copy->replaceUsesOfWith(OInst, Map[OInst]);
+    }
+    Builder.Insert(Copy);
+  }
+
+  return Map[Insts.front()];
+}
+
+Type *ImplicitReductionHandler::getScalarType(const Value *Pointer) {
   PointerType *PointerTy = dyn_cast<PointerType>(Pointer->getType());
-  assert(PointerTy && "PointerType expected");
+  Type *ScalarType;
+  if (PointerTy) {
+    ScalarType = PointerTy->getElementType();
+  } else {
+    ScalarType = Pointer->getType();
+    assert(0 && "Expected memory reduction over a pointer location");
+  }
+  return ScalarType;
+}
 
-  Type *ScalarType = PointerTy->getElementType();
-  VectorType *VectorType = VectorType::get(ScalarType, VectorWidth);
+Instruction *ImplicitReductionHandler::createArrayPointer(IRBuilder<> &Builder,
+                                                           Type *ScalarPtrType,
+                                                           Value *BasePtr,
+                                                           unsigned VecWidth) {
+  Type *ScalarType = ScalarPtrType->getPointerElementType();
+  ArrayType *ArrType = ArrayType::get(ScalarPtrType, VecWidth);
+  AllocaInst *Alloca = Builder.CreateAlloca(ArrType);
+  SmallVector<Value *, 2> Indices;
+  Indices.push_back(Builder.getInt32(0));
+  Indices.push_back(Builder.getInt32(0));
 
-  assert(InstLoopMap.count(Inst));
-  const Loop *RLoop = InstLoopMap[Inst];
-  const ReductionAccess &RA = RI->getReductionAccess(Pointer, RLoop);
-  Value *IdentElement       = RA.getIdentityElement(VectorType);
-  AllocaInst *Alloca =
-      new AllocaInst(VectorType, Pointer->getName() + ".RedVec",
-                     PrepBB->getParent()->getEntryBlock().getFirstInsertionPt());
-  //Alloca->setAlignment(VectorType->getBitWidth());
+  Module &M = *Builder.GetInsertBlock()->getParent()->getParent();
+  Value *Gep = Builder.CreateGEP(Alloca, Indices);
+  Builder.CreateStore(BasePtr, Gep);
 
-  // Initialize the allocated space in PrepBB
-  StoreInst *Store = new StoreInst(IdentElement, Alloca, false,
-                                   VectorType->getBitWidth());
-  Store->insertAfter(PrepBB->getFirstInsertionPt());
+  auto BasePtrGV = cast<GlobalVariable>(BasePtr);
+  auto Linkage = BasePtrGV->getLinkage();
+  auto Initializer = BasePtrGV->getInitializer();
 
-  PointerToVecMap[Pointer] = Alloca;
-  AllocaLoopMap[Alloca] = RLoop;
-
+  for (unsigned u = 1; u < VecWidth; u++) {
+    Indices[1] = Builder.getInt32(u);
+    Value *Gep = Builder.CreateGEP(Alloca, Indices);
+    auto GV = new GlobalVariable(M, ScalarType, false, Linkage, Initializer);
+    Builder.CreateStore(GV, Gep);
+  }
   return Alloca;
 }
 
-void ImplicitReductionHandler::createReductionResult(
-    IRBuilder<> &Builder, const ScopStmt *PrepareStmt, ValueMapT &ValueMap) {
+Instruction *ImplicitReductionHandler::createVectorPointer(IRBuilder<> &Builder,
+                                                           Type *ScalarType,
+                                                           unsigned VecWidth) {
+  VectorType *VecType = VectorType::get(ScalarType, VecWidth);
+  auto OldInsertPt = Builder.GetInsertPoint();
+  Builder.SetInsertPoint(OldInsertPt->getParent()->getParent()->getEntryBlock()
+                             .getFirstInsertionPt());
+  AllocaInst *Alloca = Builder.CreateAlloca(VecType);
+  Builder.SetInsertPoint(OldInsertPt);
+  Builder.CreateLifetimeStart(Alloca);
+  return Alloca;
+}
 
-  for (auto I = PointerToVecMap.begin(), E = PointerToVecMap.end(); I != E;
-       ++I) {
-    Value *Pointer = const_cast<Value *>(I->first);
-    AllocaInst *VecPointer = I->second;
+Value *ImplicitReductionHandler::getReductionVecPointer(const Value *BaseVal) {
+  return PtrToVecPtrMap.lookup(BaseVal);
+}
 
-    PointerType *PointerTy = dyn_cast<PointerType>(Pointer->getType());
-    assert(PointerTy && "PointerType expected");
-    Type *ScalarType = PointerTy->getElementType();
+void ImplicitReductionHandler::handleVector(IRBuilder<> &Builder,
+                                            ValueMapT &ValueMap,
+                                            int VecWidth,
+                                            void *HI,
+                                            CallbackFn VecCodegen) {
 
-    PointerType *VecPointerTy = dyn_cast<PointerType>(VecPointer->getType());
-    assert(VecPointerTy && "PointerType expected");
-    VectorType *VecTy = dyn_cast<VectorType>(VecPointerTy->getElementType());
-    assert(VecTy && "VectorType expected");
-    unsigned VectorDim = VecTy->getNumElements();
+  auto RAset = static_cast<std::set<std::pair<RAptrT, long int>> *>(HI);
+  StringRef StatementName = StringRef(Builder.GetInsertBlock()->getName());
 
-    const Loop *RLoop = AllocaLoopMap[VecPointer];
-    const ReductionAccess &RA = RI->getReductionAccess(Pointer, RLoop);
+  // Create a prepare block
+  BasicBlock *RedPrepBB =
+      splitBlock(Builder, "polly.red.prep." + StatementName, this);
 
-    // TODO VectorDim % 2 == 1 ?
-    assert((VectorDim % 2 == 0) && "Odd vector width not supported yet");
+  // Iterate over all reduction accesses and create vector pointers for the base
+  // values
+  for (auto RAP : *RAset) {
+    auto RA = RAP.first;
+    assert(RAP.second == 1);
+    const Value *Pointer = RA->getBaseValue();
+    auto OldInsertPt = Builder.GetInsertPoint();
+    Builder.SetInsertPoint(
+        RedPrepBB->getParent()->getEntryBlock().getFirstInsertionPt());
+    Type *ScalarType = getScalarType(Pointer);
+    Instruction *VecPtr = createVectorPointer(Builder, ScalarType, VecWidth);
+    Builder.SetInsertPoint(OldInsertPt);
 
-    // The original base pointer might or might not been copied during code
-    // generation. If it was, we need to use the copied version.
-    ValueMapT::iterator VI = ValueMap.find(Pointer);
-    if (VI != ValueMap.end())
-      Pointer = VI->second;
-
-    // Aggreagate the reduction vector into a single value and store it in
-    // the given pointer
-    aggregateReductionResult(Pointer, VecPointer, Builder,
-                             ScalarType, RA, VectorDim);
+    PtrToVecPtrMap[Pointer] = VecPtr;
   }
 
-  PointerToVecMap.clear();
+  // Create the vectorized code
+  VecCodegen();
+
+  // Create a fixup block
+  //BasicBlock *RedFixBB =
+  splitBlock(Builder, "polly.red.fix." + StatementName, this);
+
+  // Iterate over all reduction accesses and aggregate the results
+  for (auto RAP : *RAset) {
+    auto RA = RAP.first;
+    const Value *BaseValue = RA->getBaseValue();
+    Value *Pointer = const_cast<Value *>(BaseValue);
+    if (ValueMap.count(BaseValue))
+      Pointer = ValueMap[BaseValue];
+    Type *ScalarType = getScalarType(Pointer);
+    VectorType *VecType = VectorType::get(ScalarType, VecWidth);
+    Value *IdentElement = RA->getIdentityElement(VecType);
+    assert(PtrToVecPtrMap.count(BaseValue));
+    Instruction *VecPtr = cast<Instruction>(PtrToVecPtrMap[BaseValue]);
+
+    // Hoist pointerInst out of the inner most loop if possible
+    Instruction *PtrInst = dyn_cast<Instruction>(Pointer);
+    while (PtrInst) {
+      Loop *L = LI->getLoopFor(PtrInst->getParent());
+      if (!L)
+        break;
+      bool Changed = false;
+      L->makeLoopInvariant(PtrInst, Changed);
+      if (!Changed)
+        break;
+      //for (auto OI = PtrInst->op_begin(), OE = PtrInst->op_end(); OI != OE; ++OI) {
+        //if (Instruction *OInst = dyn_cast<Instruction>(OI) {
+          //Loop *OL = LI->getLoopFor(OInst);
+          //OL->make
+        //}
+      //}
+    }
+
+    auto OldInsertPt = Builder.GetInsertPoint();
+    if (PtrInst) {
+      Loop *L = LI->getLoopFor(PtrInst->getParent());
+      if (L && L->getExitingBlock()) {
+        Builder.SetInsertPoint(L->getHeader(),
+                              L->getHeader()->getFirstInsertionPt());
+        Builder.CreateStore(IdentElement, VecPtr);
+        BasicBlock *ExitingBB = L->getExitingBlock();
+        Builder.SetInsertPoint(ExitingBB->getTerminator());
+        PtrInst->removeFromParent();
+        SmallPtrSet<Instruction *, 4> OpIs;
+        for (auto OI = PtrInst->op_begin(), OE = PtrInst->op_end(); OI != OE; ++OI) {
+          if (Instruction *OInst = dyn_cast<Instruction>(OI)) {
+            if (isa<PHINode>(OInst))
+              continue;
+            if (LI->getLoopFor(OInst->getParent()) != L)
+              continue;
+            OpIs.insert(OInst);
+          }
+        }
+        for (auto OInst : OpIs) {
+          auto clone = OInst->clone();
+          Builder.Insert(clone);
+          PtrInst->replaceUsesOfWith(OInst, clone);
+        }
+        Builder.Insert(PtrInst);
+      }
+    } else {
+      Builder.SetInsertPoint(RedPrepBB->getTerminator());
+      Builder.CreateStore(IdentElement, VecPtr);
+      Builder.SetInsertPoint(OldInsertPt);
+    }
+
+    aggregateReductionVector(Pointer, VecPtr, Builder, *RA, VecWidth);
+    Builder.SetInsertPoint(OldInsertPt);
+  }
+
+  // Cleanup
+  PtrToVecPtrMap.clear();
+}
+
+void ImplicitReductionHandler::handleOpenMP(llvm::IRBuilder<> &Builder,
+                                            ValueMapT &ValueMap, void *HI,
+                                            CallbackFn OpenMPCodegen,
+                                            int ThreadsNo) {
+
+  auto RAset = static_cast<std::set<std::pair<RAptrT, long int>> *>(HI);
+  const ValueMapT VMC = ValueMap;
+
+  BasicBlock *EntryBB = &Builder.GetInsertBlock()->getParent()->getEntryBlock();
+  (void) (EntryBB);
+
+  // Iterate over all reduction accesses and create vector pointers for the base
+  // values
+  for (auto RAP : *RAset) {
+    auto RA = RAP.first;
+    auto ElemCount = RAP.second;
+    dbgs() << "ElemCount " << ElemCount << "\n";
+    assert(ElemCount == 1 || ElemCount == 32 || ElemCount == 4);
+    Value *Ptr = const_cast<Value *>(RA->getBaseValue());
+    assert(Ptr && "No base value available");
+    Type *ScalarType = getScalarType(Ptr);
+    assert(VectorType::isValidElementType(ScalarType));
+    auto OldInsertPt = Builder.GetInsertPoint();
+    Builder.SetInsertPoint(EntryBB->getFirstInsertionPt());
+    Instruction *NewPtr = createVectorPointer(Builder, ScalarType, ThreadsNo);
+    Builder.SetInsertPoint(OldInsertPt);
+    VectorType *VecType = VectorType::get(ScalarType, ThreadsNo);
+    Value *IdentElement = RA->getIdentityElement(VecType);
+    Builder.CreateStore(IdentElement, NewPtr);
+    PtrToArrPtrMap[Ptr] = NewPtr;
+  }
+
+  OpenMPCodegen();
+
+  for (auto RAP : *RAset) {
+    auto RA = RAP.first;
+    Value *Ptr = const_cast<Value *>(RA->getBaseValue());
+    Value *VecPtr = PtrToArrPtrMap[Ptr];
+    Ptr = copyBasePtr(Builder, ValueMap, Ptr);
+    aggregateReductionVector(Ptr, VecPtr, Builder, *RA, ThreadsNo);
+  }
+
+  // Cleanup
+  ValueMap = VMC;
+  PtrToArrPtrMap.clear();
+}
+
+void ImplicitReductionHandler::fillOpenMPValues(SetVector<Value *> &Values) {
+
+  if (PtrToArrPtrMap.empty())
+    return;
+
+  for (auto I = PtrToArrPtrMap.begin(), E = PtrToArrPtrMap.end(); I != E; ++I) {
+    Values.insert(I->second);
+  }
+}
+
+void ImplicitReductionHandler::visitOpenMPSubFunction(IRBuilder<> &Builder,
+                                                      ValueToValueMapTy &Map,
+                                                      BasicBlock *ExitBB) {
+  if (PtrToArrPtrMap.empty())
+    return;
+
+  for (auto I = PtrToArrPtrMap.begin(), E = PtrToArrPtrMap.end(); I != E; ++I) {
+    const Value *Ptr = I->first;
+    Value *VecPtr = I->second;
+    assert(Map.count(VecPtr));
+
+    Value *ThreadID = getThreadID(Builder);
+    Value *Array = Map[VecPtr];
+    assert(isa<PointerType>(Array->getType()));
+    Value *Inst = nullptr;
+    SmallVector<Value *, 2> Indices;
+    Indices.push_back(Builder.getInt32(0));
+    Indices.push_back(ThreadID);
+    auto Gep = Builder.CreateGEP(Array, Indices);
+    if (isa<ArrayType>(Array->getType()->getPointerElementType())) {
+      // Select the array element with the thread ID
+      Inst = Builder.CreateLoad(Gep);
+    } else {
+      Inst = Gep;
+    }
+    Map[const_cast<Value *>(Ptr)] = Inst;
+  }
   return;
 }
 
-bool ImplicitReductionHandler::isMappedToReductionAccess(const Instruction *Inst) const {
-  return InstLoopMap.count(Inst);
+void ImplicitReductionHandler::visitScopStmt(IRBuilder<> &Builder,
+                                             ScopStmt &Statement) {
+  return;
 }
-
-const ReductionAccess &
-ImplicitReductionHandler::getReductionAccess(const Instruction *Inst) {
-  assert(isa<LoadInst>(Inst) || isa<StoreInst>(Inst) &&
-         "Instruction is no load nor store");
-
-  const Value *Pointer = getPointerValue(Inst);
-  assert(Pointer && "Instruction has no pointer operand");
-
-  const Loop *RLoop = InstLoopMap[Inst];
-  const ReductionAccess &RA = RI->getReductionAccess(Pointer, RLoop);
-  return RA;
-}
-
-void ImplicitReductionHandler::setSubFunction(IRBuilder<> &, BasicBlock *) {
-  if (PrepBB) {
-    SubFnExitBB = PrepBB;
-    PrepBB = 0;
-  }
-}
-
-void ImplicitReductionHandler::unsetSubFunction(ValueMapT &) {
-  if (SubFnExitBB) {
-    PrepBB = SubFnExitBB;
-    SubFnExitBB = 0;
-  }
-}
-
 
 bool ImplicitReductionHandler::runOnScop(Scop &S) {
 
   LI = &getAnalysis<LoopInfo>();
-  RI = &getAnalysis<ReductionInfo>();
+  //RI = &getAnalysis<ReductionInfo>();
 
-  Region &R = S.getRegion();
-  Reg = &R;
-
+  //Region &R = S.getRegion();
+  //Reg = &R;
+#if 0
   for (Scop::iterator SI = S.begin(), SE = S.end(); SI != SE; ++SI) {
     ScopStmt *Stmt = *SI;
     BasicBlock *StmtBB = Stmt->getBasicBlock();
     Loop *outerLoop = R.outermostLoopInRegion(LI, StmtBB);
     if (!outerLoop)
       continue;
-
-    //Stmt->dump();
-    //isl_union_map_dump(D.getDependences(Dependences::TYPE_ALL, true));
-    //isl_union_map_dump(D.getDependences(Dependences::TYPE_ALL, false));
-    //dbgs() << "D  isValidScat: " << D.isValidScattering(Stmt, true) << "\n";
-    //dbgs() << "D  isValidScat: " << D.isValidScattering(Stmt, false) << "\n";
-
-    //if (D.isValidScattering(Stmt, [> AllDeps <] true))
-      //continue;
 
     for (ScopStmt::memacc_iterator MI = Stmt->memacc_begin(),
                                    ME = Stmt->memacc_end();
@@ -207,15 +450,11 @@ bool ImplicitReductionHandler::runOnScop(Scop &S) {
       assert((outerLoop->contains(reductionLoop)) &&
              "Reduction loop is set but not contained in the outer loop");
 
-      MA->setReductionAccess();
-
-      dbgs() << "@@@@--- Loop: " << *RA->getReductionLoop();
-      dbgs() << "@@@@--- Base: " << *RA->getBaseValue() << "\n\n";
-      //Stmt->
+      //MA->setReductionAccess();
     }
   }
+#endif
 
-  //S.dump();
   return false;
 }
 
@@ -232,6 +471,7 @@ void ImplicitReductionHandler::getAnalysisUsage(AnalysisUsage &AU) const {
   AU.addRequired<LoopInfo>();
   AU.addRequired<ReductionInfo>();
   AU.addRequired<Dependences>();
+  AU.addRequired<ScalarEvolution>();
 }
 
 void *ImplicitReductionHandler::getAdjustedAnalysisPointer(const void *ID) {
@@ -250,6 +490,7 @@ INITIALIZE_AG_PASS_BEGIN(
     ImplicitReductionHandler, ReductionHandler, "polly-implicit-reductions",
     "Polly - Handle implicit reduction dependences", false, false, true);
 INITIALIZE_PASS_DEPENDENCY(LoopInfo);
+INITIALIZE_PASS_DEPENDENCY(ScalarEvolution);
 INITIALIZE_AG_DEPENDENCY(Dependences);
 INITIALIZE_AG_DEPENDENCY(ReductionInfo);
 INITIALIZE_AG_PASS_END(

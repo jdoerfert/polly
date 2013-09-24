@@ -271,7 +271,8 @@ private:
   ///
   /// Use the ReductionHandler to get the reduction vector for this load.
   /// Reduction vectors have (by construction) stride one.
-  Value *generateStrideOneReductionLoad(const LoadInst *Load, ValueMapT &BBMap);
+  Value *generateStrideOneReductionLoad(const LoadInst *Load, Value *ValuePtr,
+                                        ValueMapT &BBMap);
 
   /// @brief Load a vector initialized from a single scalar in memory
   ///

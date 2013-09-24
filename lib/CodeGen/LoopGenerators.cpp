@@ -209,26 +209,6 @@ void OMPGenerator::createCallLoopEndNowait() {
   Builder.CreateCall(F);
 }
 
-Value* OMPGenerator::getThreadID() {
-  if (ThreadID)
-    return ThreadID;
-
-  const char *Name = "omp_get_thread_num";
-  Module *M = getModule();
-  Function *F = M->getFunction(Name);
-
-  // If F is not available, declare it.
-  if (!F) {
-    GlobalValue::LinkageTypes Linkage = Function::ExternalLinkage;
-
-    FunctionType *Ty = FunctionType::get(Builder.getInt32Ty(), false);
-    F = Function::Create(Ty, Linkage, Name, M);
-  }
-
-  ThreadID = Builder.CreateCall(F);
-  return ThreadID;
-}
-
 IntegerType *OMPGenerator::getIntPtrTy() {
   return P->getAnalysis<DataLayout>().getIntPtrType(Builder.getContext());
 }
@@ -260,7 +240,12 @@ Value *OMPGenerator::loadValuesIntoStruct(SetVector<Value *> &Values) {
     Members.push_back(Values[i]->getType());
 
   StructType *Ty = StructType::get(Builder.getContext(), Members);
+  auto OldInsertPt = Builder.GetInsertPoint();
+  Builder.SetInsertPoint(OldInsertPt->getParent()->getParent()->getEntryBlock()
+                             .getFirstInsertionPt());
   Value *Struct = Builder.CreateAlloca(Ty, 0, "omp.userContext");
+  Builder.CreateLifetimeStart(Struct);
+  Builder.SetInsertPoint(OldInsertPt);
 
   for (unsigned i = 0; i < Values.size(); i++) {
     Value *Address = Builder.CreateStructGEP(Struct, i);
@@ -280,6 +265,7 @@ void OMPGenerator::extractValuesFromStruct(SetVector<Value *> OldValues,
   }
 }
 
+#if 0
 void OMPGenerator::createThreadLocalReductionPointers(ValueToValueMapTy &Map,
                                                       ValueToValueMapTy &RMap,
                                                       AccessPointerMapT &AMap,
@@ -341,6 +327,7 @@ void OMPGenerator::createThreadLocalReductionPointers(ValueToValueMapTy &Map,
   }
 
 }
+#endif
 
 Value *OMPGenerator::createSubfunction(Value *Stride, Value *StructData,
                                        SetVector<Value *> Data,
@@ -382,10 +369,7 @@ Value *OMPGenerator::createSubfunction(Value *Stride, Value *StructData,
 
   // Notify the reduction handler about the new sub-function
   ReductionHandler &RH = P->getAnalysis<ReductionHandler>();
-  RH.setSubFunction(Builder, ExitBB);
-  // Create thread local reduction pointers after we extracted the values
-  AccessPointerMapT AMap;
-  createThreadLocalReductionPointers(Map, RMap, AMap, RH);
+  RH.visitOpenMPSubFunction(Builder, Map, ExitBB);
 
   Builder.CreateBr(CheckNextBB);
 
@@ -417,17 +401,6 @@ Value *OMPGenerator::createSubfunction(Value *Stride, Value *StructData,
   // Add code to terminate this openmp subfunction.
   Builder.SetInsertPoint(ExitBB);
   createCallLoopEndNowait();
-
-  // Aggregate the local alloca instructions just before the return instruction
-  for (AccessPointerMapT::iterator I = AMap.begin(), E = AMap.end();
-       I != E; ++I) {
-      const ReductionAccess *RA = I->first;
-      Value   *ReductionPointer = I->second;
-      Value    *ReductionAlloca = Map[ReductionPointer];
-      Value       *AtomicReload = Builder.CreateLoad(ReductionAlloca,
-                                                     "red.alloca.reload");
-      RA->createAtomicBinOp(AtomicReload, ReductionPointer, Builder);
-  }
 
   Builder.CreateRetVoid();
 
@@ -468,6 +441,7 @@ Value *OMPGenerator::createParallelLoop(Value *LowerBound, Value *UpperBound,
                               LowerBound, UpperBound, Stride);
   Builder.CreateCall(SubFunction, SubfunctionParam);
   createCallParallelEnd();
+  Builder.CreateLifetimeEnd(Struct);
 
   return IV;
 }

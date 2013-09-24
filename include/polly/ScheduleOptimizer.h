@@ -14,6 +14,7 @@
 
 namespace polly {
 extern bool DisablePollyTiling;
+extern bool SimplifyDependences;
 }
 
 #endif

@@ -1,4 +1,5 @@
-import os, re, sys, copy, random
+import os, re, sys, copy, random, time
+import subprocess as sp
 
 
 #################################### OPTIONS ##################################
@@ -20,13 +21,17 @@ ABSOLUTE_PATHS      = False
 
 ALL_FILES_AT_ONCE   = False
 
-BASE_DIR            = None
+BASE_DIR            = '/home/johannes/Projects/RIL-Hack/polly/test/polybench/'
 
 FILTER_INCLUDE      = None
 
 FILTER_EXCLUDE      = None
 
 COMMAND             = None
+
+REPEAT              = 1
+
+SHOW_FIRST          = False
 
 ############################## OPTION DEFAULTS END ############################
 
@@ -167,6 +172,7 @@ def getCommandStr(command, ffile, stepNo):
 
   replacements = [('<FILE>', ffile if ffile else '', False),
                   ('<FILE_NO_EXT>', os.path.splitext(filename)[0] if filename else '', False),
+                  ('<FILE_NO_UNDERSCORE>', filename[:filename.index('_')] if filename and '_' in filename else os.path.splitext(filename)[0] if filename else '', False),
                   ('<STEP_NO>', str(stepNo), False),
                   ('<LAST_FILE_DIR>', os.path.basename(os.path.split(ffile)[0]) if filename else '', False),
                   ('<RANDOM>', str(random.randint(10000, 99999)), False),
@@ -256,6 +262,7 @@ stepNo = 0
 startStepNo = 0 if not oContains('START_STEP') else int(oGet('START_STEP'))
 
 while readOptions(stepNo = stepNo):
+  first = oGet('SHOW_FIRST')
   stepNo += 1
   if stepNo - 1 < startStepNo:
     if oGet('VERBOSE'):
@@ -273,7 +280,7 @@ while readOptions(stepNo = stepNo):
 
   pre_step_command = oGet('PRE_STEP_COMMAND')
   if (pre_step_command):
-    os.system(pre_step_command)
+    sp.call(pre_step_command, shell=True)
 
   command = oGet('COMMAND')
   if not command:
@@ -290,37 +297,45 @@ while readOptions(stepNo = stepNo):
 
   done, printed = 0, 0
   mid = ('STEP %i' % (stepNo - 1)) if not oContains('STEP_NAME') else oGet('STEP_NAME')
-  print '0%' + ' ' * ((94 - len(mid)) / 2) + mid + ' ' * ((95 - len(mid)) / 2)+ '100%'
+  print ' ' * 6 +'0%' + ' ' * ((84 - len(mid)) / 2) + mid + ' ' * ((85 - len(mid)) / 2)+ '100%'
 
-  if oGet('ALL_FILES_AT_ONCE'):
-    command_str = getCommandStr(command, None, stepNo - 1)
-    files_str = ' '.join(files)
-    os.system(command_str + ' ' + files_str)
-    print '#' * 100
-  else:
-    pre_file_command = oGet('PRE_FILE_COMMAND')
-    for ffile in files:
-      if (pre_file_command):
-        pre_file_command_str = getCommandStr(pre_file_command, ffile, stepNo - 1)
-        os.system(pre_file_command_str)
+  for r in range(int(oGet('REPEAT'))):
+    print '[%3i] ' % r,
+    if r % 1000 == 5:
+      time.sleep(120)
+    if oGet('ALL_FILES_AT_ONCE'):
+      command_str = getCommandStr(command, None, stepNo - 1)
+      files_str = ' '.join(files)
+      sp.call(command_str + ' ' + files_str, shell = 'True')
+      print '#' * 90
+    else:
+      pre_file_command = oGet('PRE_FILE_COMMAND')
+      random.shuffle(files)
+      for ffile in files:
+        if (pre_file_command):
+          pre_file_command_str = getCommandStr(pre_file_command, ffile, stepNo - 1)
+          sp.call(pre_file_command_str, shell=True)
 
-      command_str = getCommandStr(command, ffile, stepNo - 1)
-      if not command_str:
-        print >> sys.stderr, '>> S%i:  Command could not be instanciated,... skip step' % (stepNo - 1)
-        break
-      if oGet('VERBOSE'):
-        print command_str
-      os.system(command_str)
+        command_str = getCommandStr(command, ffile, stepNo - 1)
+        if not command_str:
+          print >> sys.stderr, '>> S%i:  Command could not be instanciated,... skip step' % (stepNo - 1)
+          break
+        if oGet('VERBOSE'):
+          print command_str
+        if first:
+          print command_str
+          first = False;
+        sp.call(command_str, shell=True)
 
-      done += 1
-      to_print = (done * 100) / no_files
-      if (to_print > printed):
-        sys.stdout.write("#" * (to_print - printed))
-        sys.stdout.flush()
-        printed = to_print
-    if no_files == 0:
-      print '#' * 100
-  print
+        done += 1
+        to_print = (done * 90) / no_files
+        if (to_print > printed):
+          sys.stdout.write("#" * (to_print - printed))
+          sys.stdout.flush()
+          printed = to_print
+      if no_files == 0:
+        print ' ' * 6 + '#' * 90
+    print
 
   if oGet('VERBOSE'):
     mid = ('Done STEP %i' % (stepNo - 1))

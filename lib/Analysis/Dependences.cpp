@@ -59,6 +59,14 @@ static cl::opt<enum AnalysisType> OptAnalysisType(
 //===----------------------------------------------------------------------===//
 Dependences::~Dependences() {}
 
+void *Dependences::getHandlerInfo(__isl_take isl_set *LoopDomain,
+                                  unsigned ParallelDimension) {
+  assert(0 && "Default dependency analysis doesnt support dependency handlers");
+}
+void Dependences::resetHandlerInfo(void *) {
+  assert(0 && "Default dependency analysis doesnt support dependency handlers");
+}
+
 ScopDependences::ScopDependences() : ScopPass(ID) { RAW = WAR = WAW = NULL; }
 ScopDependences::ScopDependences(char &ID) : ScopPass(ID) {
   RAW = WAR = WAW = NULL;
@@ -240,7 +248,8 @@ bool ScopDependences::isValidScattering(StatementToIslMapTy *NewScattering) {
   return IsValid;
 }
 
-isl_union_map *getCombinedScheduleForSpace(Scop *scop, unsigned dimLevel) {
+isl_union_map *Dependences::getCombinedScheduleForSpace(Scop *scop,
+                                                        unsigned dimLevel) {
   isl_space *Space = scop->getParamSpace();
   isl_union_map *schedule = isl_union_map_empty(Space);
 
@@ -357,6 +366,15 @@ isl_union_map *ScopDependences::getDependences(int Kinds) {
 
 isl_union_map *ScopDependences::getMinimalDependences(int Kinds) {
   return getDependences(Kinds);
+}
+
+bool ScopDependences::hasConditionalValidityConditions() const {
+  return false;
+}
+
+isl_union_map **
+ScopDependences::getConditionalValidityConditions(unsigned &CondNumber) const {
+  return nullptr;
 }
 
 void *ScopDependences::getAdjustedAnalysisPointer(const void *ID) {

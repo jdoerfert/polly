@@ -24,9 +24,10 @@
 #include "polly/CodeGen/Cloog.h"
 #include "polly/CodeGen/CodeGeneration.h"
 #include "polly/Dependences.h"
-#include "polly/ExplicitReductionHandler.h"
 #include "polly/ImplicitReductionHandler.h"
+#include "polly/ExplicitReductionHandler.h"
 #include "polly/ImplicitReductionDependences.h"
+#include "polly/ExplicitReductionDependences.h"
 #include "polly/LinkAllPasses.h"
 #include "polly/Options.h"
 #include "polly/ScopDetection.h"
@@ -214,6 +215,7 @@ static void initializePollyPasses(PassRegistry &Registry) {
   initializeImplicitReductionDependencesPass(Registry);
   initializeImplicitReductionHandlerPass(Registry);
 
+  initializeExplicitReductionDependencesPass(Registry);
   initializeExplicitReductionHandlerPass(Registry);
 }
 
@@ -304,6 +306,26 @@ static void registerPollyPasses(llvm::PassManagerBase &PM) {
   if (DeadCodeElim)
     PM.add(polly::createDeadCodeElimPass());
 
+  switch (ReductionDetection) {
+  case NONE_RH:
+    break;
+  default:
+    switch (ReductionHandlerUsed) {
+    case IMPLICIT_RH:
+      PM.add(polly::createBasicReductionInfoPass());
+      PM.add(polly::createImplicitReductionDependencesPass());
+      PM.add(polly::createImplicitReductionHandlerPass());
+      break;
+    case EXPLICIT_RH:
+      PM.add(polly::createBasicReductionInfoPass());
+      PM.add(polly::createExplicitReductionDependencesPass());
+      PM.add(polly::createExplicitReductionHandlerPass());
+      break;
+    default:
+      ;
+    }
+  }
+
   switch (Optimizer) {
   case OPTIMIZER_NONE:
     break; /* Do nothing */
@@ -323,16 +345,6 @@ static void registerPollyPasses(llvm::PassManagerBase &PM) {
   case OPTIMIZER_ISL:
     PM.add(polly::createIslScheduleOptimizerPass());
     break;
-  }
-
-  switch (ReductionHandlerUsed) {
-  case IMPLICIT_RH:
-    PM.add(polly::createBasicReductionInfoPass());
-    PM.add(polly::createImplicitReductionDependencesPass());
-    PM.add(polly::createImplicitReductionHandlerPass());
-    break;
-
-  default:;
   }
 
   if (ExportJScop)

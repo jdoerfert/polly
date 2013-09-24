@@ -11,8 +11,8 @@
 //
 //===----------------------------------------------------------------------===//
 
-#ifndef POLLY_REDUCTION_DEPENDENCES_H
-#define POLLY_REDUCTION_DEPENDENCES_H
+#ifndef POLLY_IMPLICIT_REDUCTION_DEPENDENCES_H
+#define POLLY_IMPLICIT_REDUCTION_DEPENDENCES_H
 
 #include "polly/ScopInfo.h"
 #include "polly/Dependences.h"
@@ -29,13 +29,11 @@ class LoopInfo;
 namespace polly {
 
 class ScopStmt;
+class MemoryAccess;
 class ReductionInfo;
 class ReductionAccess;
 
 class ImplicitReductionDependences : public ScopDependences {
-
-  void gatherReductionAccesses(Scop &S);
-
 public:
   static char ID;
 
@@ -63,9 +61,17 @@ public:
   ///              different kinds are 'ored' together.
   virtual isl_union_map *getMinimalDependences(int Kinds) override;
 
+  virtual void *getHandlerInfo(__isl_take isl_set *LoopDomain,
+                               unsigned ParallelDimension) override;
+  virtual void resetHandlerInfo(void *HI) override;
+
   virtual void printScop(raw_ostream &OS) const override;
   virtual void releaseMemory() override;
   virtual void getAnalysisUsage(llvm::AnalysisUsage &AU) const override;
+
+  virtual bool hasConditionalValidityConditions() const;
+  virtual isl_union_map **
+  getConditionalValidityConditions(unsigned &CondNumber) const;
 
   /// getAdjustedAnalysisPointer - This method is used when a pass implements
   /// an analysis interface through multiple inheritance. If needed, it
@@ -74,6 +80,8 @@ public:
   virtual void *getAdjustedAnalysisPointer(const void *ID);
 
 protected:
+
+  ImplicitReductionDependences(char &ID);
 
   LoopInfo *LI;
   ReductionInfo *RI;
@@ -84,7 +92,11 @@ protected:
     isl_union_map *RAW;
     isl_union_map *WAW;
     isl_union_map *WAR;
-    DependencyTriple() : RAW(nullptr), WAW(nullptr), WAR(nullptr) {}
+    bool Handled;
+    DependencyTriple()
+        : RAW(nullptr), WAW(nullptr), WAR(nullptr), Handled(false) {}
+    void releaseMemory();
+    isl_union_map *combine() const;
   };
 
   using RAptrT = const ReductionAccess *;
@@ -99,9 +111,7 @@ protected:
   RedAccMemAccMapT RedAccMemAccMap;
 
   // The different kinds of dependences we calculate (weakened versions)
-  isl_union_map *WEAKENED_RAW;
-  isl_union_map *WEAKENED_WAR;
-  isl_union_map *WEAKENED_WAW;
+  DependencyTriple RedDep;
 
   /// @brief Collect information about the SCoP.
   virtual void collectInfo(Scop &S, isl_union_map **Read, isl_union_map **Write,
@@ -111,6 +121,11 @@ protected:
   // @brief Calculate the dependences for a certain SCoP.
   virtual void calculateDependences(Scop &S) override;
 
+  void gatherReductionAccesses(Scop &S, RedAccDepMapT &RedAccDepMap);
+
+  isl_union_map *getDTDependences(struct DependencyTriple &DT);
+  void addMemoryAccessEffects(const MemoryAccess *MA, isl_union_map **Read,
+                              isl_union_map **Write, isl_union_map **Schedule);
   virtual void swapDependences();
 };
 

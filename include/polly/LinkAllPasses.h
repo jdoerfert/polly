@@ -67,6 +67,7 @@ llvm::Pass *createNoReductionInfoPass();
 llvm::Pass *createBasicReductionInfoPass();
 
 llvm::Pass *createExplicitReductionHandlerPass();
+llvm::Pass *createExplicitReductionDependencesPass();
 
 llvm::Pass *createImplicitReductionHandlerPass();
 llvm::Pass *createImplicitReductionDependencesPass();
@@ -128,6 +129,7 @@ struct PollyForcePassLinking {
     createBasicReductionInfoPass();
 
     createExplicitReductionHandlerPass();
+    createExplicitReductionDependencesPass();
 
     createImplicitReductionHandlerPass();
     createImplicitReductionDependencesPass();
@@ -161,8 +163,6 @@ void initializeNoReductionInfoPass(llvm::PassRegistry &);
 void initializeBasicReductionInfoPass(llvm::PassRegistry &);
 
 void initializeReductionHandlerAnalysisGroup(llvm::PassRegistry &);
-void initializeExplicitReductionHandlerGroup(llvm::PassRegistry &);
-void initializeImplicitReductionHandlerGroup(llvm::PassRegistry &);
 }
 
 #endif

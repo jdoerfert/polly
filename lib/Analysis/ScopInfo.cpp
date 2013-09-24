@@ -1059,6 +1059,7 @@ bool ScopInfo::runOnRegion(Region *R, RGPassManager &RGM) {
 
   scop = new Scop(*tempScop, LI, SE, ctx);
 
+  scop->dump();
   return false;
 }
 

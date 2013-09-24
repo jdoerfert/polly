@@ -30,6 +30,7 @@
 #include "polly/LinkAllPasses.h"
 #include "polly/Options.h"
 #include "polly/ScopInfo.h"
+#include "polly/ReductionHandler.h"
 
 #define DEBUG_TYPE "polly-opt-isl"
 #include "llvm/Support/Debug.h"
@@ -39,10 +40,21 @@ using namespace polly;
 
 namespace polly {
 bool DisablePollyTiling;
+bool SimplifyDependences;
 }
 static cl::opt<bool, true>
 DisableTiling("polly-no-tiling", cl::desc("Disable tiling in the scheduler"),
               cl::location(polly::DisablePollyTiling), cl::init(false),
+              cl::cat(PollyCategory));
+
+static cl::opt<bool>
+DepsMinimal("polly-opt-min-deps", cl::desc("Use minimal dependences"),
+              cl::init(false),
+              cl::cat(PollyCategory));
+
+static cl::opt<bool>
+OuterZero("polly-opt-outer-zero", cl::desc("Use outer zero option"),
+              cl::init(false),
               cl::cat(PollyCategory));
 
 static cl::opt<bool>
@@ -55,10 +67,11 @@ OptimizeDeps("polly-opt-optimize-only",
              cl::desc("Only a certain kind of dependences (all/raw)"),
              cl::Hidden, cl::init("all"), cl::cat(PollyCategory));
 
-static cl::opt<std::string>
+static cl::opt<bool, true>
 SimplifyDeps("polly-opt-simplify-deps",
-             cl::desc("Dependences should be simplified (yes/no)"), cl::Hidden,
-             cl::init("yes"), cl::cat(PollyCategory));
+             cl::desc("Dependences should be simplified (yes/no)"),
+             cl::location(polly::SimplifyDependences), cl::Hidden,
+             cl::init(true), cl::cat(PollyCategory));
 
 static cl::opt<int>
 MaxConstantTerm("polly-opt-max-constant-term",
@@ -449,6 +462,8 @@ bool IslScheduleOptimizer::runOnScop(Scop &S) {
         Dependences::TYPE_RAW | Dependences::TYPE_WAR | Dependences::TYPE_WAW;
   else if (OptimizeDeps == "raw")
     ProximityKinds = Dependences::TYPE_RAW;
+  else if (OptimizeDeps == "none")
+    ProximityKinds = 0;
   else {
     errs() << "Do not know how to optimize for '" << OptimizeDeps << "'"
            << " Falling back to optimizing all dependences.\n";
@@ -466,10 +481,16 @@ bool IslScheduleOptimizer::runOnScop(Scop &S) {
   // those not respected. The latter one should consist of all dependences as
   // the scheduler will minimize the number of dependences not respected in the
   // first place.
-  isl_union_map *Validity =
-      D->getMinimalDependences(ValidityKinds);
-  isl_union_map *Proximity =
-      D->getMinimalDependences(ProximityKinds);
+  isl_union_map *Validity;
+  isl_union_map *Proximity;
+
+  if (DepsMinimal) {
+    Validity = D->getMinimalDependences(ValidityKinds);
+    Proximity = D->getMinimalDependences(ProximityKinds);
+  } else {
+    Validity = D->getDependences(ValidityKinds);
+    Proximity = D->getDependences(ProximityKinds);
+  }
 
   // Simplify the dependences by removing the constraints introduced by the
   // domains. This can speed up the scheduling time significantly, as large
@@ -478,15 +499,12 @@ bool IslScheduleOptimizer::runOnScop(Scop &S) {
   // transformations, but in most cases, such transformation do not seem to be
   // interesting anyway. In some cases this option may stop the scheduler to
   // find any schedule.
-  if (SimplifyDeps == "yes") {
+  if (SimplifyDeps) {
     Validity = isl_union_map_gist_domain(Validity, isl_union_set_copy(Domain));
     Validity = isl_union_map_gist_range(Validity, isl_union_set_copy(Domain));
     Proximity =
         isl_union_map_gist_domain(Proximity, isl_union_set_copy(Domain));
     Proximity = isl_union_map_gist_range(Proximity, isl_union_set_copy(Domain));
-  } else if (SimplifyDeps != "no") {
-    errs() << "warning: Option -polly-opt-simplify-deps should either be 'yes' "
-              "or 'no'. Falling back to default: 'yes'\n";
   }
 
   DEBUG(dbgs() << "\n\nCompute schedule from: ");
@@ -524,6 +542,8 @@ bool IslScheduleOptimizer::runOnScop(Scop &S) {
   isl_options_set_schedule_maximize_band_depth(S.getIslCtx(), IslMaximizeBands);
   isl_options_set_schedule_max_constant_term(S.getIslCtx(), MaxConstantTerm);
   isl_options_set_schedule_max_coefficient(S.getIslCtx(), MaxCoefficient);
+  if (OuterZero)
+    isl_options_set_schedule_outer_zero_distance(S.getIslCtx(), 1);
   if (UseFeautrier)
     isl_options_set_schedule_algorithm(S.getIslCtx(), ISL_SCHEDULE_ALGORITHM_FEAUTRIER);
   dbgs() << "ISL SCHEDULE ALGO: "
@@ -531,13 +551,31 @@ bool IslScheduleOptimizer::runOnScop(Scop &S) {
 
   isl_options_set_on_error(S.getIslCtx(), ISL_ON_ERROR_CONTINUE);
   isl_schedule *Schedule;
-  Schedule = isl_union_set_compute_schedule(Domain, Validity, Proximity);
+  if (D->hasConditionalValidityConditions()) {
+    unsigned CondNumber = 0;
+    int *condV = 0;
+    isl_union_map **ConditionalValidity =
+        D->getConditionalValidityConditions(CondNumber);
+    if (CondNumber) {
+      Schedule = isl_union_set_compute_schedule_conditionally(
+          Domain, Validity, Proximity, ConditionalValidity, CondNumber, &condV);
+      D->setCondV(condV);
+    } else {
+      free(ConditionalValidity);
+      Schedule = isl_union_set_compute_schedule(Domain, Validity, Proximity);
+    }
+  } else {
+    Schedule = isl_union_set_compute_schedule(Domain, Validity, Proximity);
+  }
   isl_options_set_on_error(S.getIslCtx(), ISL_ON_ERROR_ABORT);
+  isl_options_set_on_error(S.getIslCtx(), ISL_ON_ERROR_WARN);
 
   // In cases the scheduler is not able to optimize the code, we just do not
   // touch the schedule.
-  if (!Schedule)
+  if (!Schedule) {
+    DEBUG(dbgs() << "No Schedule found;\n");
     return false;
+  }
 
   DEBUG(dbgs() << "Schedule := "; isl_schedule_dump(Schedule); dbgs() << ";\n");
 

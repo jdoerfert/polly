@@ -12,6 +12,7 @@
 //===----------------------------------------------------------------------===//
 
 #include "polly/ExplicitReductionHandler.h"
+#include "polly/ExplicitReductionDependences.h"
 
 #include "polly/Options.h"
 #include "polly/LinkAllPasses.h"
@@ -34,599 +35,177 @@
 #define DEBUG_TYPE "polly-reductions"
 #include "llvm/Support/Debug.h"
 
-STATISTIC(ReductionsVectorized, "Number of vectorized reduction accesses");
-
 using namespace llvm;
 using namespace polly;
 
-static cl::opt<bool>
-PreserveReductionStatements("polly-preserve-reduction-statements",
-    cl::desc("Use write accesses to preserve read-only statements"),
-    cl::Hidden, cl::init(false), cl::cat(PollyCategory));
-
-
-#define RH_DEBUG(msg) DEBUG(dbgs() << "RH: " << msg << "\n")
-#define CHECK(cond, reason)                                     \
-  if (cond) {                                                   \
-    RH_DEBUG("   Skip memory access: " << reason << "\n\n");    \
-    continue;                                                   \
-  }
-
-
-static unsigned F_ID = 0;
-
-void ExplicitReductionHandler::insertFreshMemoryAccess(ScopStmt *Stmt, int dim, int free) {
-
-  // Create the access relation for the new memory access
-  const std::string BaseName = "FRESH_" + std::to_string(F_ID++);
-  if (dim == -1)
-    dim = Stmt->getNumIterators();
-
-  isl_space *Space = isl_space_set_alloc(Stmt->getIslCtx(), 0, dim);
-  Space = isl_space_set_tuple_name(Space, isl_dim_set, BaseName.c_str());
-  Space = isl_space_align_params(Space, Stmt->getDomainSpace());
-
-  // Create the access relation as usual
-  isl_basic_map *BasicAccessMap = isl_basic_map_from_domain_and_range(
-                           isl_basic_set_universe(Stmt->getDomainSpace()),
-                           isl_basic_set_universe(Space));
-  isl_map *AccessRelation = isl_map_from_basic_map(BasicAccessMap);
-  isl_space *ParamSpace = Stmt->getParent()->getParamSpace();
-  AccessRelation = isl_map_align_params(AccessRelation, ParamSpace);
-
-  dbgs() << "Dim: " << dim << " : free " << free << "\n";
-  for (unsigned i = 0; i < dim - free; ++i)
-    AccessRelation = isl_map_equate(AccessRelation, isl_dim_out,
-                                    i, isl_dim_in, i);
-
-  // Create the memory access and add it to the parent scop statement
-  MemoryAccess *MA = new MemoryAccess(Stmt, AccessRelation, BaseName);
-  Stmt->addMemoryAccess(MA);
-}
-
-void ExplicitReductionHandler::getFirstLoopStatementPosition(int D, const Loop *L,
-                                                     Scop::iterator &SP) {
-  assert(D >= 0 && "Requested dimension is invalid");
-  unsigned U = (unsigned) D;
-
-  for (Scop::iterator SI = S->begin(), SE = S->end(); SI != SE; ++SI) {
-    if ((*SI)->getNumIterators() > U && (*SI)->getLoopForDimension(U) == L) {
-      SP = SI;
-      break;
-    }
-  }
-}
-
-void ExplicitReductionHandler::getPostLoopStatementPosition(int D, const Loop *L,
-                                                    Scop::iterator &SI) {
-  // Catch negative dimensions
-  if (D < 0)
-    SI = S->end();
-
-  for (Scop::iterator SE = S->end(); SI != SE; ++SI) {
-    if ((int) (*SI)->getNumIterators() <= D) {
-      break;
-    }
-    if ((*SI)->getLoopForDimension(D) != L) {
-      break;
-    }
-  }
-}
-
-const Loop* ExplicitReductionHandler::getOuterMostLoop(const Instruction *Inst) {
-  const BasicBlock  *Block     = Inst->getParent();
-  const Loop        *OuterLoop =
-    S->getRegion().outermostLoopInRegion(LI, const_cast<BasicBlock*>(Block));
-
-  return OuterLoop;
-}
-
-void ExplicitReductionHandler::getScatteringValue(int D,
-                                          __isl_keep isl_map *Scattering,
-                                          isl_int &Val) {
-  unsigned U = (unsigned) D;
-  assert( D >= 0 && isl_map_n_out(Scattering) > 2 * U &&
-          "Requested dimension invalid");
-
-  bool fixed = isl_map_plain_is_fixed(Scattering, isl_dim_out,
-                                      2 * U, &Val);
-  assert(fixed && "Dimension should be fixed");
-  (void) fixed;
-}
-
-void ExplicitReductionHandler::replaceScattering(int D, ScopStmt *Stmt,
-                                         __isl_take isl_map *Scattering,
-                                         isl_int &Val) {
-
-  // Get constants needed to create the new scattering maps
-  int NbScatteringDims = S->getMaxLoopDepth() * 2 + 1;
-  isl_ctx *ctx = S->getIslCtx();
-
-  isl_int ScatterVal;
-  isl_int_init(ScatterVal);
-
-  // Get the number of iterator
-  int NbIterators = Stmt->getNumIterators();
-
-  // And create an empty Scattering map
-  isl_space *Space = isl_space_set_alloc(ctx, 0, NbScatteringDims);
-  Space = isl_space_set_tuple_name(Space, isl_dim_out, "scattering");
-
-  isl_map *NewScattering = isl_map_from_domain_and_range(
-                                isl_set_universe(Stmt->getDomainSpace()),
-                                isl_set_universe(Space));
-
-  // Do not alter the loop dimensions (same as ScopStmt::buildScattering)
-  for (int i = 0; i < NbIterators; ++i)
-    NewScattering =
-      isl_map_equate(NewScattering, isl_dim_out, 2 * i + 1, isl_dim_in, i);
-
-  // Copy the scattering value for constant dimensions,
-  // except for dimension D, which is set to @p Val
-  for (int i = 0; i < NbIterators + 1; ++i) {
-    bool fixed = isl_map_plain_is_fixed(Scattering, isl_dim_out,
-                                        2 * i, &ScatterVal);
-    assert(fixed && "Dimension should be fixed");
-
-    if (i == D)
-      isl_int_set(ScatterVal, Val);
-
-    NewScattering = isl_map_fix(NewScattering, isl_dim_out, 2 * i, ScatterVal);
-  }
-
-  // Fill remaining scattering dimensions
-  // (due to loop nests withing this SCoP with higher depth)
-  for (int i = 2 * NbIterators + 1; i < NbScatteringDims; ++i)
-    NewScattering = isl_map_fix_si(NewScattering, isl_dim_out, i, 0);
-
-  // Align parameters (same as ScopStmt::buildScattering)
-  NewScattering = isl_map_align_params(NewScattering, S->getParamSpace());
-
-  RH_DEBUG("Changed scattering from:");
-  DEBUG(isl_map_dump(Scattering));
-  RH_DEBUG("To");
-  DEBUG(isl_map_dump(NewScattering));
-
-  Stmt->setScattering(NewScattering);
-
-  // Clean up
-  isl_map_free(Scattering);
-  isl_int_clear(ScatterVal);
-}
-
-void ExplicitReductionHandler::incrementScattering(int D, ScopStmt *PrepStmt,
-                           ScopStmt *FixupStmt, Scop::iterator &PostStmt) {
-
-  // Create an isl_int to read the current (fixed) values
-  // in the scattering of the statements
-  isl_int RedVal;
-  isl_int_init(RedVal);
-
-  unsigned Increment = 0;
-
-  S->dump();
-  dbgs() << " D: " << D <<" \n";
-  Scop::iterator SI = S->begin();
-
-  // Find the prepare statement
-  while ((*SI) != PrepStmt) { SI++; }
-  assert((*SI) == PrepStmt && "SI should point to PrepStmt.");
-
-
-  for (; SI != PostStmt; ++SI) {
-    // Keep a copy of the scattering
-    isl_map *Scattering = (*SI)->getScattering();
-
-    // Get the current value of dimension D (*2)
-    getScatteringValue(D, Scattering, RedVal);
-
-    // Once the fixup statement is found we set the increment to 2
-    Increment += ((*SI) == FixupStmt);
-
-    // Increment it
-    isl_int_add_ui(RedVal, RedVal, Increment);
-
-    // And replace it in the scattering
-    replaceScattering(D, (*SI), Scattering, RedVal);
-
-    // After the prepare statement was handled, set the increment to 1
-    Increment += ((*SI) == PrepStmt);
-
-  }
-
-  // Clean up
-  isl_int_clear(RedVal);
-}
-
-
-void ExplicitReductionHandler::insertMemoryAccess(MemoryAccess *MA, ScopStmt *Stmt) {
-
-  isl_map *AccessRelation = MA->getAccessRelation();
-  isl_space    *StmtSpace = Stmt->getDomainSpace();
-  isl_set   *AccessDomain = MA->getStatement()->getDomain();
-  unsigned MemDim = isl_map_n_in(AccessRelation);
-  unsigned DomDim = isl_space_dim(StmtSpace, isl_dim_set);
-  dbgs() <<"MemDim:" <<  MemDim << " DomDim: " << DomDim << "\n";
-  assert(MemDim > DomDim);
-
-  //isl_set *AccessRange = isl_map_range(isl_map_copy(AccessRelation));
-  //isl_set_dump(AccessRange);
-  //isl_set_free(AccessRange);
-
-
-  AccessRelation = isl_map_remove_inputs(AccessRelation, DomDim,
-                                         MemDim - DomDim);
-  AccessRelation = isl_map_set_tuple_id(AccessRelation, isl_dim_in,
-                                isl_space_get_tuple_id(StmtSpace, isl_dim_set));
-
-  AccessDomain   = isl_set_remove_dims(AccessDomain, isl_dim_set,
-                                       DomDim, MemDim - DomDim);
-  AccessDomain = isl_set_set_tuple_id(AccessDomain,
-                             isl_space_get_tuple_id(StmtSpace, isl_dim_set));
-  AccessRelation = isl_map_intersect_domain(AccessRelation, AccessDomain);
-
-  AccessRelation = isl_map_intersect_domain(AccessRelation,
-                                            isl_set_universe(isl_space_copy(StmtSpace)));
-
-  isl_space *ParamSpace = Stmt->getParent()->getParamSpace();
-  AccessRelation = isl_map_align_params(AccessRelation, ParamSpace);
-
-  //dbgs() << " Access Realtion: ";
-  //isl_map_dump(AccessRelation);
-  //isl_map *ProjectRelation = isl_map_project_out(AccessRelation,
-                                                 //isl_dim_in, 0, DomDim);
-  //dbgs() << " Projected  Realtion: ";
-  //isl_map_dump(ProjectRelation);
-  isl_space_free(StmtSpace);
-  //AccessRelation = isl_map_from_domain_and_range(isl_set_universe(StmtSpace),
-                                                 //isl_map_range(ProjectRelation));
-  //dbgs() << " Projected Access Realtion: ";
-  //isl_map_dump(AccessRelation);
-
-  //ParamSpace = Stmt->getParent()->getParamSpace();
-  //AccessRelation = isl_map_align_params(AccessRelation, ParamSpace);
-
-  // And create the memory access before adding it to the parent SCoP statement
-  MemoryAccess *NewMA = new MemoryAccess(Stmt, AccessRelation,
-                                         MA->getBaseName());
-  Stmt->addMemoryAccess(NewMA);
-
-}
-
-ScopStmt* ExplicitReductionHandler::createEmptyStatement(int D, ScopStmt *Template,
-                                                 Scop::iterator &SI,
-                                                 Loop *RLoop, bool isPrepare) {
-  ScopStmt *Stmt    = new ScopStmt(*S, Template, D, RLoop, isPrepare);
-  SI = S->insertStmt(SI, Stmt);
-  return Stmt;
-}
-
-const ExplicitReductionHandler::StmtPair&
-ExplicitReductionHandler::createReductionStmts(int D, const Loop * ReductionLoop) {
-
-  Loop *RLoop = const_cast<Loop *>(ReductionLoop);
-
-  ScopStmt *PrepareStmt, *FixupStmt;
-  Scop::iterator SI;
-
-  getFirstLoopStatementPosition(D, ReductionLoop, SI);
-  assert(SI != S->end());
-
-  PrepareStmt = createEmptyStatement(D, *SI, SI, RLoop, true);
-
-  getPostLoopStatementPosition(D, ReductionLoop, ++SI);
-
-  FixupStmt = createEmptyStatement(D, PrepareStmt, SI, RLoop, false);
-
-  assert((int) FixupStmt->getNumIterators() == D);
-  const Loop *PrereductionLoop = (D == 0 ? 0 :
-                                  FixupStmt->getLoopForDimension(D - 1));
-
-  getPostLoopStatementPosition(D - 1, PrereductionLoop, SI);
-
-  incrementScattering(D, PrepareStmt, FixupStmt, SI);
-
-  StmtPair &PStmts = LoopRedStmts[ReductionLoop];
-  PStmts.first  = PrepareStmt;
-  PStmts.second = FixupStmt;
-
-  insertFreshMemoryAccess(PrepareStmt, 1, 1);
-  F_ID--;
-  insertFreshMemoryAccess(FixupStmt, 1, 1);
-
-  return PStmts;
-}
-
 bool ExplicitReductionHandler::runOnScop(Scop &Scop) {
-  releaseMemory();
-
-  S  = &Scop;
-  LI = &getAnalysis<LoopInfo>();
-  RI = &getAnalysis<ReductionInfo>();
-
-  DEBUG(Scop.dump());
-  DEBUG(Scop.getRegion().getEntry()->getParent()->dump());
-
-  // We cannot use the built-in iterators later as we might concurrently
-  // modify the SCoP (e.g., add new ScopStmts)
-  SmallVector<ScopStmt *, 32> Stmts;
-  for (Scop::iterator SI = Scop.begin(), SE = Scop.end(); SI != SE; ++SI) {
-    Stmts.push_back(*SI);
-  }
-
-  // For each statement
-  for (unsigned u = 0, e = Stmts.size(); u < e; ++u) {
-    ScopStmt *Stmt = Stmts[u];
-    bool preserved = false;
-
-    // We check all memory accesses for possible reduction accesses
-    for (ScopStmt::memacc_iterator MI = Stmt->memacc_begin(),
-                                   ME = Stmt->memacc_end();
-         MI != ME; ++MI) {
-      MemoryAccess *MA = *MI;
-
-      RH_DEBUG("Check memory access:\n");
-      DEBUG(MA->dump());
-      RH_DEBUG("  accessInst: "<< *MA->getAccessInstruction());
-      RH_DEBUG(" baseAddress: "<< *MA->getBaseAddr());
-
-      // In case there is no access instruction we cannot find a possible
-      // reduction loop for this access, thus we skip it
-      const Instruction *accessInst  = MA->getAccessInstruction();
-      CHECK(!accessInst, "No access instruction");
-
-      // Every memory access should have a base address
-      const Value *baseAddress = MA->getBaseAddr();
-      assert(baseAddress && "Expected base address for memory access");
-
-      // Skip base addresses which can never be reduction accesses
-      CHECK(baseAddress == accessInst,
-            "SSA write access")
-      CHECK(MA->isWrite() && !isa<StoreInst>(accessInst),
-            "SSA write access");
-      CHECK(MA->isRead()  && !isa<LoadInst>(accessInst),
-            "SSA read access");
-      CHECK(!baseAddress->getType()->isPointerTy(),
-            "Non pointer type base address");
-
-      // Skip memory accesses not surrounded by any loop withing this SCoP
-      const Loop *outerLoop = getOuterMostLoop(accessInst);
-      CHECK(!outerLoop, "No outer loop")
-
-      // Ask for the reduction access corresponding to this memory access
-      // (or this access instruction) within the outer loop
-      const ReductionAccess *RA = RI->getReductionAccess(accessInst,
-                                                         outerLoop);
-      CHECK(!RA, "No reduction access");
-
-      const Loop *reductionLoop = RA->getReductionLoop();
-      RH_DEBUG("Memory access is a reduction access");
-
-      // Test some consistency conditions
-      assert((reductionLoop->contains(accessInst)) &&
-             "Reduction loop does not contain access instruction");
-      assert((outerLoop->contains(reductionLoop)) &&
-             "Reduction loop is set but not contained in the outer loop");
-
-      // Mark this memory access as reduction access and read memory access
-      MA->setType(MemoryAccess::READ);
-      MA->setReductionAccess();
-
-      const StmtPair *RedStmtPair;
-      LoopStatementMap::const_iterator I = LoopRedStmts.find(reductionLoop);
-      if (I != LoopRedStmts.end()) {
-        RedStmtPair = &I->second;
-      } else {
-        dbgs() << *outerLoop << "\n";
-        dbgs() << *reductionLoop << "\n";
-        int RDim    = reductionLoop->getLoopDepth() - outerLoop->getLoopDepth();
-        dbgs() << RDim<< "\n";
-        RedStmtPair = &createReductionStmts(RDim, reductionLoop);
-      }
-
-      // Map the current access instruction to the reduction prepare statement.
-      //
-      // Later (during code generation) we want to copy this access instruction
-      // and if we are vectorizing we need the new reduction vector pointer.
-      // Reduction vector pointers are tied to the reduction prepare statement
-      // which contains the alloca instruction.
-      InstToPrepMap[accessInst] = RedStmtPair->first;
-
-      if (ReductionSet.count(RA) == 0) {
-          insertMemoryAccess(MA, RedStmtPair->first);
-          insertMemoryAccess(MA, RedStmtPair->second);
-          ReductionSet.insert(RA);
-      }
-
-      // Force the scheduler to preserve read only statements
-      if (PreserveReductionStatements && !preserved) {
-        preserved = true;
-        insertFreshMemoryAccess(Stmt);
-      }
-
-    } // For each MemoryAccess
-  } // For each ScopStmt
-
-  DEBUG(Scop.dump());
   return false;
 }
 
+void ExplicitReductionHandler::handleVector(IRBuilder<> &Builder,
+                                            ValueMapT &ValueMap,
+                                            int VecWidth,
+                                            void *HI,
+                                            CallbackFn VecCodegen) {
+  dbgs() << "ERH: handleVector!!\n";
+  using RAptrT = const ReductionAccess *;
+  using StmtPair = std::pair<ScopStmt *, ScopStmt *>;
+  using RAinfoPair = std::pair<RAptrT, std::pair<long int, StmtPair>>;
+  auto RAset = static_cast<std::set<RAinfoPair>*>(HI);
 
-Value *ExplicitReductionHandler::getReductionVecPointer(const Instruction *Inst,
-                                                unsigned VectorWidth) {
-  assert(isa<LoadInst>(Inst) || isa<StoreInst>(Inst) &&
-         "Instruction is no load nor store");
-
-  const ScopStmt *PrepareStmt = InstToPrepMap[Inst];
-  assert(PrepareStmt && "Instruction not part of any reduction access");
-  const Value *Pointer = getPointerValue(Inst);
-  assert(Pointer && "Instruction has no pointer operand");
-
-  BasicBlock *PrepareBB;
-  SubFnRemappingT::iterator SI = SubFnRemapping.find(PrepareStmt);
-  if (SI == SubFnRemapping.end())
-    PrepareBB = PrepareStmt->getBasicBlock();
-  else
-    PrepareBB = SI->second;
-
-  PointerToVecMapT &PVM = ReductionPointers[PrepareBB];
-  PointerToVecMapT::iterator I = PVM.find(Pointer);
-  if (I != PVM.end())
-    return I->second;
-
-  PointerType *PointerTy = dyn_cast<PointerType>(Pointer->getType());
-  assert(PointerTy && "PointerType expected");
-
-  Type *ScalarType = PointerTy->getElementType();
-  VectorType *VectorType = VectorType::get(ScalarType, VectorWidth);
-
-  const Loop *RLoop         = PrepareStmt->getReductionLoop();
-  const ReductionAccess &RA = RI->getReductionAccess(Pointer, RLoop);
-  Value *IdentElement       = RA.getIdentityElement(VectorType);
-  AllocaInst *Alloca        = new AllocaInst(VectorType,
-                                             Pointer->getName() + ".RedVec",
-                                             PrepareBB->getFirstInsertionPt());
-  //Alloca->setAlignment(VectorType->getBitWidth());
-
-  // Initialize the allocated space in PrepareBB
-  StoreInst *Store = new StoreInst(IdentElement, Alloca, false,
-                                   VectorType->getBitWidth());
-  Store->insertAfter(Alloca);
-
-  PVM[Pointer] = Alloca;
-
-  ReductionsVectorized++;
-  return Alloca;
-}
-
-
-void ExplicitReductionHandler::createReductionResult(IRBuilder<> &Builder,
-                                             const ScopStmt *PrepareStmt,
-                                             ValueMapT &ValueMap) {
-
-  BasicBlock *PrepareBB;
-  SubFnRemappingT::iterator SI = SubFnRemapping.find(PrepareStmt);
-  if (SI == SubFnRemapping.end())
-    PrepareBB = PrepareStmt->getBasicBlock();
-  else
-    PrepareBB = SI->second;
-
-  PointerToVecMapT &PVM = ReductionPointers[PrepareBB];
-  PointerToVecMapT::iterator I = PVM.begin(), E = PVM.end();
-  for (; I != E; ++I) {
-    Value *Pointer    = const_cast<Value *>(I->first);
-    Value *VecPointer = I->second;
-
-    PointerType *PointerTy = dyn_cast<PointerType>(Pointer->getType());
-    assert(PointerTy && "PointerType expected");
-    Type *ScalarType = PointerTy->getElementType();
-
-    PointerType *VecPointerTy = dyn_cast<PointerType>(VecPointer->getType());
-    assert(VecPointerTy && "PointerType expected");
-    VectorType *VecTy = dyn_cast<VectorType>(VecPointerTy->getElementType());
-    assert(VecTy && "VectorType expected");
-    unsigned VectorDim = VecTy->getNumElements();
-
-    const Loop *RLoop         = PrepareStmt->getReductionLoop();
-    const ReductionAccess &RA = RI->getReductionAccess(Pointer, RLoop);
-
-    // TODO VectorDim % 2 == 1 ?
-    assert((VectorDim % 2 == 0) && "Odd vector width not supported yet");
-
-    // The original base pointer might or might not been copied during code
-    // generation. If it was, we need to use the copied version.
-    ValueMapT::iterator VI = ValueMap.find(Pointer);
-    if (VI != ValueMap.end())
-      Pointer = VI->second;
-
-    // Aggreagate the reduction vector into a single value and store it in
-    // the given pointer
-    aggregateReductionResult(Pointer, VecPointer, Builder,
-                             ScalarType, RA, VectorDim);
-
-  }
-}
-
-bool
-ExplicitReductionHandler::isMappedToReductionAccess(const Instruction *Inst) const {
-  return InstToPrepMap.count(Inst);
-}
-
-const ReductionAccess&
-ExplicitReductionHandler::getReductionAccess(const Instruction *Inst) {
-  assert(isa<LoadInst>(Inst) || isa<StoreInst>(Inst) &&
-         "Instruction is no load nor store");
-
-  const ScopStmt *PrepareStmt = InstToPrepMap[Inst];
-  assert(PrepareStmt && "Instruction not part of any reduction access");
-
-  const Value *Pointer = getPointerValue(Inst);
-  assert(Pointer && "Instruction has no pointer operand");
-
-  const Loop *RLoop         = PrepareStmt->getReductionLoop();
-  const ReductionAccess &RA = RI->getReductionAccess(Pointer, RLoop);
-
-  return RA;
-}
-
-void ExplicitReductionHandler::setSubFunction(IRBuilder<> &Builder,
-                                      BasicBlock *ExitBB) {
-  BasicBlock *PrepareBB, *LastPrepareBB = Builder.GetInsertBlock();
-  LLVMContext &Context = Builder.getContext();
-  Function *F = ExitBB->getParent();
-  SubFnExitBB = ExitBB;
-
-  DominatorTree *DT = this->getAnalysisIfAvailable<DominatorTree>();
-
-  for (LoopStatementMap::iterator I = LoopRedStmts.begin(),
-       E = LoopRedStmts.end(); I != E; ++I) {
-
-    ScopStmt   *PrepareStmt = I->second.first;
-    StringRef StatementName = StringRef(PrepareStmt->getBaseName());
-    PrepareBB = BasicBlock::Create(Context, "polly." + StatementName, F);
-
-    PrepareBB->moveAfter(LastPrepareBB);
-    DT->addNewBlock(PrepareBB, LastPrepareBB);
-
-    Builder.CreateBr(PrepareBB);
-    Builder.SetInsertPoint(PrepareBB);
-
-    SubFnRemapping[I->second.first] = PrepareBB;
-
-    LastPrepareBB = PrepareBB;
+  // Iterate over all reduction accesses and create vector pointers for the base
+  // values
+  for (auto RAP : *RAset) {
+    auto RA = RAP.first;
+    auto LocNo = RAP.second.first;
+    auto RAStmts = RAP.second.second;
+    assert(LocNo == 1);
+    const Value *Pointer = RA->getBaseValue();
+    auto OldInsertPt = Builder.GetInsertPoint();
+    assert(RAStmts.first);
+    assert(RAStmts.first->getBasicBlock());
+    Builder.SetInsertPoint(RAStmts.first->getBasicBlock()->getFirstInsertionPt());
+    Type *ScalarType = getScalarType(Pointer);
+    Instruction *VecPtr = createVectorPointer(Builder, ScalarType, VecWidth);
+    VectorType *VecType = VectorType::get(ScalarType, VecWidth);
+    Value *IdentElement = RA->getIdentityElement(VecType);
+    Builder.CreateStore(IdentElement, VecPtr);
+    Builder.SetInsertPoint(OldInsertPt);
+    PtrToVecPtrMap[Pointer] = VecPtr;
   }
 
-}
+  // Create the vectorized code
+  VecCodegen();
 
-void ExplicitReductionHandler::unsetSubFunction(ValueMapT &ValueMap) {
-  IRBuilder<> Builder(SubFnExitBB->getFirstInsertionPt());
-
-  for (SubFnRemappingT::iterator I = SubFnRemapping.begin(),
-       E = SubFnRemapping.end(); I != E; ++I) {
-
-    createReductionResult(Builder, I->first, ValueMap);
+  // Iterate over all reduction accesses and aggregate the results
+  for (auto RAP : *RAset) {
+    auto RA = RAP.first;
+    auto RAStmts = RAP.second.second;
+    const Value *BaseValue = RA->getBaseValue();
+    assert(PtrToVecPtrMap.count(BaseValue));
+    Instruction *VecPtr = cast<Instruction>(PtrToVecPtrMap[BaseValue]);
+    Value *Pointer = const_cast<Value *>(BaseValue);
+    if (ValueMap.count(Pointer))
+      Pointer = ValueMap[Pointer];
+    else if (ValueMap.count(BaseValue))
+      Pointer = ValueMap[BaseValue];
+    else if (Instruction *PointerInst = dyn_cast<Instruction>(Pointer)) {
+      ValueMap[VecPtr] = PointerInst;
+      Pointer = copyBasePtr(Builder, ValueMap, VecPtr);
+    }
+    dbgs() << *Pointer << "\n";
+    dbgs() << *VecPtr << "\n";
+    assert(RAStmts.second);
+    FixupCallbacks.insert(std::make_pair(
+        RAStmts.second, [this, Pointer, VecPtr, RA, VecWidth](
+                            IRBuilder<> & Builder, ScopStmt & Stmt) {
+      auto OldInsertPt = Builder.GetInsertPoint();
+      assert(Stmt.getBasicBlock());
+      Builder.SetInsertPoint(Stmt.getBasicBlock()->getFirstInsertionPt());
+      aggregateReductionVector(Pointer, VecPtr, Builder, *RA, VecWidth);
+      Builder.SetInsertPoint(OldInsertPt);
+    }));
   }
 
-  SubFnRemapping.clear();
+  // Cleanup
+  PtrToVecPtrMap.clear();
+}
+
+void ExplicitReductionHandler::handleOpenMP(llvm::IRBuilder<> &Builder,
+                                            ValueMapT &ValueMap, void *HI,
+                                            CallbackFn OpenMPCodegen,
+                                            int ThreadsNo) {
+  dbgs() << "ERH: handleOpenMP!!\n";
+  using RAptrT = const ReductionAccess *;
+  using StmtPair = std::pair<ScopStmt *, ScopStmt *>;
+  using RAinfoPair = std::pair<RAptrT, std::pair<long int, StmtPair>>;
+  auto RAset = static_cast<std::set<RAinfoPair>*>(HI);
+  const ValueMapT VMC = ValueMap;
+
+  // Iterate over all reduction accesses and create vector pointers for the base
+  // values
+  for (auto RAP : *RAset) {
+    auto RA = RAP.first;
+    auto LocNo = RAP.second.first;
+    auto RAStmts = RAP.second.second;
+    assert(RAStmts.first);
+    assert(RAStmts.first->getBasicBlock());
+    assert(LocNo == 1 || LocNo == 32 || LocNo == 4);
+    Value *Ptr = const_cast<Value *>(RA->getBaseValue());
+    assert(Ptr && "No base value available");
+    Type *ScalarType = getScalarType(Ptr);
+    assert(VectorType::isValidElementType(ScalarType));
+    auto OldInsertPt = Builder.GetInsertPoint();
+    Builder.SetInsertPoint(RAStmts.first->getBasicBlock()->getFirstInsertionPt());
+    Instruction *NewPtr = createVectorPointer(Builder, ScalarType, ThreadsNo);
+    VectorType *VecType = VectorType::get(ScalarType, ThreadsNo);
+    Value *IdentElement = RA->getIdentityElement(VecType);
+    Builder.CreateStore(IdentElement, NewPtr);
+    Builder.SetInsertPoint(OldInsertPt);
+    PtrToArrPtrMap[Ptr] = NewPtr;
+  }
+
+  OpenMPCodegen();
+
+  for (auto RAP : *RAset) {
+    auto RA = RAP.first;
+    auto RAStmts = RAP.second.second;
+    Value *Ptr = const_cast<Value *>(RA->getBaseValue());
+    Value *VecPtr = PtrToArrPtrMap[Ptr];
+    Ptr = copyBasePtr(Builder, ValueMap, Ptr);
+    FixupCallbacks.insert(std::make_pair(
+        RAStmts.second, [this, Ptr, VecPtr, RA, ThreadsNo](
+                            IRBuilder<> & Builder, ScopStmt & Stmt) {
+      auto OldInsertPt = Builder.GetInsertPoint();
+      assert(Stmt.getBasicBlock());
+      Builder.SetInsertPoint(Stmt.getBasicBlock()->getFirstInsertionPt());
+      aggregateReductionVector(Ptr, VecPtr, Builder, *RA, ThreadsNo);
+      Builder.SetInsertPoint(OldInsertPt);
+    }));
+  }
+
+  // Cleanup
+  ValueMap = VMC;
+  PtrToArrPtrMap.clear();
+}
+
+void ExplicitReductionHandler::fillOpenMPValues(
+    llvm::SetVector<llvm::Value *> &Values) {
+  ImplicitReductionHandler::fillOpenMPValues(Values);
+}
+
+void ExplicitReductionHandler::visitOpenMPSubFunction(IRBuilder<> &Builder,
+                                                      ValueToValueMapTy &Map,
+                                                      BasicBlock *ExitBB) {
+  ImplicitReductionHandler::visitOpenMPSubFunction(Builder, Map, ExitBB);
+  return;
+}
+
+void ExplicitReductionHandler::visitScopStmt(IRBuilder<> &Builder,
+                                             ScopStmt &Statement) {
+  auto I = FixupCallbacks.find(&Statement);
+
+  if (!Statement.isReductionStatement() || Statement.getBasicBlock()) {
+    assert(I == FixupCallbacks.end());
+    return;
+  }
+
+  BasicBlock *SplitBB =
+      splitBlock(Builder, Twine(Statement.getBaseName()) + ".red.split", this);
+  Statement.setBasicBlock(SplitBB);
+
+  if (I != FixupCallbacks.end()) {
+    I->second(Builder, Statement);
+    FixupCallbacks.erase(I);
+  }
 }
 
 void ExplicitReductionHandler::getAnalysisUsage(AnalysisUsage &AU) const {
-  ScopPass::getAnalysisUsage(AU);
-  AU.addRequired<LoopInfo>();
-  AU.addRequiredTransitive<ReductionInfo>();
-}
-
-void ExplicitReductionHandler::printScop(raw_ostream &OS) const {
-  // TODO
+  ImplicitReductionHandler::getAnalysisUsage(AU);
 }
 
 void ExplicitReductionHandler::releaseMemory() {
-  ReductionSet.clear();
-  LoopRedStmts.clear();
-  ReductionPointers.clear();
-
-  assert(SubFnRemapping.empty() &&
-         "SetOpenMPFunction was called but not unset");
+  ImplicitReductionHandler::releaseMemory();
 }
 
 void *ExplicitReductionHandler::getAdjustedAnalysisPointer(const void *ID) {
@@ -638,7 +217,9 @@ void *ExplicitReductionHandler::getAdjustedAnalysisPointer(const void *ID) {
 
 char ExplicitReductionHandler::ID = 0;
 
-Pass *polly::createExplicitReductionHandlerPass() { return new ExplicitReductionHandler(); }
+Pass *polly::createExplicitReductionHandlerPass() {
+  return new ExplicitReductionHandler();
+}
 
 INITIALIZE_AG_PASS_BEGIN(
     ExplicitReductionHandler, ReductionHandler, "polly-explicit-reductions",

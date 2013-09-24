@@ -16,15 +16,20 @@
 
 #include "llvm/IR/IRBuilder.h"
 #include "llvm/ADT/DenseMap.h"
+#include "llvm/ADT/SetVector.h"
+
+#include "isl/map.h"
 
 namespace llvm {
 class Value;
 class Instruction;
+class LoopInfo;
 }
 
 namespace polly {
 
 typedef llvm::DenseMap<const llvm::Value *, llvm::Value *> ValueMapT;
+typedef std::map<llvm::Value *, llvm::Value *> ValueToValueMapTy;
 
 class ScopStmt;
 class ReductionAccess;
@@ -38,76 +43,47 @@ protected:
   const llvm::Value *getPointerValue(const llvm::Instruction *Inst);
 
   /// @brief TODO
-  void aggregateReductionResult(llvm::Value *Pointer,
+  void aggregateReductionVector(llvm::Value *Pointer,
                                 llvm::Value *VecPointer,
                                 llvm::IRBuilder<> &Builder,
-                                llvm::Type *ScalarType,
                                 const ReductionAccess &RA,
                                 unsigned VectorDim);
+
+  void aggregateReductionArrays(llvm::Type *ScalarType, llvm::Value *TargetArray,
+                               llvm::Value *SourceArrays,
+                               llvm::IRBuilder<> &Builder,
+                               const ReductionAccess &RA, llvm::LoopInfo &LI);
+
+  void initializeReductionArrays(llvm::Type *ScalarType,
+                                 llvm::Value *SourceArrays,
+                                 llvm::IRBuilder<> &Builder,
+                                 const ReductionAccess &RA, llvm::LoopInfo &LI);
+
+  llvm::Value* getThreadID(llvm::IRBuilder<> &Builder);
+
+  llvm::BasicBlock *splitBlock(llvm::IRBuilder<> &Builder, llvm::Twine Name,
+                               llvm::Pass *P);
 
 public:
   static char ID;
 
   virtual ~ReductionHandler() = 0;
 
-  virtual void setReductionPrepareBlock(llvm::BasicBlock *RedPrepBB) {};
-  virtual llvm::BasicBlock *getReductionPrepareBlock() { return 0; };
-
-  /// @brief Vector code generation interface
   //@{
-
   /// @brief Get the reduction vector pointer
-  ///
-  /// @param Inst        A instruction using a reduction access base value
-  /// @param VectorWidth The vector width
-  ///
-  /// @return The vector memory location for the reduction access identified by
-  ///         @p Inst. This locations is a vector of length @p VectorWidth.
-  ///
-  /// A vector memory locations for a reduction access is initially an alloca
-  /// instructions in the reduction prepare statement of the reduction loop.
-  virtual llvm::Value *getReductionVecPointer(const llvm::Instruction *Inst,
-                                      unsigned VectorWidth) = 0;
+  virtual llvm::Value *getReductionVecPointer(const llvm::Value *BaseValue) = 0;
+  using CallbackFn = std::function<void ()>;
+  virtual void handleVector(llvm::IRBuilder<> &Builder, ValueMapT &ValueMap,
+                            int VectorWidth, void *HI, CallbackFn fn) = 0;
+  virtual void handleOpenMP(llvm::IRBuilder<> &Builder, ValueMapT &ValueMap,
+                            void *HI, CallbackFn fn, int OpenMPThreads) = 0;
+  virtual void fillOpenMPValues(llvm::SetVector<llvm::Value *> &Values) = 0;
+  virtual void visitOpenMPSubFunction(llvm::IRBuilder<> &Builder,
+                                      ValueToValueMapTy &ValueMap,
+                                      llvm::BasicBlock *ExitBB) = 0;
 
-  /// @brief Aggregate the reduction vectors defined in a prepare statement
-  ///
-  /// @param Builder     A LLVM-IR builder
-  /// @param PrepareStmt The reduction prepare statements
-  /// @param ValueMap    A mapping from old to new values
-  ///
-  /// Using the @p Builder a binary tree is constructed which combines the
-  /// elements in the reduction vector. The final result is stored at the
-  /// new value for the reduction base value.
-  virtual void createReductionResult(llvm::IRBuilder<> &Builder,
-                             const ScopStmt *PrepareStmt,
-                             ValueMapT &ValueMap) = 0;
-
-  //@}
-
-
-  /// @brief Parallel code generation interface
-  //@{
-
-  /// @brief Check if an instruction is mapped to a reduction access
-  virtual bool
-  isMappedToReductionAccess(const llvm::Instruction *Inst) const = 0;
-
-  /// @brief Get the reduction access for a given instruction
-  virtual const ReductionAccess &
-  getReductionAccess(const llvm::Instruction *Inst) = 0;
-
-  /// @brief Inform the reduction handler about a new sub-function
-  ///
-  /// @param Builder An LLVM-IR builder to the sub-function entry block
-  /// @param ExitBB  The sub-function exit block
-  ///
-  /// TODO
-  virtual void setSubFunction(llvm::IRBuilder<> &Builder,
-                              llvm::BasicBlock *ExitBB) = 0;
-
-  /// @brief Clear the last sub-function
-  virtual void unsetSubFunction(ValueMapT &ValueMap) = 0;
-
+  virtual void visitScopStmt(llvm::IRBuilder<> &Builder,
+                             ScopStmt &Statement) = 0;
   //@}
 
   /// getAdjustedAnalysisPointer - This method is used when a pass implements

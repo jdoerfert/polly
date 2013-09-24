@@ -147,6 +147,8 @@ Value *ClastExpCodeGen::codegen(const clast_term *e, Type *Ty) {
     return ConstOne;
 
   Value *var = codegen(e->var, Ty);
+  if (cloog_int_is_one(e->val))
+      return var;
   return Builder.CreateMul(ConstOne, var);
 }
 
@@ -244,6 +246,8 @@ private:
   Scop *S;
   Pass *P;
 
+  ReductionHandler *RH;
+
   // The Builder specifies the current location to code generate at.
   IRBuilder<> &Builder;
 
@@ -315,8 +319,8 @@ private:
   /// Create a set of values that has to be stored into the OpenMP subfuncition
   /// structure. Additionally prepare thread local variables for contained
   /// reduction memory accesses.
-  SetVector<Value *> getOMPValues(const clast_stmt *Body,
-                                  OMPGenerator::ValueToValueMapTy &RMap);
+  SetVector<Value *> getOMPValues(const clast_stmt *Body);
+                                  //OMPGenerator::ValueToValueMapTy &RMap);
 
   /// @brief Update ClastVars and ValueMap according to a value map.
   ///
@@ -358,7 +362,8 @@ private:
   ///
   /// @return bool Returns true if the incoming clast_for statement can
   ///              execute in parallel.
-  bool isParallelFor(const clast_for *For, bool allDeps = true);
+  bool isParallelFor(const clast_for *For, bool allDeps = true,
+                     Dependences *D = nullptr);
 
   bool isInnermostLoop(const clast_for *f);
 
@@ -467,43 +472,10 @@ void ClastStmtCodeGen::codegen(const clast_user_stmt *u,
   if (u->substitutions)
     codegenSubstitutions(u->substitutions, Statement);
 
+  dbgs() << "Visit ScopStmt " << Statement->getBaseName() << "\n";
+  RH->visitScopStmt(Builder, *Statement);
+
   if (Statement->isReductionStatement()) {
-
-    // Reduction statements need an empty basic block as entry point
-    // in case we have to generate code later on.
-    BasicBlock *ReductionBB = SplitBlock(Builder.GetInsertBlock(),
-                                         Builder.GetInsertPoint(), P);
-    StringRef StatementName = StringRef(Statement->getBaseName());
-    ReductionBB->setName("polly.red." + StatementName);
-
-    Builder.SetInsertPoint(ReductionBB->begin());
-    Statement->setBasicBlock(ReductionBB);
-
-    if (Statement->isReductionPrepareStatement()) {
-
-      // Preparation statements are just stored as we dont know if we need to
-      // create any reductions vectors or not
-      PrepareStatements.push_back(Statement);
-
-    } else if (Statement->isReductionFixupStatement()) {
-
-      // For a fixup statement we find the matching prepare statement and
-      // generate code to combine the results stored in the reduction vectors
-      assert(!PrepareStatements.empty() &&
-             "Cannot create fixup code without prepare statements");
-
-      // Pop the corresponding (last) prepare statement
-      ScopStmt *PrepareStmt = PrepareStatements.back();
-      PrepareStatements.pop_back();
-
-      // Combine and store the results stored in the reduction vectors
-      ReductionHandler &RH = P->getAnalysis<ReductionHandler>();
-      RH.createReductionResult(Builder, PrepareStmt, ValueMap);
-
-    } else {
-      llvm_unreachable("Unknown ScopStmt type !");
-    }
-
     return;
   }
 
@@ -514,7 +486,7 @@ void ClastStmtCodeGen::codegen(const clast_user_stmt *u,
     return;
   }
 
-  VectorValueMapT VectorMap(VectorDimensions);
+  VectorValueMapT VectorMap(VectorDimensions, ValueMap);
   std::vector<LoopToScevMapT> VLTS(VectorDimensions);
 
   if (IVS) {
@@ -572,16 +544,18 @@ void ClastStmtCodeGen::codegenForSequential(const clast_for *f) {
 // prepare thread local variables to compute the reduction separately.
 class ParameterVisitor : public ClastVisitor {
   std::set<Value *> Values;
-  ReductionHandler &RH;
-  OMPGenerator::ValueToValueMapTy &RMap;
+  //ReductionHandler &RH;
+  //OMPGenerator::ValueToValueMapTy &RMap;
 
 public:
-  ParameterVisitor(ReductionHandler &RH, OMPGenerator::ValueToValueMapTy &RMap)
-    : ClastVisitor(), Values(), RH(RH), RMap(RMap) {}
+  ParameterVisitor() : ClastVisitor(), Values() {}
+  //ParameterVisitor(ReductionHandler &RH, OMPGenerator::ValueToValueMapTy &RMap)
+    //: ClastVisitor(), Values(), RH(RH), RMap(RMap) {}
 
   /// @brief Visit a reduction memory access
   ///
   /// This prepares a thread local pointer for the reduction access
+#if 0
   void visitReductionMemoryAccess(MemoryAccess &Access, Instruction *Inst) {
     assert(Inst == Access.getAccessInstruction());
 
@@ -608,7 +582,8 @@ public:
       // For a limited number of OpenMP threads we can utilize the vector
       // interface of the reduction handler. It can create #Threads locations
       // in a vector and aggregate them later on in log(#Threads) instructions.
-      Value *VectorPtr  = RH.getReductionVecPointer(Inst, NoOpenMPThreads);
+      assert(0);
+      Value *VectorPtr  = 0 ;//RH.getReductionVecPointer(Inst, NoOpenMPThreads);
       // The original pointer will be mapped to the vector pointer here,
       // then to the re-loaded vector pointer (from the OpenMP struct) and
       // then to a GEP instruction which selects the local pointer using the
@@ -635,10 +610,13 @@ public:
     }
 
   }
+#endif
 
   void visitUser(const clast_user_stmt *Stmt) {
     const ScopStmt *S = static_cast<const ScopStmt *>(Stmt->statement->usr);
     const BasicBlock *BB = S->getBasicBlock();
+    if (!BB)
+      return;
 
     // Check all the operands of instructions in the basic block.
     for (BasicBlock::const_iterator BI = BB->begin(), BE = BB->end(); BI != BE;
@@ -646,9 +624,9 @@ public:
       const Instruction &Inst = *BI;
 
       // Check for reduction memory accesses inside the basic block
-      MemoryAccess *Access = S->lookupAccessFor(&Inst);
-      if (Access && Access->isReductionAccess())
-        visitReductionMemoryAccess(*Access, const_cast<Instruction*>(&Inst));
+      //MemoryAccess *Access = S->lookupAccessFor(&Inst);
+      //if (Access && Access->isReductionAccess())
+        //visitReductionMemoryAccess(*Access, const_cast<Instruction*>(&Inst));
 
       for (Instruction::const_op_iterator II = Inst.op_begin(),
                                           IE = Inst.op_end();
@@ -659,8 +637,9 @@ public:
           if (S->getParent()->getRegion().contains(OpInst))
             continue;
 
-        if (isa<Instruction>(SrcVal) || isa<Argument>(SrcVal))
+        if (isa<Instruction>(SrcVal) || isa<Argument>(SrcVal)) {
           Values.insert(SrcVal);
+        }
       }
     }
   }
@@ -672,8 +651,8 @@ public:
 };
 
 SetVector<Value *>
-ClastStmtCodeGen::getOMPValues(const clast_stmt *Body,
-                               OMPGenerator::ValueToValueMapTy &RMap) {
+ClastStmtCodeGen::getOMPValues(const clast_stmt *Body) {
+                               //OMPGenerator::ValueToValueMapTy &RMap) {
   SetVector<Value *> Values;
 
   // The clast variables
@@ -681,20 +660,13 @@ ClastStmtCodeGen::getOMPValues(const clast_stmt *Body,
        I++)
     Values.insert(I->second);
 
-  // Find the temporaries that are referenced in the clast statements'
-  // basic blocks but are not defined by these blocks (e.g., references
-  // to function arguments or temporaries defined before the start of
-  // the SCoP). Also collect information about reduction memory accesses
-  // inside those blocks and prepare thread local variables for them.
-  ReductionHandler &RH = P->getAnalysis<ReductionHandler>();
-  ParameterVisitor Params(RH, RMap);
+  ParameterVisitor Params;
   Params.visit(Body);
 
   for (ParameterVisitor::const_iterator PI = Params.begin(), PE = Params.end();
        PI != PE; ++PI) {
     Value *V = *PI;
     Values.insert(V);
-    DEBUG(dbgs() << "Adding temporary for OMP copy-in: " << *V << "\n");
   }
 
   return Values;
@@ -745,14 +717,16 @@ void ClastStmtCodeGen::codegenForOpenMP(const clast_for *For) {
   LB = ExpGen.codegen(For->LB, IntPtrTy);
   UB = ExpGen.codegen(For->UB, IntPtrTy);
 
-  Values = getOMPValues(For->body, RMap);
+  //Values = getOMPValues(For->body, RMap);
+  Values = getOMPValues(For->body);
+  RH->fillOpenMPValues(Values);
 
   IV = OMPGen.createParallelLoop(LB, UB, Stride, Values, VMap, RMap, &LoopBody);
   BasicBlock::iterator AfterLoop = Builder.GetInsertPoint();
   Builder.SetInsertPoint(LoopBody);
 
   // Save the current values.
-  const ValueMapT ValueMapCopy = ValueMap;
+  ValueMapT ValueMapCopy = ValueMap;
   const CharMapT ClastVarsCopy = ClastVars;
 
   updateWithValueMap(VMap);
@@ -761,9 +735,10 @@ void ClastStmtCodeGen::codegenForOpenMP(const clast_for *For) {
   if (For->body)
     codegen(For->body);
 
-  // Notify the reduction handler that the sub-function was generated completely
-  ReductionHandler &RH = P->getAnalysis<ReductionHandler>();
-  RH.unsetSubFunction(ValueMap);
+  for (auto KV : ValueMap) {
+    if (ValueMap.count(KV.second))
+      ValueMapCopy[KV.first] = ValueMap[KV.second];
+  }
 
   // Restore the original values.
   ValueMap = ValueMapCopy;
@@ -956,8 +931,9 @@ int ClastStmtCodeGen::getNumberOfIterations(const clast_for *For) {
 }
 
 void ClastStmtCodeGen::codegenForVector(const clast_for *F) {
-  DEBUG(dbgs() << "Vectorizing loop '" << F->iterator << "'\n";);
   int VectorWidth = getNumberOfIterations(F);
+  DEBUG(dbgs() << "Vectorizing loop '" << F->iterator << "' " << VectorWidth
+               << "\n";);
 
   Value *LB = ExpGen.codegen(F->LB, getIntPtrTy());
 
@@ -990,76 +966,58 @@ void ClastStmtCodeGen::codegenForVector(const clast_for *F) {
   ClastVars.erase(F->iterator);
 }
 
-bool ClastStmtCodeGen::isParallelFor(const clast_for *f, bool allDeps) {
+bool ClastStmtCodeGen::isParallelFor(const clast_for *f, bool allDeps,
+                                     Dependences *D) {
   isl_set *Domain = isl_set_copy(isl_set_from_cloog_domain(f->domain));
   assert(Domain && "Cannot access domain of loop");
 
-  Dependences &D = P->getAnalysis<Dependences>();
-
-  return D.isParallelDimension(Domain, isl_set_n_dim(Domain), allDeps);
+  return D->isParallelDimension(Domain, isl_set_n_dim(Domain), allDeps);
 }
 
 void ClastStmtCodeGen::codegen(const clast_for *f) {
   bool Vector = PollyVectorizerChoice != VECTORIZER_NONE;
-  bool IsParallel = isParallelFor(f, true);
-  bool IsReductionParallel = isParallelFor(f, false);
-  dbgs() << "CG: Vector: " << Vector << " isParallel: " << IsParallel
-         << " isReductionParallel: " << IsReductionParallel
-         << " isInnerMost: " << isInnermostLoop(f) << "\n";
+  Dependences *D = &P->getAnalysis<Dependences>();
+  bool IsParallel = isParallelFor(f, true, D);
+  bool IsWeakParallel = isParallelFor(f, false, D);
+  (dbgs() << "CG: Vector: " << Vector << " OpenMP: " << OpenMP
+          << " isParallel: " << IsParallel << " isWeakParallel: "
+          << IsWeakParallel << " isInnerMost: " << isInnermostLoop(f) << "\n");
+  if ((Vector || OpenMP) && IsWeakParallel) {
+    int NumberOfIterations = getNumberOfIterations(f);
+    dbgs() << "NumberOfIterations: " << NumberOfIterations << "\n";
+    if (Vector && isInnermostLoop(f) && (-1 != NumberOfIterations) &&
+        (NumberOfIterations <= 16)) {
 
-  if ((Vector || OpenMP) && IsReductionParallel) {
-    if (Vector && isInnermostLoop(f) && (-1 != getNumberOfIterations(f)) &&
-        (getNumberOfIterations(f) <= 16)) {
-
-      ReductionHandler &RH = P->getAnalysis<ReductionHandler>();
-      StringRef StatementName = StringRef(Builder.GetInsertBlock()->getName());
-
-      if (IsReductionParallel && !IsParallel) {
-        BasicBlock *RedPrepBB =
-            SplitBlock(Builder.GetInsertBlock(), Builder.GetInsertPoint(), P);
-        RedPrepBB->setName("polly.red.prep." + StatementName);
-        Builder.SetInsertPoint(RedPrepBB->begin());
-        RH.setReductionPrepareBlock(RedPrepBB);
-      }
-
-      codegenForVector(f);
-
-      if (IsReductionParallel && !IsParallel) {
-        BasicBlock *RedFixBB =
-            SplitBlock(Builder.GetInsertBlock(), Builder.GetInsertPoint(), P);
-        RedFixBB->setName("polly.red.fix." + StatementName);
-        Builder.SetInsertPoint(RedFixBB->begin());
-
-        RH.createReductionResult(Builder, 0, ValueMap);
-        RH.setReductionPrepareBlock(0);
+      if (IsParallel) {
+        codegenForVector(f);
+      } else {
+        isl_set *Domain = isl_set_copy(isl_set_from_cloog_domain(f->domain));
+        assert(Domain && "Cannot access domain of loop");
+        void *HI = D->getHandlerInfo(Domain, isl_set_n_dim(Domain));
+        RH->handleVector(Builder, ValueMap, NumberOfIterations, HI, [&]() {
+          codegenForVector(f);
+        });
+        D->resetHandlerInfo(HI);
       }
       return;
     }
 
     if (OpenMP && !parallelCodeGeneration) {
 
-      ReductionHandler &RH = P->getAnalysis<ReductionHandler>();
-      StringRef StatementName = StringRef(Builder.GetInsertBlock()->getName());
-
-      if (IsReductionParallel && !IsParallel) {
-        dbgs() << "\nBBB\n";
-        RH.setReductionPrepareBlock(Builder.GetInsertBlock());
-      }
-
       parallelCodeGeneration = true;
-      parallelLoops.push_back(f->iterator);
-      codegenForOpenMP(f);
-      parallelCodeGeneration = false;
-
-      if (IsReductionParallel && !IsParallel) {
-        BasicBlock *RedFixBB =
-            SplitBlock(Builder.GetInsertBlock(), Builder.GetInsertPoint(), P);
-        RedFixBB->setName("polly.red.fix." + StatementName);
-        Builder.SetInsertPoint(RedFixBB->begin());
-
-        RH.createReductionResult(Builder, 0, ValueMap);
-        RH.setReductionPrepareBlock(0);
+      if (IsParallel) {
+        codegenForOpenMP(f);
+      } else {
+        isl_set *Domain = isl_set_copy(isl_set_from_cloog_domain(f->domain));
+        assert(Domain && "Cannot access domain of loop");
+        void *HI = D->getHandlerInfo(Domain, isl_set_n_dim(Domain));
+        RH->handleOpenMP(Builder, ValueMap, HI, [&]() {
+          codegenForOpenMP(f);
+        }, NoOpenMPThreads);
+        D->resetHandlerInfo(HI);
       }
+      parallelLoops.push_back(f->iterator);
+      parallelCodeGeneration = false;
 
       return;
     }
@@ -1181,12 +1139,14 @@ void ClastStmtCodeGen::codegen(const clast_root *r) {
   parallelCodeGeneration = false;
 
   const clast_stmt *stmt = (const clast_stmt *)r;
-  if (stmt->next)
+  if (stmt->next) {
     codegen(stmt->next);
+  }
 }
 
 ClastStmtCodeGen::ClastStmtCodeGen(Scop *scop, IRBuilder<> &B, Pass *P)
-    : S(scop), P(P), Builder(B), ExpGen(Builder, ClastVars) {}
+    : S(scop), P(P), RH(&P->getAnalysis<ReductionHandler>()), Builder(B),
+      ExpGen(Builder, ClastVars) {}
 
 namespace {
 class CodeGeneration : public ScopPass {

@@ -188,6 +188,8 @@ static bool astScheduleDimIsParallel(__isl_keep isl_ast_build *Build,
   AllDeps = isl_union_map_apply_range(AllDeps, isl_union_map_copy(Schedule));
   AllDeps = isl_union_map_apply_domain(AllDeps, Schedule);
 
+  dbgs() << "All deps: \n";
+  isl_union_map_dump(AllDeps);
   if (isl_union_map_is_empty(AllDeps)) {
     isl_union_map_free(AllDeps);
     IsReduction = false;
@@ -199,6 +201,8 @@ static bool astScheduleDimIsParallel(__isl_keep isl_ast_build *Build,
 
   Schedule = isl_ast_build_get_schedule(Build);
   Deps = D->getMinimalDependences(Dependences::TYPE_ALL);
+  dbgs() << "Minimal deps: \n";
+  isl_union_map_dump(Deps);
   Deps = isl_union_map_apply_range(Deps, isl_union_map_copy(Schedule));
   Deps = isl_union_map_apply_domain(Deps, Schedule);
   if (isl_union_map_is_empty(Deps)) {
