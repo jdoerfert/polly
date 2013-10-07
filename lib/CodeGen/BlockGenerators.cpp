@@ -219,6 +219,8 @@ Value *BlockGenerator::getNewValue(const Value *Old, ValueMapT &BBMap,
       }
     }
 
+  Builder.GetInsertBlock()->getParent()->dump();
+  errs() << "Old: "<< *Old << "\n";
   // Now the scalar dependence is neither available nor SCEVCodegenable, this
   // should never happen in the current code generator.
   llvm_unreachable("Unexpected scalar dependence in region!");
@@ -335,6 +337,8 @@ Value *BlockGenerator::generateScalarLoad(const LoadInst *Load,
   const Instruction *Inst = dyn_cast<Instruction>(Load);
   Value *NewPointer =
       generateLocationAccessed(Inst, Pointer, BBMap, GlobalMap, LTS);
+  ReductionHandler &RH = P->getAnalysis<ReductionHandler>();
+  NewPointer = RH.getReductionPointer(Builder, Pointer, NewPointer);
   Value *ScalarLoad =
       Builder.CreateLoad(NewPointer, Load->getName() + "_p_scalar_");
   return ScalarLoad;
@@ -347,6 +351,8 @@ Value *BlockGenerator::generateScalarStore(const StoreInst *Store,
   const Value *Pointer = Store->getPointerOperand();
   Value *NewPointer =
       generateLocationAccessed(Store, Pointer, BBMap, GlobalMap, LTS);
+  ReductionHandler &RH = P->getAnalysis<ReductionHandler>();
+  NewPointer = RH.getReductionPointer(Builder, Pointer, NewPointer);
   Value *ValueOperand = getNewValue(Store->getValueOperand(), BBMap, GlobalMap,
                                     LTS, getLoopForInst(Store));
 
@@ -445,6 +451,7 @@ Type *VectorBlockGenerator::getVectorPtrTy(const Value *Val, int Width) {
 Value *VectorBlockGenerator::generateStrideOneReductionLoad(const LoadInst *Load,
                                                             Value *VectorPtr,
                                                             ValueMapT &BBMap) {
+  ReductionHandler &RH = P->getAnalysis<ReductionHandler>();
   const Value *Pointer = Load->getPointerOperand();
   LoadInst *VecLoad =
       Builder.CreateLoad(VectorPtr, Load->getName() + "_r_vec_full");
@@ -452,7 +459,8 @@ Value *VectorBlockGenerator::generateStrideOneReductionLoad(const LoadInst *Load
   //// To generate fixup code we need to copy the original pointer too
   Value *NewPointer    = generateLocationAccessed(Load, Pointer, BBMap,
                                                   GlobalMaps[0], VLTS[0]);
-  GlobalMaps[0][Pointer] = NewPointer;
+  RH.getReductionVecPointer(Load->getPointerOperand(), NewPointer);
+  //GlobalMaps[0][Pointer] = NewPointer;
   //VecLoad->setAlignment(VectorTy->getBitWidth() / 8);
 
   return VecLoad;
@@ -531,11 +539,10 @@ void VectorBlockGenerator::generateLoad(const LoadInst *Load,
 
   Value *NewLoad;
   const MemoryAccess &Access = Statement.getAccessFor(Load);
-
   ReductionHandler &RH = P->getAnalysis<ReductionHandler>();
-  if (Value *VectorPtr = RH.getReductionVecPointer(Load->getPointerOperand()))
+  if (Value *VectorPtr = RH.getReductionVecPointer(Load->getPointerOperand(), 0)) {
     NewLoad = generateStrideOneReductionLoad(Load, VectorPtr, ScalarMaps[0]);
-  else if (Access.isStrideZero(isl_map_copy(Schedule)))
+  }else if (Access.isStrideZero(isl_map_copy(Schedule)))
     NewLoad = generateStrideZeroLoad(Load, ScalarMaps[0]);
   else if (Access.isStrideOne(isl_map_copy(Schedule)))
     NewLoad = generateStrideOneLoad(Load, ScalarMaps[0]);
@@ -569,6 +576,9 @@ void VectorBlockGenerator::copyBinaryInst(const BinaryOperator *Inst,
   Value *NewOpZero, *NewOpOne;
   NewOpZero = getVectorValue(OpZero, VectorMap, ScalarMaps, L);
   NewOpOne = getVectorValue(OpOne, VectorMap, ScalarMaps, L);
+  dbgs() << *Inst << "\n";
+  dbgs() << *NewOpZero << "\n";
+  dbgs() << *NewOpOne << "\n";
   Value *NewInst = Builder.CreateBinOp(Inst->getOpcode(), NewOpZero, NewOpOne,
                                        Inst->getName() + "p_vec");
   VectorMap[Inst] = NewInst;
@@ -585,7 +595,7 @@ void VectorBlockGenerator::copyStore(const StoreInst *Store,
                                  ScalarMaps, getLoopForInst(Store));
 
   ReductionHandler &RH = P->getAnalysis<ReductionHandler>();
-  if (Value *VectorPtr = RH.getReductionVecPointer(Pointer)) {
+  if (Value *VectorPtr = RH.getReductionVecPointer(Pointer, 0)) {
     StoreInst *Store = Builder.CreateStore(Vector, VectorPtr);
     (void) Store;
     //Store->setAlignment(VectorTy->getBitWidth() / 8);

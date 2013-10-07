@@ -711,9 +711,9 @@ bool ScopDetection::runOnFunction(llvm::Function &F) {
 }
 
 void polly::ScopDetection::verifyRegion(const Region &R) const {
-  assert(isMaxRegionInScop(R) && "Expect R is a valid region.");
-  DetectionContext Context(const_cast<Region &>(R), *AA, true /*verifying*/);
-  isValidRegion(Context);
+  //assert(isMaxRegionInScop(R) && "Expect R is a valid region.");
+  //DetectionContext Context(const_cast<Region &>(R), *AA, true [>verifying<]);
+  //isValidRegion(Context);
 }
 
 void polly::ScopDetection::verifyAnalysis() const {

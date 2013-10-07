@@ -282,8 +282,17 @@ namespace {
       assert(Consumer && "Consumer was not initialized");
 
       // TODO: allow bitwise operations
-      if (!BinOp->isBinaryOp(Instruction::Add) &&
-          !BinOp->isBinaryOp(Instruction::Mul)) {
+      if (!(BinOp->isBinaryOp(Instruction::Add) ||
+            BinOp->isBinaryOp(Instruction::Mul) ||
+            BinOp->isBinaryOp(Instruction::FAdd) ||
+            BinOp->isBinaryOp(Instruction::FMul) ||
+           ((BinOp->isBinaryOp(Instruction::Sub) ||
+             BinOp->isBinaryOp(Instruction::UDiv) ||
+             BinOp->isBinaryOp(Instruction::SDiv) ||
+             BinOp->isBinaryOp(Instruction::UDiv) ||
+             BinOp->isBinaryOp(Instruction::FSub) ||
+             BinOp->isBinaryOp(Instruction::FDiv)) &&
+             BinOp->getOperand(0) == Producer))) {
         BRI_DEBUG("Binary operation is neither addition nor multiplication");
         BRI_INVALID(BINOP);
       }
@@ -410,8 +419,7 @@ namespace {
         BRI_INVALID(LOOP);
       }
 
-      const SCEV *BaseSCEV = SE->getSCEV(const_cast<Value*>(Producer->getPointerOperand()));
-      bool BaseValueIsLoopInv = SE->isLoopInvariant(BaseSCEV, CurrentLoop);
+      bool BaseValueIsLoopInv = isLoopInv(Producer->getPointerOperand(), CurrentLoop);
 
       // If there is an invalid use of the pointer operand within the
       // current loop we need to consider a smaller loop
@@ -443,7 +451,7 @@ namespace {
       // smallest loop contains the invalid use.
       const Loop *NewLoop = LI->getLoopFor(Producer->getParent());
       if (!NewLoop || (InvalidUse && NewLoop->contains(InvalidUse)) ||
-          !SE->isLoopInvariant(BaseSCEV, NewLoop)) {
+          !isLoopInv(Producer->getPointerOperand(), NewLoop)) {
         BRI_DEBUG("No reduction loop possible");
         BRI_INVALID(LOOP);
       }
@@ -456,7 +464,7 @@ namespace {
         // the invalid use is contained
         if (CurrentLoop == TmpLoop ||
             (InvalidUse && TmpLoop->contains(InvalidUse)) ||
-            !SE->isLoopInvariant(BaseSCEV, TmpLoop))
+            !isLoopInv(Producer->getPointerOperand(), TmpLoop))
           break;
 
         NewLoop = TmpLoop;
@@ -465,6 +473,27 @@ namespace {
       // NewLoop does not contain the invalid pointer use, but there might
       // be others, thus we recur with NewLoop
       return getReductionLoop(Producer, Consumer, BinOp, NewLoop);
+    }
+
+    bool isLoopInv(const Value *Ptr, const Loop *L) const {
+      Value *V = const_cast<Value*>(Ptr);
+      const SCEV *BaseSCEV = SE->getSCEV(V);
+      if (SE->isLoopInvariant(BaseSCEV, L) || L->isLoopInvariant(V))
+        return true;
+      return false;
+      //isGEPException(Ptr, L);
+    }
+
+    bool isGEPException(const Value *Ptr, const Loop *L) const {
+      if (L->getSubLoops().size())
+        return false;
+      const GetElementPtrInst *GEP = dyn_cast<GetElementPtrInst>(Ptr);
+      if (!GEP)
+        return false;
+      assert(GEP && L);
+      auto LastOp = GEP->getOperand(GEP->getNumOperands()-1);
+      assert(LastOp);
+      return L->isLoopInvariant(LastOp);
     }
 
   };

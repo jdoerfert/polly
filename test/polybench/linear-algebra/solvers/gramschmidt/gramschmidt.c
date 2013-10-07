@@ -86,7 +86,7 @@ void scop_func(long m, long n) {
 
   for (k = 0; k < n; k++)
   {
-    nrm = 1;
+    nrm = 0;
     for (i = 0; i < m; i++)
       nrm += A[i][k] * A[i][k];
     R[k][k] = sqrt(nrm);

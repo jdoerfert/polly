@@ -89,9 +89,74 @@ bool CodePreparation::eliminatePHINodes(Function &F) {
   std::vector<PHINode *> PNtoDelete;
   // The PHINodes that will be preserved.
   std::vector<PHINode *> PreservedPNs;
-
+#if 0
+  std::vector<LoadInst *> ToRemove;
   // Scan the PHINodes in this function.
-  for (Function::iterator BI = F.begin(), BE = F.end(); BI != BE; ++BI)
+  for (Function::iterator BI = F.begin(), BE = F.end(); BI != BE; ++BI) {
+    BasicBlock *BB = BI;
+    if (LI->isLoopHeader(BB)) {
+      Loop *L = LI->getLoopFor(BB);
+      auto Term = BB->getTerminator();
+      if (Term->getNumSuccessors() != 2)
+        continue;
+      auto Exit = L->getUniqueExitBlock();
+      if (!Exit)
+        continue;
+      auto HNext = Term->getSuccessor(0);
+      if (HNext == Exit)
+        HNext = Term->getSuccessor(1);
+
+      for (auto II = BI->begin(), IE = BI->end(); II != IE; ++II) {
+        assert(II);
+        LoadInst *Load = dyn_cast<LoadInst>(II);
+        if (!Load)
+          continue;
+        bool allDeleted = true;
+        for (auto UI = Load->use_begin(), UE = Load->use_end(); UI != UE;
+             ++UI) {
+          auto UInst = dyn_cast<Instruction>(*UI);
+          auto UBB = UInst->getParent();
+          if (UBB == BB) {
+            allDeleted = false;
+            continue;
+          }
+
+          auto IP = (HNext->getFirstInsertionPt());
+          if (!L->contains(UBB)) {
+            IP = (Exit->getFirstInsertionPt());
+          }
+
+          assert(UInst && UBB);
+          auto Clone = Load->clone();
+          if (auto PHI = dyn_cast<PHINode>(UInst)) {
+            if (PHI->getNumIncomingValues() == 1) {
+              Clone->insertBefore(IP);
+              PHI->replaceAllUsesWith(Clone);
+            } else {
+              allDeleted = false;
+              delete Clone;
+            }
+          } else {
+            Clone->insertBefore(IP);
+            UInst->replaceUsesOfWith(Load, Clone);
+          }
+        }
+        if (allDeleted) {
+          ToRemove.push_back(Load);
+        }
+      }
+    }
+  }
+
+  for (LoadInst *Load : ToRemove) {
+    while (Load->getNumUses()) {
+      cast<Instruction>(Load->use_back())->eraseFromParent();
+    }
+    Load->eraseFromParent();
+  }
+#endif
+
+  for (Function::iterator BI = F.begin(), BE = F.end(); BI != BE; ++BI) {
     for (BasicBlock::iterator II = BI->begin(), IE = BI->getFirstNonPHI();
          II != IE; ++II) {
       PHINode *PN = cast<PHINode>(II);
@@ -120,6 +185,8 @@ bool CodePreparation::eliminatePHINodes(Function &F) {
       else
         PNtoDelete.push_back(PN);
     }
+
+  }
 
   if (PNtoDelete.empty())
     return false;

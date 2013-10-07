@@ -16,7 +16,7 @@
 # define DATA_TYPE double
 #endif
 #ifndef DATA_PRINTF_MODIFIER
-# define DATA_PRINTF_MODIFIER "%0.2lf "
+# define DATA_PRINTF_MODIFIER "%0.8lf "
 #endif
 
 /* Array declaration. Enable malloc if POLYBENCH_TEST_MALLOC. */
@@ -48,12 +48,44 @@ void init_array()
       x[i] = ((DATA_TYPE) i + 1) / N;
       b[i] = ((DATA_TYPE) i + 2) / N;
       for (j = 0; j <= N; j++)
-	a[i][j] = ((DATA_TYPE) i*j + 1) / N;
+	a[i][j] = ((DATA_TYPE) i*j + 1) / (N-i/2+1);
     }
 }
 
 /* Define the live-out variables. Code is not executed unless
    POLYBENCH_DUMP_ARRAYS is defined. */
+void print_array2(int argc, char** argv)
+{
+  int i, j;
+#ifndef POLYBENCH_DUMP_ARRAYS
+  if (argc > 42 && ! strcmp(argv[0], ""))
+#endif
+    {
+      for (i = 0; i <= N; i++) {
+	fprintf(stderr, DATA_PRINTF_MODIFIER, x[i]);
+	if (i % 80 == 20) fprintf(stderr, "\n");
+      }
+      fprintf(stderr, "\n");
+      for (i = 0; i <= N; i++) {
+	fprintf(stderr, DATA_PRINTF_MODIFIER, y[i]);
+	if (i % 80 == 20) fprintf(stderr, "\n");
+      }
+      fprintf(stderr, "\n");
+      for (i = 0; i <= N; i++) {
+	fprintf(stderr, DATA_PRINTF_MODIFIER, b[i]);
+	if (i % 80 == 20) fprintf(stderr, "\n");
+      }
+      fprintf(stderr, "\n");
+      for (i = 0; i <= N; i++) {
+        for (j = 0; j <= N; j++) {
+        fprintf(stderr, DATA_PRINTF_MODIFIER, a[i][j]);
+	if (i % 80 == 20) fprintf(stderr, "\n");
+        }
+      fprintf(stderr, "\n");
+      }
+    }
+}
+
 
 void print_array(int argc, char** argv)
 {
@@ -64,7 +96,6 @@ void print_array(int argc, char** argv)
     {
       for (i = 0; i <= N; i++) {
 	fprintf(stderr, DATA_PRINTF_MODIFIER, x[i]);
-	if (i % 80 == 20) fprintf(stderr, "\n");
       }
       fprintf(stderr, "\n");
     }
@@ -125,6 +156,7 @@ int main(int argc, char** argv)
 
   /* Initialize array. */
   init_array();
+  print_array2(argc, argv);
 
   /* Start timer. */
   polybench_start_instruments;

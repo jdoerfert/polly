@@ -36,6 +36,7 @@ protected:
   using PtrToVecPtrMapT = DenseMap<const llvm::Value *, llvm::Value *>;
   PtrToVecPtrMapT PtrToVecPtrMap;
   PtrToVecPtrMapT PtrToArrPtrMap;
+  PtrToVecPtrMapT PtrToNewPtrMap;
 
   llvm::Value *copyBasePtr(llvm::IRBuilder<> &Builder,
                            ValueMapT &ValueMap, llvm::Value *Ptr);
@@ -46,7 +47,6 @@ protected:
 
   llvm::Instruction *createArrayPointer(llvm::IRBuilder<> &Builder,
                                         llvm::Type *ScalarType,
-                                        llvm::Value *BasePtr,
                                         unsigned VectorWidth);
 public:
   static char ID;
@@ -71,7 +71,10 @@ public:
   //@}
 
   //@{
-  virtual llvm::Value *getReductionVecPointer(const llvm::Value *BaseValue);
+  virtual llvm::Value *getReductionPointer(llvm::IRBuilder<> &Builder,
+                                          const llvm::Value *BaseVal,
+                                          llvm::Value *NewVal);
+  virtual llvm::Value *getReductionVecPointer(const llvm::Value *BaseValue, llvm::Value *);
   virtual void handleVector(llvm::IRBuilder<> &Builder, ValueMapT &ValueMap,
                             int VectorWidth, void *HI, CallbackFn fn);
 

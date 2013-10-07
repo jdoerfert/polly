@@ -53,6 +53,11 @@ DepsMinimal("polly-opt-min-deps", cl::desc("Use minimal dependences"),
               cl::cat(PollyCategory));
 
 static cl::opt<bool>
+TileOneDim("polly-opt-tile-one-dim", cl::desc("Tile one dim bands"),
+              cl::init(false),
+              cl::cat(PollyCategory));
+
+static cl::opt<bool>
 OuterZero("polly-opt-outer-zero", cl::desc("Use outer zero option"),
               cl::init(false),
               cl::cat(PollyCategory));
@@ -308,7 +313,7 @@ isl_union_map *IslScheduleOptimizer::getScheduleForBand(isl_band *Band,
     return PartialSchedule;
 
   // It does not make any sense to tile a band with just one dimension.
-  if (*Dimensions == 1)
+  if (*Dimensions == 1 && !TileOneDim)
     return PartialSchedule;
 
   ctx = isl_union_map_get_ctx(PartialSchedule);
@@ -319,6 +324,13 @@ isl_union_map *IslScheduleOptimizer::getScheduleForBand(isl_band *Band,
   TileUMap = isl_union_map_align_params(TileUMap, Space);
   *Dimensions = 2 * *Dimensions;
 
+  dbgs() << "TILING MAP:\n";
+  isl_union_map_dump(PartialSchedule);
+  isl_union_map_dump(TileUMap);
+  auto a = isl_union_map_apply_range(isl_union_map_copy(PartialSchedule),
+                                     isl_union_map_copy(TileUMap));
+  isl_union_map_dump(a);
+  isl_union_map_free(a);
   return isl_union_map_apply_range(PartialSchedule, TileUMap);
 }
 
@@ -413,7 +425,11 @@ IslScheduleOptimizer::getScheduleForBandList(isl_band_list *BandList) {
           isl_union_map_flat_range_product(PartialSchedule, SuffixSchedule);
       isl_band_list_free(Children);
     } else if (PollyVectorizerChoice != VECTORIZER_NONE) {
+      dbgs() << "Band:\n";
+      isl_band_dump(Band);
       for (int j = 0; j < isl_band_n_member(Band); j++) {
+        dbgs() << " -- member: " << j << " --> "
+               << (isl_band_member_is_zero_distance(Band, j)) << "\n";
         if (isl_band_member_is_zero_distance(Band, j)) {
           isl_map *TileMap;
           isl_union_map *TileUMap;
@@ -553,13 +569,14 @@ bool IslScheduleOptimizer::runOnScop(Scop &S) {
   isl_schedule *Schedule;
   if (D->hasConditionalValidityConditions()) {
     unsigned CondNumber = 0;
-    int *condV = 0;
     isl_union_map **ConditionalValidity =
         D->getConditionalValidityConditions(CondNumber);
     if (CondNumber) {
+      int *condV = (int*)calloc(CondNumber, sizeof(int));
       Schedule = isl_union_set_compute_schedule_conditionally(
           Domain, Validity, Proximity, ConditionalValidity, CondNumber, &condV);
       D->setCondV(condV);
+      free(condV);
     } else {
       free(ConditionalValidity);
       Schedule = isl_union_set_compute_schedule(Domain, Validity, Proximity);

@@ -631,7 +631,8 @@ ScopStmt::ScopStmt(Scop &Parent, ScopStmt *Template,
   : Parent(Parent), BB(NULL), IVS(Dim), NestLoops(Dim), ReductionLoop(RLoop) {
 
   Type     = (Prepare ? REDUCTION_PREPARE : REDUCTION_FIXUP);
-  BaseName =  (RLoop->getHeader()->getName().str() + "." +(Prepare ? "RedPrep" : "RedFix"));
+  //BaseName =  (RLoop->getHeader()->getName().str() + "." +(Prepare ? "RedPrep" : "RedFix"));
+  BaseName = (std::string(Template->getBaseName()) + "." +(Prepare ? "RedPrep" : "RedFix"));
 
   assert(ReductionLoop && "Each reduction statement needs a reduction loop");
   assert(Dim <= Template->getNumIterators() && "Not enough dimensions to copy");

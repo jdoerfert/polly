@@ -1,4 +1,5 @@
 import os, re, sys, copy, random, time
+import numpy as np
 import subprocess as sp
 
 
@@ -34,6 +35,8 @@ REPEAT              = 1
 SHOW_FIRST          = False
 
 ############################## OPTION DEFAULTS END ############################
+
+startTime = time.time()
 
 post_option_locals = locals().keys();
 for local in post_option_locals:
@@ -254,17 +257,43 @@ def collectFiles():
       files.append(item)
   return files
 
+def contLoop(ffile):
+  arr = []
+  timePath = 'TIME/' + os.path.basename(ffile)[:-3] + '.time'
+  checkPath(timePath)
+  fd = open(timePath, 'r')
+  times = fd.read().split('\n')
+  fd.close()
+  arr = []
+  for time in times:
+    time = time.strip()
+    if not time:
+      continue
+    arr.append(float(time[:-1]))
+  #print arr
+  #std = np.std(arr)
+  #print std
+  #std = std / np.median(arr)
+  #print std
+  return False
+  return std >= 0.05 and len(arr) < 50
+
+
 ############################## HELPER FUNCTIONS END ###########################
 
 readOptions(stepNo = -1)
 
 stepNo = 0
 startStepNo = 0 if not oContains('START_STEP') else int(oGet('START_STEP'))
+endStepNo = -1 if not oContains('END_STEP') else int(oGet('END_STEP'))
+endStepNo = -1 if not endStepNo else endStepNo
+skipSteps = [] if not oContains('SKIP_STEPS') else list(oGet('SKIP_STEPS'))
 
 while readOptions(stepNo = stepNo):
   first = oGet('SHOW_FIRST')
   stepNo += 1
-  if stepNo - 1 < startStepNo:
+  if stepNo - 1 < startStepNo or stepNo - 1 in skipSteps or \
+     (endStepNo != -1 and stepNo -1 >= endStepNo):
     if oGet('VERBOSE'):
       mid = ('Skip STEP %i' % (stepNo - 1))
       print '\n%s %s %s' % ('-' * ((98 - len(mid)) / 2), mid, '-' * ((99 - len(mid)) / 2))
@@ -299,23 +328,26 @@ while readOptions(stepNo = stepNo):
   mid = ('STEP %i' % (stepNo - 1)) if not oContains('STEP_NAME') else oGet('STEP_NAME')
   print ' ' * 6 +'0%' + ' ' * ((84 - len(mid)) / 2) + mid + ' ' * ((85 - len(mid)) / 2)+ '100%'
 
-  for r in range(int(oGet('REPEAT'))):
-    print '[%3i] ' % r,
-    if r % 1000 == 5:
-      time.sleep(120)
-    if oGet('ALL_FILES_AT_ONCE'):
-      command_str = getCommandStr(command, None, stepNo - 1)
-      files_str = ' '.join(files)
-      sp.call(command_str + ' ' + files_str, shell = 'True')
-      print '#' * 90
-    else:
-      pre_file_command = oGet('PRE_FILE_COMMAND')
-      random.shuffle(files)
-      for ffile in files:
-        if (pre_file_command):
-          pre_file_command_str = getCommandStr(pre_file_command, ffile, stepNo - 1)
-          sp.call(pre_file_command_str, shell=True)
+  #for r in range(int(oGet('REPEAT'))):
+    #print '[%3i] ' % r,
+    #if r % 1000 == 5:
+      #time.sleep(120)
+  if oGet('ALL_FILES_AT_ONCE'):
+    command_str = getCommandStr(command, None, stepNo - 1)
+    files_str = ' '.join(files)
+    sp.call(command_str + ' ' + files_str, shell = 'True')
+    print '#' * 90
+  else:
+    pre_file_command = oGet('PRE_FILE_COMMAND')
+    random.shuffle(files)
+    for ffile in files:
+      if (pre_file_command):
+        pre_file_command_str = getCommandStr(pre_file_command, ffile, stepNo - 1)
+        sp.call(pre_file_command_str, shell=True)
 
+      NN = 0
+      while NN < oGet('REPEAT') or (NN > 1 and contLoop(ffile)):
+        NN += 1
         command_str = getCommandStr(command, ffile, stepNo - 1)
         if not command_str:
           print >> sys.stderr, '>> S%i:  Command could not be instanciated,... skip step' % (stepNo - 1)
@@ -327,14 +359,14 @@ while readOptions(stepNo = stepNo):
           first = False;
         sp.call(command_str, shell=True)
 
-        done += 1
-        to_print = (done * 90) / no_files
-        if (to_print > printed):
-          sys.stdout.write("#" * (to_print - printed))
-          sys.stdout.flush()
-          printed = to_print
-      if no_files == 0:
-        print ' ' * 6 + '#' * 90
+      done += 1
+      to_print = (done * 90) / no_files
+      if (to_print > printed):
+        sys.stdout.write("#" * (to_print - printed))
+        sys.stdout.flush()
+        printed = to_print
+    if no_files == 0:
+      print ' ' * 6 + '#' * 90
     print
 
   if oGet('VERBOSE'):
@@ -343,3 +375,11 @@ while readOptions(stepNo = stepNo):
 
 if stepNo == 0:
   writeOptions()
+
+stopTime = time.time()
+seconds = int(stopTime - startTime)
+minutes = (seconds / 60)
+hours   = (minutes / 60)
+seconds = seconds % 60
+minutes = minutes % 60
+print "\nDone after %i:%i:%i" % (hours, minutes, seconds)

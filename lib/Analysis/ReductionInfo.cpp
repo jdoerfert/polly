@@ -85,12 +85,17 @@ ReductionAccess::ReductionAccess(const Value *BaseValue,
   : BaseValue(BaseValue), ReductionLoop(ReductionLoop) {
 
   switch(BinOpcode) {
+  case Instruction::Sub:
   case Instruction::Add:
     Type = ADD; break;
+  case Instruction::FSub:
   case Instruction::FAdd:
     Type = FADD; break;
+  case Instruction::UDiv:
+  case Instruction::SDiv:
   case Instruction::Mul:
     Type = MUL; break;
+  case Instruction::FDiv:
   case Instruction::FMul:
     Type = FMUL; break;
   default:
@@ -194,6 +199,9 @@ AtomicRMWInst::BinOp ReductionAccess::getAtomicRMWInstBinOp() const {
     return AtomicRMWInst::Min;
   case MAX:
     return AtomicRMWInst::Max;
+  case FMUL:
+  case FADD:
+    llvm_unreachable("AtomicRMWInstructions are only available for integer types");
   }
 
   llvm_unreachable("Cannot find AtomicRMWInst binary operation");

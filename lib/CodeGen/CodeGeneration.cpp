@@ -1178,7 +1178,10 @@ public:
     ParallelLoops.insert(ParallelLoops.begin(),
                          CodeGen.getParallelLoops().begin(),
                          CodeGen.getParallelLoops().end());
+    //dbgs() << "------ CUT ABOVE ------\n";
     StartBlock->getParent()->getParent()->dump();
+    //dbgs() << "------ CUT BELOW ------\n";
+
     return true;
   }
 

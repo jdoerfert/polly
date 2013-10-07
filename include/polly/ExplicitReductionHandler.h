@@ -173,10 +173,10 @@ public:
   virtual void handleOpenMP(llvm::IRBuilder<> &Builder, ValueMapT &ValueMap,
                             void *HI, CallbackFn fn, int OpenMPThreads);
   virtual void fillOpenMPValues(llvm::SetVector<llvm::Value *> &Values);
-  virtual void visitOpenMPSubFunction(llvm::IRBuilder<> &Builder,
-                                      ValueToValueMapTy &ValueMap,
-                                      llvm::BasicBlock *ExitBB);
 
+  void visitOpenMPSubFunction(llvm::IRBuilder<> &Builder,
+                              ValueToValueMapTy &Map,
+                              llvm::BasicBlock *ExitBB) override;
   virtual void visitScopStmt(llvm::IRBuilder<> &Builder, ScopStmt &Statement);
   //@}
 

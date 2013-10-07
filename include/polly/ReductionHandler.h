@@ -71,7 +71,10 @@ public:
 
   //@{
   /// @brief Get the reduction vector pointer
-  virtual llvm::Value *getReductionVecPointer(const llvm::Value *BaseValue) = 0;
+  virtual llvm::Value *getReductionPointer(llvm::IRBuilder<> &Builder,
+                                          const llvm::Value *BaseVal,
+                                          llvm::Value *NewVal) = 0;
+  virtual llvm::Value *getReductionVecPointer(const llvm::Value *BaseValue, llvm::Value *) = 0;
   using CallbackFn = std::function<void ()>;
   virtual void handleVector(llvm::IRBuilder<> &Builder, ValueMapT &ValueMap,
                             int VectorWidth, void *HI, CallbackFn fn) = 0;

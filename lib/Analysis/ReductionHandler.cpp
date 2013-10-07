@@ -127,6 +127,8 @@ void ReductionHandler::aggregateReductionVector(
     Value *Pointer, Value *VecPointer, IRBuilder<> &Builder,
     const ReductionAccess &RA, unsigned VectorDim) {
 
+  dbgs() << "Pointer " << *Pointer << "\n";
+  dbgs() << "VecPtr " << *VecPointer << "\n";
   Type *Int32T = Builder.getInt32Ty();
   VectorType *VType;
   Value *V1, *V2, *Mask;
@@ -134,12 +136,19 @@ void ReductionHandler::aggregateReductionVector(
   PointerType *PointerTy = dyn_cast<PointerType>(Pointer->getType());
   assert(PointerTy && "PointerType expected");
   Type *ScalarType = PointerTy->getElementType();
+  assert(ScalarType && "ScalarType expected");
+  dbgs() << "PointerType: " << *PointerTy <<"\n";
+  dbgs() << "ScalarType: " << *ScalarType <<"\n";
 
-  LoadInst *InitalLoad = Builder.CreateLoad(VecPointer);
-  Builder.CreateLifetimeEnd(VecPointer);
-  //InitalLoad->setAlignment(VecTy->getBitWidth());
+  Value *Init;
+  if (isa<PointerType>(VecPointer->getType())) {
+    Init = Builder.CreateLoad(VecPointer);
+    //Builder.CreateLifetimeEnd(VecPointer);
+  } else {
+    Init = VecPointer;
+  }
 
-  V1 = InitalLoad;
+  V1 = Init;
   while (VectorDim > 2) {
     VType = VectorType::get(ScalarType, VectorDim);
     V2    = UndefValue::get(VType);
