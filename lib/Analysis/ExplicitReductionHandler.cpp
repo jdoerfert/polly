@@ -141,6 +141,7 @@ void ExplicitReductionHandler::handleOpenMP(llvm::IRBuilder<> &Builder,
     auto RAStmts = RAP.second.second;
     assert(RAStmts.first);
     assert(RAStmts.first->getBasicBlock());
+    dbgs() << "LocNo: " << LocNo << "\n";
     assert(LocNo == 1 || LocNo == 32 || LocNo == VecWidth);
     //if ( && LocNo == 32)
       //LocNo = VecWidth;
@@ -293,6 +294,29 @@ void ExplicitReductionHandler::visitScopStmt(IRBuilder<> &Builder,
 
   if (I != FixupCallbacks.end()) {
     I->second(Builder, Statement);
+  } else if (Statement.isReductionStatement()) {
+    auto BB = Builder.GetInsertBlock();
+    auto F  = BB->getParent();
+    auto N = F->getName();
+    dbgs() << "Name: " << N << "\n";
+    if (!F->use_empty() && (N.endswith("subfn") || N.slice(0, N.size() - 1).endswith("subfn"))) {
+      dbgs() << "Is a subfunction: " << N << "\n";
+      auto call = F->use_back();
+      assert(isa<Instruction>(call));
+      auto callI = cast<Instruction>(call);
+      auto callBB = callI->getParent();
+      for (auto BBI = callBB->rbegin(), BBE = callBB->rend(); BBI != BBE; BBI++) {
+        if (CallInst * ci = dyn_cast<CallInst>(&(*BBI))) {
+          if (Function *f = dyn_cast<Function>(ci->getCalledValue())) {
+            if (f->getName() == "GOMP_parallel_end") {
+              ci->eraseFromParent();
+              break;
+            }
+          }
+        }
+      }
+      callI->eraseFromParent();
+    }
   }
 }
 

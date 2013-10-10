@@ -1,8 +1,8 @@
-START_STEP           = 19
-END_STEP             = 20
+START_STEP           = 17
+END_STEP             = 19
 SKIP_STEPS           = []
 SHOW_FIRST           = False
-EXECUTE_TIMES        = 18
+EXECUTE_TIMES        = 1
 
 BIN_DIR              = '/home/johannes/Projects/RIL-Hack/llvm/llvm/Debug+Asserts/bin/'
 O                    = ' -enable-unsafe-fp-math -enable-sign-dependent-rounding-fp-math -enable-no-nans-fp-math -enable-no-infs-fp-math '
@@ -16,8 +16,8 @@ POLLY_VEC            = ' -polly-vectorizer=polly '
 POLLY_NO_RED         = ' -polly-reduction-detection=none '
 RED_IMP              = ' -polly-reduction-handler=implicit '
 RED_EXP              = ' -polly-reduction-handler=explicit '
-POLLY_OMP            = ' -enable-polly-openmp -polly-openmp-threads=4 '
-POLLY_OMP_RED        = ' <POLLY_OMP> -polly-openmp-threads=4 '
+POLLY_OMP            = ' -enable-polly-openmp -polly-openmp-threads=8 '
+POLLY_OMP_RED        = ' <POLLY_OMP> -polly-openmp-threads=8 '
 POLLY_MIN_DEPS       = ' -polly-opt-min-deps '
 GCC                  = 'gcc'
 DIFF                 = 'diff'
@@ -51,7 +51,7 @@ ERROR_FILE           = '<OUTPUT_DIR>/ERRORS'
 OUTPUT_FILE          = '<OUTPUT_DIR>/OUTPUT'
 DUMP                 = ' -DPOLYBENCH_DUMP_ARRAYS '
 NO_DUMP              = ''
-COMMAND              = '<CLANG> <FILE> -o <OUTPUT_DIR>/<FILE_NO_EXT>.ll -S -emit-llvm -I<BASE_DIR>/utilities -DPOLYBENCH_TIME <DUMP> 2>> <ERROR_FILE> >> <OUTPUT_FILE> '
+COMMAND              = '<CLANG> <FILE> -o <OUTPUT_DIR>/<FILE_NO_EXT>.ll -S -emit-llvm -I<BASE_DIR>/utilities -DPOLYBENCH_TIME <NO_DUMP> 2>> <ERROR_FILE> >> <OUTPUT_FILE> '
 
 # STEP 2
 STEP_NAME            = '.ll == opt -O3 ==> .ll'
@@ -298,7 +298,7 @@ RECURSIVE            = True
 ABSOLUTE_PATHS       = False
 FILTER_INCLUDE2      = '\\.ex$'
 FILTER_INCLUDEb      = '^(?=.*_vec\.ex$)((?!imp).)*$'
-FILTER_INCLUDE       = '_all.ex$'
+FILTER_INCLUDE       = '.*(_vec).ex$'
 FILTER_EXCLUDE       = None
 BASE_DIR             = '<_18_OUTPUT_DIR>/..'
 OUTPUT_DIR           = 'OUTPUT'
@@ -317,14 +317,14 @@ FILTER_EXCLUDE       = None
 BASE_DIR             = '<_19_OUTPUT_DIR>/'
 OUTPUT_DIR           = 'OUTPUT'
 COMMAND2              = '<DIFF> -q <FILE> <OUTPUT_DIR>/<FILE_NO_UNDERSCORE>.out &> <DEV_NULL> || <PYDIFF> <FILE> <OUTPUT_DIR>/<FILE_NO_UNDERSCORE>.out 0.001'
-COMMAND              = '<PYDIFF> <FILE> <OUTPUT_DIR>/<FILE_NO_UNDERSCORE>.out 0.001'
+COMMAND              = '<PYDIFF> <FILE> <OUTPUT_DIR>/<FILE_NO_UNDERSCORE>_vec.out 0.001'
 
 # STEP 21
 STEP_NAME            = '.time == summarize ==> table'
 VERBOSE              = False
 RECURSIVE            = False
 ABSOLUTE_PATHS       = False
-FILTER_INCLUDE       = '\\.time$'
+FILTER_INCLUDE       = 'vec\\.time$'
 FILTER_EXCLUDE       = None
 BASE_DIR             = '<_19_TIME_DIR>'
 ALL_FILES_AT_ONCE    = True
