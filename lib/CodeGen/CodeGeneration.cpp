@@ -1159,7 +1159,7 @@ public:
 
   bool runOnScop(Scop &S) {
     ParallelLoops.clear();
-    S.dump();
+    //S.dump();
 
     assert(!S.getRegion().isTopLevelRegion() &&
            "Top level regions are not supported");
@@ -1179,7 +1179,7 @@ public:
                          CodeGen.getParallelLoops().begin(),
                          CodeGen.getParallelLoops().end());
     //dbgs() << "------ CUT ABOVE ------\n";
-    StartBlock->getParent()->getParent()->dump();
+    //StartBlock->getParent()->getParent()->dump();
     //dbgs() << "------ CUT BELOW ------\n";
 
     return true;

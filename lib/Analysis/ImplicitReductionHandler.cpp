@@ -435,7 +435,7 @@ void ImplicitReductionHandler::handleVector(IRBuilder<> &Builder,
     VectorType *VecType = VectorType::get(ScalarType, VecWidth);
     Value *IdentElement = RA->getIdentityElement(VecType);
     auto OldInsertPt = Builder.GetInsertPoint();
-    if (PtrInst && false) {
+    if (PtrInst) {
       Loop *L = LI->getLoopFor(PtrInst->getParent());
       if (L && L->getExitingBlock()) {
         Builder.SetInsertPoint(L->getHeader(),

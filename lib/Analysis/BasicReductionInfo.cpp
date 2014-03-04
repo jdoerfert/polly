@@ -282,16 +282,18 @@ namespace {
       assert(Consumer && "Consumer was not initialized");
 
       // TODO: allow bitwise operations
-      if (!(BinOp->isBinaryOp(Instruction::Add) ||
-            BinOp->isBinaryOp(Instruction::Mul) ||
-            BinOp->isBinaryOp(Instruction::FAdd) ||
-            BinOp->isBinaryOp(Instruction::FMul) ||
-           ((BinOp->isBinaryOp(Instruction::Sub) ||
-             BinOp->isBinaryOp(Instruction::UDiv) ||
-             BinOp->isBinaryOp(Instruction::SDiv) ||
-             BinOp->isBinaryOp(Instruction::UDiv) ||
-             BinOp->isBinaryOp(Instruction::FSub) ||
-             BinOp->isBinaryOp(Instruction::FDiv)) &&
+      if (!(BinOp->getOpcode() == (Instruction::Add) ||
+            BinOp->getOpcode() == (Instruction::Mul) ||
+            BinOp->getOpcode() == (Instruction::FAdd) ||
+            BinOp->getOpcode() == (Instruction::FMul) ||
+           (
+            (BinOp->getOpcode() == (Instruction::Sub) ||
+             //BinOp->getOpcode() == (Instruction::UDiv) ||
+             //BinOp->getOpcode() == (Instruction::SDiv) ||
+             //BinOp->getOpcode() == (Instruction::UDiv) ||
+             BinOp->getOpcode() == (Instruction::FSub)
+             //BinOp->getOpcode() == (Instruction::FDiv)
+            ) &&
              BinOp->getOperand(0) == Producer))) {
         BRI_DEBUG("Binary operation is neither addition nor multiplication");
         BRI_INVALID(BINOP);
@@ -452,6 +454,7 @@ namespace {
       const Loop *NewLoop = LI->getLoopFor(Producer->getParent());
       if (!NewLoop || (InvalidUse && NewLoop->contains(InvalidUse)) ||
           !isLoopInv(Producer->getPointerOperand(), NewLoop)) {
+        BRI_DEBUG("INVALID usage " << InvalidUse);
         BRI_DEBUG("No reduction loop possible");
         BRI_INVALID(LOOP);
       }
@@ -476,6 +479,7 @@ namespace {
     }
 
     bool isLoopInv(const Value *Ptr, const Loop *L) const {
+      return true;
       Value *V = const_cast<Value*>(Ptr);
       const SCEV *BaseSCEV = SE->getSCEV(V);
       if (SE->isLoopInvariant(BaseSCEV, L) || L->isLoopInvariant(V))

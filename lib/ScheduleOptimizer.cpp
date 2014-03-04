@@ -635,6 +635,7 @@ bool IslScheduleOptimizer::runOnScop(Scop &S) {
     MaxScatDims = std::max((*SI)->getNumScattering(), MaxScatDims);
 
   extendScattering(S, MaxScatDims);
+  S.dump();
   return false;
 }
 
