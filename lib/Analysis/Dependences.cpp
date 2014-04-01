@@ -21,6 +21,7 @@
 //===----------------------------------------------------------------------===//
 //
 #include "polly/Dependences.h"
+#include "polly/ReductionInfo.h"
 #include "polly/LinkAllPasses.h"
 #include "polly/Options.h"
 #include "polly/ScopInfo.h"
@@ -50,17 +51,15 @@ LegalityCheckDisabled("disable-polly-legality",
                       cl::desc("Disable polly legality check"), cl::Hidden,
                       cl::init(false), cl::ZeroOrMore, cl::cat(PollyCategory));
 
-enum AnalysisType { VALUE_BASED_ANALYSIS, MEMORY_BASED_ANALYSIS };
-
-static cl::opt<enum AnalysisType> OptAnalysisType(
+static cl::opt<enum Dependences::AnalysisType> OptAnalysisType(
     "polly-dependences-analysis-type",
     cl::desc("The kind of dependence analysis to use"),
-    cl::values(clEnumValN(VALUE_BASED_ANALYSIS, "value-based",
+    cl::values(clEnumValN(Dependences::VALUE_BASED_ANALYSIS, "value-based",
                           "Exact dependences without transitive dependences"),
-               clEnumValN(MEMORY_BASED_ANALYSIS, "memory-based",
+               clEnumValN(Dependences::MEMORY_BASED_ANALYSIS, "memory-based",
                           "Overapproximation of dependences"),
                clEnumValEnd),
-    cl::Hidden, cl::init(VALUE_BASED_ANALYSIS), cl::ZeroOrMore,
+    cl::Hidden, cl::init(Dependences::VALUE_BASED_ANALYSIS), cl::ZeroOrMore,
     cl::cat(PollyCategory));
 
 //===----------------------------------------------------------------------===//
@@ -68,7 +67,7 @@ Dependences::Dependences() : ScopPass(ID) { RAW = WAR = WAW = nullptr; }
 
 void Dependences::collectInfo(Scop &S, isl_union_map **Read,
                               isl_union_map **Write, isl_union_map **MayWrite,
-                              isl_union_map **Schedule) {
+                              isl_union_map **Schedule, ReductionInfo *RI) {
   isl_space *Space = S.getParamSpace();
   *Read = isl_union_map_empty(isl_space_copy(Space));
   *Write = isl_union_map_empty(isl_space_copy(Space));
@@ -81,6 +80,12 @@ void Dependences::collectInfo(Scop &S, isl_union_map **Read,
     for (ScopStmt::memacc_iterator MI = Stmt->memacc_begin(),
                                    ME = Stmt->memacc_end();
          MI != ME; ++MI) {
+
+      ReductionInfo::ReductionAccessSet RAS;
+      RI->getReductionAccesses((*MI)->getAccessInstruction(), RAS);
+      for (auto *RA : RAS)
+        RA->addMemoryAccess(*MI, Stmt);
+
       isl_set *domcp = Stmt->getDomain();
       isl_map *accdom = (*MI)->getAccessRelation();
 
@@ -100,7 +105,8 @@ void Dependences::calculateDependences(Scop &S) {
 
   DEBUG(dbgs() << "Scop: \n" << S << "\n");
 
-  collectInfo(S, &Read, &Write, &MayWrite, &Schedule);
+  ReductionInfo *RI = &getAnalysis<ReductionInfo>();
+  collectInfo(S, &Read, &Write, &MayWrite, &Schedule, RI);
 
   Read = isl_union_map_coalesce(Read);
   Write = isl_union_map_coalesce(Write);
@@ -156,6 +162,9 @@ void Dependences::calculateDependences(Scop &S) {
   isl_union_map_free(Write);
   isl_union_map_free(Read);
   isl_union_map_free(Schedule);
+
+  for (auto *RA : *RI)
+    RA->calculateDependences(S, OptAnalysisType);
 
   RAW = isl_union_map_coalesce(RAW);
   WAW = isl_union_map_coalesce(WAW);
@@ -245,7 +254,9 @@ isl_union_map *getCombinedScheduleForSpace(Scop *scop, unsigned dimLevel) {
 }
 
 bool Dependences::isParallelDimension(__isl_take isl_set *ScheduleSubset,
-                                      unsigned ParallelDim) {
+                                      unsigned ParallelDim,
+                                      bool IgnoreReductions,
+                                      ReductionAccessSet *RAS) {
   // To check if a loop is parallel, we perform the following steps:
   //
   // o Move dependences from 'Domain -> Domain' to 'Schedule -> Schedule' space.
@@ -253,7 +264,7 @@ bool Dependences::isParallelDimension(__isl_take isl_set *ScheduleSubset,
   // o Calculate distances of the dependences.
   // o Check if one of the distances is invalid in presence of parallelism.
 
-  isl_union_map *Schedule, *Deps;
+  isl_union_map *Deps, *Schedule;
   isl_map *ScheduleDeps;
   Scop *S = &getCurScop();
 
@@ -354,6 +365,7 @@ bool Dependences::hasValidDependences() {
 }
 
 void Dependences::getAnalysisUsage(AnalysisUsage &AU) const {
+  AU.addRequired<ReductionInfo>();
   ScopPass::getAnalysisUsage(AU);
 }
 
@@ -364,5 +376,6 @@ Pass *polly::createDependencesPass() { return new Dependences(); }
 INITIALIZE_PASS_BEGIN(Dependences, "polly-dependences",
                       "Polly - Calculate dependences", false, false);
 INITIALIZE_PASS_DEPENDENCY(ScopInfo);
+INITIALIZE_AG_DEPENDENCY(ReductionInfo);
 INITIALIZE_PASS_END(Dependences, "polly-dependences",
                     "Polly - Calculate dependences", false, false)

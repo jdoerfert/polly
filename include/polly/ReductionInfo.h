@@ -136,11 +136,12 @@ public:
 
   /// @brief  Calculate the dependences of this reduction access
   ///
+  /// @param S The currently processed SCoP
   /// @param AType The kind of dependency analysis to use
   ///
   /// @note This will use all memory accesses added so far and no more are
   ///       allowed to be added afterwards.
-  void calculateDependences(enum Dependences::AnalysisType AType);
+  void calculateDependences(Scop &S, enum Dependences::AnalysisType AType);
 
   /// @brief Get the dependences between the reduction memory accesses
   ///

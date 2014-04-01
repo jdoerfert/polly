@@ -25,6 +25,8 @@
 
 #include "polly/ScopPass.h"
 
+#include "llvm/ADT/SmallPtrSet.h"
+
 #include <map>
 #include "isl/ctx.h"
 
@@ -40,6 +42,8 @@ namespace polly {
 
 class Scop;
 class ScopStmt;
+class ReductionInfo;
+class ReductionAccess;
 
 class Dependences : public ScopPass {
 public:
@@ -60,6 +64,12 @@ public:
     TYPE_ALL = (TYPE_WAR | TYPE_RAW | TYPE_WAW)
   };
 
+  /// @brief The kind of dependency analyses available
+  enum AnalysisType { VALUE_BASED_ANALYSIS, MEMORY_BASED_ANALYSIS };
+
+  /// @brief  A set of reduction accesses
+  using ReductionAccessSet = llvm::SmallPtrSet<ReductionAccess *, 4>;
+
   typedef std::map<ScopStmt *, isl_map *> StatementToIslMapTy;
 
   Dependences();
@@ -78,18 +88,22 @@ public:
   ///                   parallel.
   /// @param ParallelDimension The scattering dimension that is being executed
   ///                          in parallel.
+  /// @param IgnoreReductions Ignore dependences caused by reductions.
+  /// @param RAS Set to collect redcuction accesses which need to be ignored
   ///
   /// @return bool Returns true, if executing parallelDimension in parallel is
   ///              valid for the scattering domain subset given.
   bool isParallelDimension(__isl_take isl_set *LoopDomain,
-                           unsigned ParallelDimension);
+                           unsigned ParallelDimension,
+                           bool IgnoreReductions = false,
+                           ReductionAccessSet *RAS = nullptr);
 
   /// @brief Get the dependences in this Scop.
   ///
   /// @param Kinds This integer defines the different kinds of dependences
   ///              that will be returned. To return more than one kind, the
   ///              different kinds are 'ored' together.
-  isl_union_map *getDependences(int Kinds);
+  __isl_give isl_union_map *getDependences(int Kinds);
 
   /// @brief Report if valid dependences are available.
   bool hasValidDependences();
@@ -107,7 +121,8 @@ private:
 
   /// @brief Collect information about the SCoP.
   void collectInfo(Scop &S, isl_union_map **Read, isl_union_map **Write,
-                   isl_union_map **MayWrite, isl_union_map **Schedule);
+                   isl_union_map **MayWrite, isl_union_map **Schedule,
+                   ReductionInfo *RI);
 
   // @brief Calculate the dependences for a certain SCoP.
   void calculateDependences(Scop &S);

@@ -46,6 +46,7 @@
 #include <isl/ctx.h>
 #include <isl/map.h>
 #include <isl/set.h>
+#include <isl/space.h>
 #include <isl/flow.h>
 
 using namespace llvm;
@@ -57,20 +58,19 @@ CollectReductions("polly-collect-reductions",
                   cl::Hidden, cl::init(false), cl::ZeroOrMore,
                   cl::cat(PollyCategory));
 
-
 STATISTIC(INVALID_LOOP, "Number of loops invalidating reduction access");
 STATISTIC(INVALID_BINOP, "Number of BinOps invalidating reduction access");
-STATISTIC(INVALID_PRODUCER, "Number of loads invalidating reduction access");
+STATISTIC(INVALID_PLACING, "Number of placings invalidating reduction access");
 STATISTIC(INVALID_CONSUMER, "Number of stores invalidating reduction access");
+STATISTIC(INVALID_PRODUCER, "Number of loads invalidating reduction access");
 STATISTIC(INVALID_BASE_INST, "Number of users invalidating reduction access");
 STATISTIC(VALID_REDUCTION_ACCESS, "Number of valid reduction accesses");
 
 /// ReductionInfo::* - The abstract Interface
 /// @{
 
-ReductionAccess *
-ReductionInfo::getReductionAccess(const Instruction *BaseInst,
-                                  const Loop *OuterLoop) {
+ReductionAccess *ReductionInfo::getReductionAccess(const Instruction *BaseInst,
+                                                   const Loop *OuterLoop) {
   assert(RI && "RI didn't call InitializeReductionInfo in its run method!");
   return RI->getReductionAccess(BaseInst, OuterLoop);
 }
@@ -334,7 +334,9 @@ void ReductionAccess::addMemoryAccess(MemoryAccess *MA, ScopStmt *Stmt) {
   Schedule = isl_union_map_add_map(Schedule, Stmt->getScattering());
 }
 
-void ReductionAccess::calculateDependences(enum Dependences::AnalysisType AType) {
+void
+ReductionAccess::calculateDependences(Scop &S,
+                                      enum Dependences::AnalysisType AType) {
   assert(!RAW && !WAR && !WAW &&
          "Dependences already computed, cannot compute them again!");
   assert(Read && Write && MayWrite && Schedule &&
@@ -384,9 +386,51 @@ void ReductionAccess::calculateDependences(enum Dependences::AnalysisType AType)
 
   Read = Write = MayWrite = Schedule = nullptr;
 
+  unsigned RedLoopDim = getReductionLoop()->getLoopDepth() -
+                        (S.getRegion().outermostLoopInRegion(const_cast<Loop *>(
+                             getReductionLoop())))->getLoopDepth();
+  DEBUG(dbgs() << "RI: Reduction loop dimension is " << RedLoopDim << "\n");
+
   RAW = isl_union_map_coalesce(RAW);
   WAW = isl_union_map_coalesce(WAW);
   WAR = isl_union_map_coalesce(WAR);
+
+  struct PayloadStruct {
+    unsigned RedLoopDim;
+    isl_union_map *Filtered;
+  };
+
+  // FIXME: This only works as long as the reduction access is completly
+  //        contained in the same 'SCoP-Statement' (e.g., basic block).
+  //        See FIXME below (look for xx0xx).
+  auto filterDimensionsFn = [](isl_map *Map, void *U) {
+    PayloadStruct *Payload = (PayloadStruct *)U;
+    for (unsigned d = 0; d < Payload->RedLoopDim; ++d) {
+      Map = isl_map_equate(Map, isl_dim_in, d, isl_dim_out, d);
+    }
+    Payload->Filtered = isl_union_map_add_map(Payload->Filtered, Map);
+    return 0;
+  };
+
+  auto filterDimensions = [&](isl_union_map *UMap) {
+    PayloadStruct Payload;
+    isl_space *Space = isl_union_map_get_space(UMap);
+    Payload.Filtered = isl_union_map_empty(Space);
+    Payload.RedLoopDim = RedLoopDim;
+    isl_union_map_foreach_map(UMap, filterDimensionsFn, &Payload);
+    //isl_union_map_free(UMap);
+    return isl_union_map_subtract(UMap, Payload.Filtered);
+  };
+
+  DEBUG(dbgs() << "RI: Dependences before filtering:\nRAW:" << RAW
+               << "\nWAW:" << WAW << "\nWAR" << WAR << "\n");
+
+  RAW = filterDimensions(RAW);
+  WAW = filterDimensions(WAW);
+  WAR = filterDimensions(WAR);
+
+  DEBUG(dbgs() << "RI: Dependences after filtering:\nRAW:" << RAW
+               << "\nWAW:" << WAW << "\nWAR" << WAR << "\n");
 }
 
 isl_union_map *ReductionAccess::getdependences(int Kinds) const {
@@ -606,7 +650,7 @@ struct BasicReductionInfo : public ScopPass, public ReductionInfo {
   /// @todo: The alias check performed atm is expensive and probably not needed
   ///
   ReductionAccess *getReductionAccess(const Instruction *BaseInst,
-                                            const Loop *OuterLoop) override {
+                                      const Loop *OuterLoop) override {
     assert(BaseInst && OuterLoop);
     BRI_DEBUG("\nGet reduction access for:");
     BRI_DEBUG("    BaseInst: " << *BaseInst);
@@ -713,18 +757,26 @@ struct BasicReductionInfo : public ScopPass, public ReductionInfo {
     assert(Consumer && "Consumer was not initialized");
 
     const auto &OpCode = BinOp->getOpcode();
-    if (!(OpCode == (Instruction::Add) ||
-          OpCode == (Instruction::Mul) ||
-          OpCode == (Instruction::FAdd) ||
-          OpCode == (Instruction::FMul) ||
-          OpCode == (Instruction::Or) ||
-          OpCode == (Instruction::Xor) ||
+    if (!(OpCode == (Instruction::Add) || OpCode == (Instruction::Mul) ||
+          OpCode == (Instruction::FAdd) || OpCode == (Instruction::FMul) ||
+          OpCode == (Instruction::Or) || OpCode == (Instruction::Xor) ||
           OpCode == (Instruction::And) ||
-          ((OpCode == (Instruction::Sub) ||
-            OpCode == (Instruction::FSub)) &&
+          ((OpCode == (Instruction::Sub) || OpCode == (Instruction::FSub)) &&
            BinOp->getOperand(0) == Producer))) {
       BRI_DEBUG("Binary operation is neither addition nor multiplication");
       BRI_INVALID(BINOP);
+    }
+
+    // FIXME: As long as the independent block pass is used we can assume that
+    // xx0xx  producer, binop and consumer are in the same basic block. As soon
+    //        as ssa dependences are modelt correctly this assumption is not
+    //        true anymore. *HOWEVER*, at the moment we depend on this fact
+    //        (same BB) when we compute the dependences for a reduction access.
+    if (BinOp->getParent() != Producer->getParent() ||
+        Producer->getParent() != Consumer->getParent()) {
+      BRI_DEBUG(
+          "Producer, BinOp and Consumer do not share the same parent block.");
+      BRI_INVALID(PLACING);
     }
 
     // We have a producer, a consumer and a valid binary operation in-between.
@@ -805,7 +857,6 @@ struct BasicReductionInfo : public ScopPass, public ReductionInfo {
   const_iterator end() const { return RAS.end(); }
   const_iterator begin() const { return RAS.begin(); }
 
-
   /// Helper functions to avoid code duplication
   ///
   /// Note: No statistics are incremented here
@@ -818,7 +869,8 @@ struct BasicReductionInfo : public ScopPass, public ReductionInfo {
     for (auto *UI : Load->users()) {
       if (const BinaryOperator *BTmp = dyn_cast<BinaryOperator>(UI)) {
         if (BO) {
-          BRI_DEBUG("Producer has multiple binary operand uses (inside the loop)");
+          BRI_DEBUG(
+              "Producer has multiple binary operand uses (inside the loop)");
           BRI_DEBUG(" => " << *BO << " and " << *BTmp);
           return nullptr;
         } else {
@@ -893,8 +945,9 @@ struct BasicReductionInfo : public ScopPass, public ReductionInfo {
       }
     }
 
-    auto *AS = AST.getAliasSetForPointerIfExists(
-        const_cast<Instruction *>(Producer), AliasAnalysis::UnknownSize, TBAAInfo);
+    auto *AS =
+        AST.getAliasSetForPointerIfExists(const_cast<Instruction *>(Producer),
+                                          AliasAnalysis::UnknownSize, TBAAInfo);
     return AS != nullptr;
   }
 
@@ -1049,7 +1102,6 @@ struct BasicReductionInfo : public ScopPass, public ReductionInfo {
     // be others, thus we recur with NewLoop
     return getReductionLoop(Producer, Consumer, BinOp, NewLoop);
   }
-
 };
 
 /// @}
