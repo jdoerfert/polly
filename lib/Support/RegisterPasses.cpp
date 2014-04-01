@@ -30,6 +30,7 @@
 #include "polly/ScopDetection.h"
 #include "polly/ScopInfo.h"
 #include "polly/TempScopInfo.h"
+#include "polly/ReductionInfo.h"
 #include "llvm/Analysis/CFGPrinter.h"
 #include "llvm/PassManager.h"
 #include "llvm/Transforms/IPO/PassManagerBuilder.h"
@@ -178,6 +179,9 @@ void initializePollyPasses(PassRegistry &Registry) {
   initializeScopDetectionPass(Registry);
   initializeScopInfoPass(Registry);
   initializeTempScopInfoPass(Registry);
+  initializeReductionInfoAnalysisGroup(Registry);
+  initializeNoReductionInfoPass(Registry);
+  initializeBasicReductionInfoPass(Registry);
 }
 
 /// @brief Register Polly passes such that they form a polyhedral optimizer.
@@ -214,6 +218,8 @@ static void registerPollyPasses(llvm::PassManagerBase &PM) {
   registerCanonicalicationPasses(PM, SCEVCodegen);
 
   PM.add(polly::createScopInfoPass());
+
+  PM.add(polly::createBasicReductionInfoPass());
 
   if (PollyViewer)
     PM.add(polly::createDOTViewerPass());
