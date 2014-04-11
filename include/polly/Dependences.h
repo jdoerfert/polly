@@ -89,7 +89,7 @@ public:
   /// @param ParallelDimension The scattering dimension that is being executed
   ///                          in parallel.
   /// @param IgnoreReductions Ignore dependences caused by reductions.
-  /// @param RAS Set to collect redcuction accesses which need to be ignored
+  /// @param RAV Vector to collect redcuction accesses which need to be ignored
   ///
   /// @return bool Returns true, if executing parallelDimension in parallel is
   ///              valid for the scattering domain subset given.
@@ -114,6 +114,10 @@ public:
   virtual void getAnalysisUsage(AnalysisUsage &AU) const;
 
 private:
+
+  /// @brief The reduction info analysis available
+  ReductionInfo *RI;
+
   // The different kinds of dependences we calculate.
   isl_union_map *RAW;
   isl_union_map *WAR;
@@ -121,8 +125,7 @@ private:
 
   /// @brief Collect information about the SCoP.
   void collectInfo(Scop &S, isl_union_map **Read, isl_union_map **Write,
-                   isl_union_map **MayWrite, isl_union_map **Schedule,
-                   ReductionInfo *RI);
+                   isl_union_map **MayWrite, isl_union_map **Schedule);
 
   // @brief Calculate the dependences for a certain SCoP.
   void calculateDependences(Scop &S);

@@ -57,6 +57,7 @@ SOURCES= Polly.cpp \
 	 Analysis/ScopPass.cpp \
 	 Analysis/TempScopInfo.cpp \
 	 Analysis/ReductionInfo.cpp \
+	 Analysis/BasicReductionInfo.cpp \
 	 CodeGen/BlockGenerators.cpp \
 	 CodeGen/LoopGenerators.cpp \
 	 CodeGen/IRBuilder.cpp \

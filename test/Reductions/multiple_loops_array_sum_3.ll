@@ -77,5 +77,6 @@ attributes #0 = { nounwind uwtable "less-precise-fpmad"="false" "no-frame-pointe
 
 ; Verify that there was one (the inner) reduction detected
 ; CHECK-NOT: RA: Reduction Loop: Loop at depth 1
-; CHECK: RA: Reduction Loop: Loop at depth 2
+; CHECK-NOT: RA: Reduction Loop: Loop at depth 2
+; CHECK: RA: Reduction Loop: Loop at depth 3
 ; CHECK-NOT: RA: Reduction Loop:

@@ -32,6 +32,9 @@ class Pass;
 class AnalysisUsage;
 }
 
+struct isl_id;
+struct isl_union_map;
+
 namespace polly {
 class MemoryAccess;
 
@@ -67,6 +70,9 @@ class MemoryAccess;
 /// loops).
 ///
 class ReductionAccess {
+  /// @brief Types of dependences we can compute
+  enum DependencyType { RED_DEPS, PRIV_DEPS };
+
 public:
   /// @brief Reduction access type
   ///
@@ -79,7 +85,7 @@ public:
     BOR,  ///< Bitwise Or
     BXOR, ///< Bitwise XOr
     BAND, ///< Bitwise And
-    // Not yet supported
+    /* Not yet fully supported */
     SMAX, ///< Signed Maximum Computation
     SMIN, ///< Signed Minimum Computation
     UMAX, ///< Unsigned Maximum Computation
@@ -105,8 +111,7 @@ public:
   /// @param S2 The second operand
   /// @param Builder The instruction builder
   ///
-  /// @returns A value created with @p Builder representing: @p S1 <RedBinOp> @p
-  /// S2
+  /// @returns Value created with @p Builder repr.: @p S1 <RedBinOp> @p S2
   llvm::Value *getBinaryOperation(llvm::Value *S1, llvm::Value *S2,
                                   llvm::IRBuilder<> &Builder) const;
 
@@ -128,27 +133,40 @@ public:
   /// @name Dependency interface
   /// @{
 
-  /// @brief  Add the effects of the memory access @p MA in statement @p Stmt
+  /// @brief Compute the reduction loop dimension in a given SCoP @p S
+  unsigned getReductionLoopDim(Scop &S);
+
+  /// @brief Add the effects of the memory access @p MA in statement @p Stmt
   ///
-  /// @param  MA   The memory access which is part of this reduction access
-  /// @param  Stmt The statement containting the memory access @p MA
+  /// @param MA   The memory access which might interact with the reduction access
+  /// @param Stmt The statement containting the memory access @p MA
   void addMemoryAccess(MemoryAccess *MA, ScopStmt *Stmt);
 
-  /// @brief  Calculate the dependences of this reduction access
+  /// @brief Calculate the dependences of this reduction access
   ///
   /// @param S The currently processed SCoP
   /// @param AType The kind of dependency analysis to use
   ///
   /// @note This will use all memory accesses added so far and no more are
   ///       allowed to be added afterwards.
-  void calculateDependences(Scop &S, enum Dependences::AnalysisType AType);
+  void calculateDependences(Scop &S, Dependences::AnalysisType AType,
+                            DependencyType DType);
 
   /// @brief Get the dependences between the reduction memory accesses
   ///
   /// @param kinds This integer defines the different kinds of dependences
   ///              that will be returned. To return more than one kind, the
   ///              different kinds are 'ored' together.
-  __isl_give isl_union_map *getdependences(int kinds) const;
+  __isl_give isl_union_map *getReductionDependences(int kinds) const;
+
+  /// @brief Test if this reduction access is realized
+  bool isRealized() const { return IsRealized; }
+
+  /// @brief Set this reduction access to realized
+  void setRealized() {
+    assert(!IsRealized && "Realized reduction access twice");
+    IsRealized = true;
+  }
 
   ///  @}
 
@@ -178,6 +196,9 @@ private:
                            const llvm::Loop *ReductionLoop,
                            llvm::Instruction::BinaryOps BinOpcode);
 
+  /// @brief Flag to indicate a realized reduction access
+  bool IsRealized = false;
+
   /// @brief The base value
   ///
   /// This might either be a memory location or a PHI node
@@ -190,6 +211,9 @@ private:
 
   /// @brief The reduction type of this reduction access
   enum ReductionType Type;
+
+  /// @brief The isl ID of the statement containing this reduction access
+  isl_id *StmtIslId = nullptr;
 
   /// @brief The different kinds of dependences we calculate
   isl_union_map *RAW = nullptr, *WAR = nullptr, *WAW = nullptr;
@@ -274,12 +298,27 @@ public:
   /// @name The public ReductionInfo interface
   /// @{
 
-  /// @brief  A set of reduction accesses
+  /// @brief A set/vector of reduction accesses
+  using ReductionAccessVec = llvm::SmallVector<ReductionAccess *, 4>;
   using ReductionAccessSet = llvm::SmallPtrSet<ReductionAccess *, 4>;
 
   /// @brief  Iterators for a reduction access set
-  using iterator = ReductionAccessSet::iterator;
-  using const_iterator = ReductionAccessSet::const_iterator;
+  using iterator = ReductionAccessVec::iterator;
+  using const_iterator = ReductionAccessVec::const_iterator;
+
+  /// @brief Calculate the dependences of this reduction access
+  ///
+  /// @param S The currently processed SCoP
+  /// @param AType The kind of dependency analysis to use
+  /// @param RAW The read after write dependences
+  /// @param WAW The write after write dependences
+  /// @param WAR The write after read dependences
+  ///
+  /// @note This will use all memory accesses added so far and no more are
+  ///       allowed to be added afterwards.
+  void calculateDependences(Scop &S, enum Dependences::AnalysisType AType,
+                            isl_union_map **RAW, isl_union_map **WAW,
+                            isl_union_map **WAR);
 
   /// @brief Find a maximal reduction access for the given @p BaseInst
   ///
@@ -295,7 +334,7 @@ public:
   virtual ReductionAccess *getReductionAccess(const llvm::Instruction *BaseInst,
                                               const llvm::Loop *OuterLoop);
 
-  /// @brief  Find all reduction accesses for the fiven @p BaseInst
+  /// @brief  Find all reduction accesses for the given @p BaseInst
   ///
   /// @param  BaseInst The instruction which needs to be part of the reduction
   ///         accesses; it is also used to get the base value
@@ -306,6 +345,15 @@ public:
   virtual void getReductionAccesses(const llvm::Instruction *BaseInst,
                                     ReductionAccessSet &RedAccSet);
 
+  /// @brief  Find all reduction accesses involving @p BaseValue
+  ///
+  /// @param  BaseValue The base value/pointer
+  /// @param  RedAccSet A set to collect all found reduction accesses in
+  ///
+  /// @returns The found reduction accesses are inserted into @p RedAccSet
+  ///
+  virtual void getAllReductionAccesses(const llvm::Value *BaseValue,
+                                       ReductionAccessSet &RedAccSet);
   /// @}
 
   /// @name Iterator access to all (cached) reduction accesses

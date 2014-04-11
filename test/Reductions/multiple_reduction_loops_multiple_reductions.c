@@ -1,0 +1,13 @@
+int f(int *__restrict__ S, int *__restrict__ B) {
+  int i, j, k, sum = 0;
+  for (i = 0; i < 100; i++) {
+    for (j = 0; j < 100; j++) {
+      for (k = 0; k < 100; k++) {
+        S[j] += B[i + j + k];
+        sum += S[j];
+      }
+    }
+  }
+  return sum;
+}
+

@@ -447,20 +447,17 @@ bool IslScheduleOptimizer::runOnScop(Scop &S) {
   LastSchedule = nullptr;
 
   // Build input data.
-  int ValidityKinds =
-      Dependences::TYPE_RAW | Dependences::TYPE_WAR | Dependences::TYPE_WAW;
+  int ValidityKinds = Dependences::TYPE_ALL;
   int ProximityKinds;
 
   if (OptimizeDeps == "all")
-    ProximityKinds =
-        Dependences::TYPE_RAW | Dependences::TYPE_WAR | Dependences::TYPE_WAW;
+    ProximityKinds = Dependences::TYPE_ALL;
   else if (OptimizeDeps == "raw")
     ProximityKinds = Dependences::TYPE_RAW;
   else {
     errs() << "Do not know how to optimize for '" << OptimizeDeps << "'"
            << " Falling back to optimizing all dependences.\n";
-    ProximityKinds =
-        Dependences::TYPE_RAW | Dependences::TYPE_WAR | Dependences::TYPE_WAW;
+    ProximityKinds = Dependences::TYPE_ALL;
   }
 
   isl_union_set *Domain = S.getDomains();

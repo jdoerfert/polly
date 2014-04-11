@@ -875,7 +875,8 @@ bool ClastStmtCodeGen::isParallelFor(const clast_for *f) {
 
   Dependences &D = P->getAnalysis<Dependences>();
 
-  return D.isParallelDimension(Domain, isl_set_n_dim(Domain));
+  Dependences::ReductionAccessSet RAS;
+  return D.isParallelDimension(Domain, isl_set_n_dim(Domain), true, &RAS);
 }
 
 void ClastStmtCodeGen::codegen(const clast_for *f) {

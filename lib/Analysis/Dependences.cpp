@@ -26,6 +26,9 @@
 #include "polly/Options.h"
 #include "polly/ScopInfo.h"
 #include "polly/Support/GICHelper.h"
+
+#include "llvm/Analysis/LoopInfo.h"
+
 #include <isl/aff.h>
 #include <isl/ctx.h>
 #include <isl/flow.h>
@@ -62,12 +65,21 @@ static cl::opt<enum Dependences::AnalysisType> OptAnalysisType(
     cl::Hidden, cl::init(Dependences::VALUE_BASED_ANALYSIS), cl::ZeroOrMore,
     cl::cat(PollyCategory));
 
+namespace polly {
+bool HideReductionDependences;
+}
+static cl::opt<bool, true>
+HideReductionDeps("polly-hide-reduction-dependences",
+                  cl::desc("Hide reduction dependences from the scheduler"),
+                  cl::location(polly::HideReductionDependences),
+                  cl::init(false), cl::ZeroOrMore, cl::cat(PollyCategory));
+
 //===----------------------------------------------------------------------===//
 Dependences::Dependences() : ScopPass(ID) { RAW = WAR = WAW = nullptr; }
 
 void Dependences::collectInfo(Scop &S, isl_union_map **Read,
                               isl_union_map **Write, isl_union_map **MayWrite,
-                              isl_union_map **Schedule, ReductionInfo *RI) {
+                              isl_union_map **Schedule) {
   isl_space *Space = S.getParamSpace();
   *Read = isl_union_map_empty(isl_space_copy(Space));
   *Write = isl_union_map_empty(isl_space_copy(Space));
@@ -81,10 +93,6 @@ void Dependences::collectInfo(Scop &S, isl_union_map **Read,
                                    ME = Stmt->memacc_end();
          MI != ME; ++MI) {
 
-      ReductionInfo::ReductionAccessSet RAS;
-      RI->getReductionAccesses((*MI)->getAccessInstruction(), RAS);
-      for (auto *RA : RAS)
-        RA->addMemoryAccess(*MI, Stmt);
 
       isl_set *domcp = Stmt->getDomain();
       isl_map *accdom = (*MI)->getAccessRelation();
@@ -105,8 +113,7 @@ void Dependences::calculateDependences(Scop &S) {
 
   DEBUG(dbgs() << "Scop: \n" << S << "\n");
 
-  ReductionInfo *RI = &getAnalysis<ReductionInfo>();
-  collectInfo(S, &Read, &Write, &MayWrite, &Schedule, RI);
+  collectInfo(S, &Read, &Write, &MayWrite, &Schedule);
 
   Read = isl_union_map_coalesce(Read);
   Write = isl_union_map_coalesce(Write);
@@ -163,8 +170,7 @@ void Dependences::calculateDependences(Scop &S) {
   isl_union_map_free(Read);
   isl_union_map_free(Schedule);
 
-  for (auto *RA : *RI)
-    RA->calculateDependences(S, OptAnalysisType);
+  RI->calculateDependences(S, OptAnalysisType, &RAW, &WAW, &WAR);
 
   RAW = isl_union_map_coalesce(RAW);
   WAW = isl_union_map_coalesce(WAW);
@@ -185,6 +191,8 @@ void Dependences::calculateDependences(Scop &S) {
 }
 
 bool Dependences::runOnScop(Scop &S) {
+  RI = &getAnalysis<ReductionInfo>();
+
   releaseMemory();
   calculateDependences(S);
 
@@ -253,48 +261,23 @@ isl_union_map *getCombinedScheduleForSpace(Scop *scop, unsigned dimLevel) {
   return schedule;
 }
 
-bool Dependences::isParallelDimension(__isl_take isl_set *ScheduleSubset,
-                                      unsigned ParallelDim,
-                                      bool IgnoreReductions,
-                                      ReductionAccessSet *RAS) {
-  // To check if a loop is parallel, we perform the following steps:
-  //
-  // o Move dependences from 'Domain -> Domain' to 'Schedule -> Schedule' space.
-  // o Limit dependences to the schedule space enumerated by the loop.
-  // o Calculate distances of the dependences.
-  // o Check if one of the distances is invalid in presence of parallelism.
+static bool isDependencyFree(__isl_keep isl_union_map *Deps,
+                             __isl_keep isl_union_map *Schedule,
+                             __isl_keep isl_set *ScheduleSubset,
+                             unsigned ParallelDim) {
+  if (isl_union_map_is_empty(Deps))
+    return true;
 
-  isl_union_map *Deps, *Schedule;
   isl_map *ScheduleDeps;
-  Scop *S = &getCurScop();
 
-  if (!hasValidDependences()) {
-    isl_set_free(ScheduleSubset);
-    return false;
-  }
-
-  Deps = getDependences(TYPE_ALL);
-
-  if (isl_union_map_is_empty(Deps)) {
-    isl_union_map_free(Deps);
-    isl_set_free(ScheduleSubset);
-    return true;
-  }
-
-  Schedule = getCombinedScheduleForSpace(S, ParallelDim);
+  Deps = isl_union_map_copy(Deps);
   Deps = isl_union_map_apply_range(Deps, isl_union_map_copy(Schedule));
-  Deps = isl_union_map_apply_domain(Deps, Schedule);
-
-  if (isl_union_map_is_empty(Deps)) {
-    isl_union_map_free(Deps);
-    isl_set_free(ScheduleSubset);
-    return true;
-  }
-
+  Deps = isl_union_map_apply_domain(Deps, isl_union_map_copy(Schedule));
   ScheduleDeps = isl_map_from_union_map(Deps);
   ScheduleDeps =
       isl_map_intersect_domain(ScheduleDeps, isl_set_copy(ScheduleSubset));
-  ScheduleDeps = isl_map_intersect_range(ScheduleDeps, ScheduleSubset);
+  ScheduleDeps =
+      isl_map_intersect_range(ScheduleDeps, isl_set_copy(ScheduleSubset));
 
   isl_set *Distances = isl_map_deltas(ScheduleDeps);
   isl_space *Space = isl_set_get_space(Distances);
@@ -311,6 +294,166 @@ bool Dependences::isParallelDimension(__isl_take isl_set *ScheduleSubset,
   isl_set_free(Invalid);
 
   return IsParallel;
+}
+
+bool Dependences::isParallelDimension(__isl_take isl_set *ScheduleSubset,
+                                      unsigned ParallelDim,
+                                      bool IgnoreReductions,
+                                      ReductionAccessSet *RAS) {
+  // To check if a loop is parallel, we perform the following steps:
+  //
+  // o Move dependences from 'Domain -> Domain' to 'Schedule -> Schedule' space.
+  // o Limit dependences to the schedule space enumerated by the loop.
+  // o Calculate distances of the dependences.
+  // o Check if one of the distances is invalid in presence of parallelism.
+
+  isl_union_map *Deps, *Schedule;
+  Scop *S = &getCurScop();
+
+  if (!hasValidDependences()) {
+    isl_set_free(ScheduleSubset);
+    return false;
+  }
+
+  Deps = getDependences(TYPE_ALL);
+
+  for (ReductionAccess *RA : *RI)
+    if (RA->isRealized())
+      Deps = isl_union_map_subtract(Deps, RA->getReductionDependences(TYPE_ALL));
+
+  if (isl_union_map_is_empty(Deps)) {
+    isl_union_map_free(Deps);
+    isl_set_free(ScheduleSubset);
+    DEBUG(dbgs() << "DP: Dimension " << ParallelDim << " is "
+                 << "parallel\n");
+    return true;
+  }
+
+  Schedule = getCombinedScheduleForSpace(S, ParallelDim);
+  DEBUG(dbgs() << "DP: Schedule: " << Schedule << "\n");
+
+  Deps = isl_union_map_apply_range(Deps, isl_union_map_copy(Schedule));
+  Deps = isl_union_map_apply_domain(Deps, Schedule);
+
+  if (isl_union_map_is_empty(Deps)) {
+    isl_union_map_free(Deps);
+    isl_set_free(ScheduleSubset);
+    return true;
+  }
+
+  ScheduleDeps = isl_map_from_union_map(Deps);
+  ScheduleDeps =
+      isl_map_intersect_domain(ScheduleDeps, isl_set_copy(ScheduleSubset));
+  ScheduleDeps = isl_map_intersect_range(ScheduleDeps, ScheduleSubset);
+
+  bool IsParallel =
+      isDependencyFree(Deps, Schedule, ScheduleSubset, ParallelDim);
+
+  DEBUG(dbgs() << "DP: Dimension " << ParallelDim << " is "
+               << (IsParallel ? "" : "not ") << "parallel\n");
+
+  if (IsParallel) {
+    isl_union_map_free(Deps);
+    isl_union_map_free(Schedule);
+    isl_set_free(ScheduleSubset);
+    return true;
+  }
+
+  DEBUG(dbgs() << "DP: Reduction dependences will "
+               << (IgnoreReductions ? "" : "not ") << " be ignored\n");
+
+  if (!IgnoreReductions) {
+    isl_union_map_free(Deps);
+    isl_union_map_free(Schedule);
+    isl_set_free(ScheduleSubset);
+    return false;
+  }
+
+  assert(RAS && "Cannot ignore reductions without collection realized one");
+
+  DEBUG(dbgs() << "DP: Original dependences: " << Deps << "\n");
+  isl_union_map *RelaxedDeps = isl_union_map_copy(Deps);
+  for (ReductionAccess *RA : *RI)
+    RelaxedDeps = isl_union_map_subtract(RelaxedDeps,
+                                         RA->getReductionDependences(TYPE_ALL));
+
+  DEBUG(dbgs() << "DP: Relaxed dependences: " << RelaxedDeps << "\n");
+
+  IsParallel =
+      isDependencyFree(RelaxedDeps, Schedule, ScheduleSubset, ParallelDim);
+
+  DEBUG(dbgs() << "DP: Dimension " << ParallelDim << " is "
+               << (IsParallel ? "" : "not ") << "reduction parallel\n");
+
+  if (!IsParallel) {
+    isl_union_map_free(Deps);
+    isl_union_map_free(Schedule);
+    isl_union_map_free(RelaxedDeps);
+    isl_set_free(ScheduleSubset);
+    return false;
+  }
+
+  using RASet = std::set<ReductionAccess *>;
+  auto PowerSetCmp = [](const RASet &L, const RASet &R) {
+    if (L.size() == R.size())
+      return L < R;
+    return L.size() < R.size();
+  };
+
+  std::set<RASet, decltype(PowerSetCmp)> ReductionAccessPowerSet(PowerSetCmp);
+  for (ReductionAccess *RA : *RI) {
+    for (RASet RS : ReductionAccessPowerSet) {
+      RS.insert(RA);
+      ReductionAccessPowerSet.emplace(std::move(RS));
+    }
+    RASet RASingleton = {RA};
+    ReductionAccessPowerSet.emplace(std::move(RASingleton));
+  }
+
+  std::set<std::set<ReductionAccess *>> ReductionAccessRealizableSets;
+  auto subset = [](const RASet &L, const RASet &R) {
+    for (auto *RA : L)
+      if (R.count(RA) == 0)
+        return false;
+    return true;
+  };
+  auto containsSubset = [&](const RASet &RS) {
+    for (const auto &RRS : ReductionAccessRealizableSets) {
+      if (subset(RRS, RS))
+        return true;
+    }
+    return false;
+  };
+
+  for (const auto &RS : ReductionAccessPowerSet) {
+    if (containsSubset(RS))
+      continue;
+
+    isl_union_map *ReductionDeps = isl_union_map_copy(Deps);
+    for (auto *RA : RS)
+      ReductionDeps = isl_union_map_subtract(
+          ReductionDeps, RA->getReductionDependences(TYPE_ALL));
+
+    bool RealizableReductionSet =
+        isDependencyFree(ReductionDeps, Schedule, ScheduleSubset, ParallelDim);
+    isl_union_map_free(ReductionDeps);
+
+    if (RealizableReductionSet)
+      ReductionAccessRealizableSets.emplace(std::move(RS));
+
+    DEBUG(
+      dbgs() << "DP: "<<(RealizableReductionSet ? "R" : "Not r")<<"ealizable reduction set:\n";
+      for (auto *RA : RS)
+        RA->print(dbgs());
+      dbgs() << "\n\n";
+    );
+  }
+
+  isl_union_map_free(Deps);
+  isl_union_map_free(Schedule);
+  isl_union_map_free(RelaxedDeps);
+  isl_set_free(ScheduleSubset);
+  return true;
 }
 
 void Dependences::printScop(raw_ostream &OS) const {
@@ -343,6 +486,7 @@ void Dependences::releaseMemory() {
 
 isl_union_map *Dependences::getDependences(int Kinds) {
   assert(hasValidDependences() && "No valid dependences available");
+
   isl_space *Space = isl_union_map_get_space(RAW);
   isl_union_map *Deps = isl_union_map_empty(Space);
 
@@ -355,6 +499,12 @@ isl_union_map *Dependences::getDependences(int Kinds) {
   if (Kinds & TYPE_WAW)
     Deps = isl_union_map_union(Deps, isl_union_map_copy(WAW));
 
+  if (HideReductionDependences) {
+    for (ReductionAccess *RA : *RI) {
+      Deps = isl_union_map_union(Deps, RA->getReductionDependences(Kinds));
+    }
+  }
+
   Deps = isl_union_map_coalesce(Deps);
   Deps = isl_union_map_detect_equalities(Deps);
   return Deps;
@@ -365,7 +515,7 @@ bool Dependences::hasValidDependences() {
 }
 
 void Dependences::getAnalysisUsage(AnalysisUsage &AU) const {
-  AU.addRequired<ReductionInfo>();
+  AU.addRequiredTransitive<ReductionInfo>();
   ScopPass::getAnalysisUsage(AU);
 }
 

@@ -2,12 +2,13 @@
 ; ModuleID = 'multiple_loops_array_sum.ll'
 ;
 ; int f(int * __restrict__ A) {
-;   int i, j, sum = 0;
+;   int i, j, sum = 1;
 ;   for (i = 0; i < 100; i++) {
 ;     sum *= 2;
 ;     for (j = 0; j < 100; j++) {
 ;       sum += A[i+j];
 ;     }
+;     sum *= 2;
 ;   }
 ;   return sum;
 ; }

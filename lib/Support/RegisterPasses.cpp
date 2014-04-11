@@ -72,6 +72,20 @@ static cl::opt<OptimizerChoice> Optimizer(
     cl::Hidden, cl::init(OPTIMIZER_ISL), cl::ZeroOrMore,
     cl::cat(PollyCategory));
 
+enum ReductionInfoChoice {
+  REDINFO_BASIC,
+  REDINFO_NONE
+};
+
+static cl::opt<ReductionInfoChoice> ReductionDetection(
+    "polly-ri", cl::desc("Select the reduction detection"),
+    cl::values(
+        clEnumValN(REDINFO_BASIC, "basic", "Basic reduction detection"),
+        clEnumValN(REDINFO_NONE, "none", "No reduction detection"),
+        clEnumValEnd),
+    cl::Hidden, cl::init(REDINFO_BASIC), cl::ZeroOrMore,
+    cl::cat(PollyCategory));
+
 enum CodeGenChoice {
 #ifdef CLOOG_FOUND
   CODEGEN_CLOOG,
@@ -219,7 +233,14 @@ static void registerPollyPasses(llvm::PassManagerBase &PM) {
 
   PM.add(polly::createScopInfoPass());
 
-  PM.add(polly::createBasicReductionInfoPass());
+  switch (ReductionDetection) {
+  case REDINFO_BASIC:
+    PM.add(polly::createBasicReductionInfoPass());
+    break;
+  case REDINFO_NONE:
+    PM.add(polly::createNoReductionInfoPass());
+    break;
+  }
 
   if (PollyViewer)
     PM.add(polly::createDOTViewerPass());
