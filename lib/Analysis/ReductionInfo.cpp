@@ -65,10 +65,10 @@ void ReductionInfo::getReductionAccesses(const Instruction *BaseInst,
   return RI->getReductionAccesses(BaseInst, RAS);
 }
 
-void ReductionInfo::getAllReductionAccesses(const Value *BaseValue,
+void ReductionInfo::getRelatedReductionAccesses(const Value *BaseValue,
                                             ReductionAccessSet &RAS) {
   assert(RI && "RI didn't call InitializeReductionInfo in its run method!");
-  return RI->getAllReductionAccesses(BaseValue, RAS);
+  return RI->getRelatedReductionAccesses(BaseValue, RAS);
 }
 
 // ReductionInfo destructor: DO NOT move this to the header file for
@@ -112,19 +112,21 @@ ReductionInfo::const_iterator ReductionInfo::begin() const {
   return RI->begin();
 }
 
-void ReductionInfo::calculateDependences(Scop &S,
-                                         enum Dependences::AnalysisType AType,
-                                         isl_union_map **RAW,
-                                         isl_union_map **WAW,
-                                         isl_union_map **WAR) {
-  assert(RAW && *RAW && WAW && *WAW && WAR && *WAR && "Invalid pointers");
+void
+ReductionInfo::calculateDependences(Scop &S, Dependences::AnalysisType AType,
+                                    DependencyType DType, isl_union_map **RAW,
+                                    isl_union_map **WAW, isl_union_map **WAR) {
+  assert(RAW && WAW && WAR && "Invalid pointers");
 
   ReductionInfo::ReductionAccessSet RAS;
   for (Scop::iterator SI = S.begin(), SE = S.end(); SI != SE; ++SI) {
     ScopStmt *Stmt = *SI;
     for (auto MI = Stmt->memacc_begin(), ME = Stmt->memacc_end(); MI != ME;
          ++MI) {
-      getReductionAccesses((*MI)->getAccessInstruction(), RAS);
+      if (DType == ReductionAccess::RED_DEPS)
+        getReductionAccesses((*MI)->getAccessInstruction(), RAS);
+      else
+        getRelatedReductionAccesses((*MI)->getBaseAddr(), RAS);
       for (auto *RA : RAS)
         RA->addMemoryAccess(*MI, Stmt);
       RAS.clear();
@@ -132,54 +134,21 @@ void ReductionInfo::calculateDependences(Scop &S,
   }
 
   isl_space *Space = S.getParamSpace();
-  isl_union_map *RedRAW = isl_union_map_empty(isl_space_copy(Space));
-  isl_union_map *RedWAW = isl_union_map_empty(isl_space_copy(Space));
-  isl_union_map *RedWAR = isl_union_map_empty(isl_space_copy(Space));
+  *RAW = *RAW ? *RAW : isl_union_map_empty(isl_space_copy(Space));
+  *WAW = *WAW ? *WAW : isl_union_map_empty(isl_space_copy(Space));
+  *WAR = *WAR ? *WAR : isl_union_map_empty(isl_space_copy(Space));
+  isl_space_free(Space);
 
   for (auto *RA : *this) {
-    RA->calculateDependences(S, AType, ReductionAccess::RED_DEPS);
-    RedRAW = isl_union_map_union(
-        RedRAW, RA->getReductionDependences(Dependences::TYPE_RAW));
-    RedWAW = isl_union_map_union(
-        RedWAW, RA->getReductionDependences(Dependences::TYPE_WAW));
-    RedWAR = isl_union_map_union(
-        RedWAR, RA->getReductionDependences(Dependences::TYPE_WAR));
+    RA->calculateDependences(S, AType, DType);
+    *RAW = isl_union_map_union(
+        *RAW, RA->getReductionDependences(Dependences::TYPE_RAW));
+    *WAW = isl_union_map_union(
+        *WAW, RA->getReductionDependences(Dependences::TYPE_WAW));
+    *WAR = isl_union_map_union(
+        *WAR, RA->getReductionDependences(Dependences::TYPE_WAR));
   }
-
-  for (Scop::iterator SI = S.begin(), SE = S.end(); SI != SE; ++SI) {
-    ScopStmt *Stmt = *SI;
-    for (auto MI = Stmt->memacc_begin(), ME = Stmt->memacc_end(); MI != ME;
-         ++MI) {
-      getAllReductionAccesses((*MI)->getBaseAddr(), RAS);
-      for (auto *RA : RAS)
-        RA->addMemoryAccess(*MI, Stmt);
-      RAS.clear();
-    }
-  }
-
-  isl_union_map *PrivRAW = isl_union_map_empty(isl_space_copy(Space));
-  isl_union_map *PrivWAW = isl_union_map_empty(isl_space_copy(Space));
-  isl_union_map *PrivWAR = isl_union_map_empty(Space);
-
-  for (auto *RA : *this) {
-    RA->calculateDependences(S, AType, ReductionAccess::PRIV_DEPS);
-    PrivRAW = isl_union_map_union(
-        PrivRAW, RA->getReductionDependences(Dependences::TYPE_RAW));
-    PrivWAW = isl_union_map_union(
-        PrivWAW, RA->getReductionDependences(Dependences::TYPE_WAW));
-    PrivWAR = isl_union_map_union(
-        PrivWAR, RA->getReductionDependences(Dependences::TYPE_WAR));
-  }
-
-  *RAW = isl_union_map_union(*RAW, PrivRAW);
-  *WAW = isl_union_map_union(*WAW, PrivWAW);
-  *WAR = isl_union_map_union(*WAR, PrivWAR);
-
-  *RAW = isl_union_map_subtract(*RAW, RedRAW);
-  *WAW = isl_union_map_subtract(*WAW, RedWAW);
-  *WAR = isl_union_map_subtract(*WAR, RedWAR);
 }
-
 
 /// @}
 
@@ -378,10 +347,8 @@ void ReductionAccess::addMemoryAccess(MemoryAccess *MA, ScopStmt *Stmt) {
     Schedule = isl_union_map_empty(Space);
   }
 
-  if (!StmtIslId)
-    StmtIslId = Stmt->getDomainId();
-
   assert(Read && Write && Schedule && "Dependency representation incomplete!");
+
   isl_set *domcp = Stmt->getDomain();
   isl_map *accdom = MA->getAccessRelation();
 
@@ -449,13 +416,13 @@ static int filterPrivatizationDependences(__isl_take isl_map *Map, void *U) {
 // Filter all dependences which are partially carried by a dimens. prior to Dim
 static __isl_give isl_union_map *
 filterDimensions(__isl_take isl_union_map *UMap, unsigned Dim,
-                 __isl_keep isl_id *Id, bool ReductionDependences) {
+                 __isl_keep isl_id *Id, bool ComputeReductionDeps) {
   PayloadStruct Payload;
   isl_space *Space = isl_union_map_get_space(UMap);
   Payload.Filtered = isl_union_map_empty(Space);
   Payload.Dim = Dim;
   Payload.Id = Id;
-  auto *filterFn = ReductionDependences ? filterReductionDependences
+  auto *filterFn = ComputeReductionDeps ? filterReductionDependences
                                         : filterPrivatizationDependences;
   isl_union_map_foreach_map(UMap, filterFn, &Payload);
   isl_union_map_free(UMap);
@@ -466,7 +433,7 @@ filterDimensions(__isl_take isl_union_map *UMap, unsigned Dim,
 //       We should think about reuse (refactoring).
 void ReductionAccess::calculateDependences(Scop &S,
                                            Dependences::AnalysisType AType,
-                                           DependencyType DType) {
+                                           ReductionInfo::DependencyType DType) {
   // This function will compute the dependences caused by all (registered)
   // reduction memory accesses of this reduction access with regards to the
   // reduction loop. If this reduction will be realized, the computed
@@ -556,12 +523,23 @@ void ReductionAccess::calculateDependences(Scop &S,
   DEBUG(dbgs() << "RA: Dependences before filtering:\nRAW:" << RAW
                << "\nWAW:" << WAW << "\nWAR" << WAR << "\n");
 
-  RAW = filterDimensions(RAW, RedLoopDim, StmtIslId, DType == RED_DEPS);
-  WAW = filterDimensions(WAW, RedLoopDim, StmtIslId, DType == RED_DEPS);
-  WAR = filterDimensions(WAR, RedLoopDim, StmtIslId, DType == RED_DEPS);
+  assert(StmtIslId && "StmtId not set!");
+
+  bool ComputeReductionDeps = (DType == RED_DEPS);
+  RAW = filterDimensions(RAW, RedLoopDim, StmtIslId, ComputeReductionDeps);
+  WAW = filterDimensions(WAW, RedLoopDim, StmtIslId, ComputeReductionDeps);
+  WAR = filterDimensions(WAR, RedLoopDim, StmtIslId, ComputeReductionDeps);
 
   DEBUG(dbgs() << "RA: Dependences after filtering:\nRAW:" << RAW
                << "\nWAW:" << WAW << "\nWAR" << WAR << "\n");
+}
+
+void ReductionAccess::setStmtIslId(__isl_keep isl_id *Id) {
+  if (StmtIslId) {
+    assert(StmtIslId == Id && "Inconsistent SCoP statement Ids");
+    isl_id_free(StmtIslId);
+  }
+  StmtIslId = Id;
 }
 
 __isl_give isl_union_map *
@@ -620,7 +598,7 @@ struct NoReductionInfo : public ImmutablePass, public ReductionInfo {
   }
   void getReductionAccesses(const Instruction *,
                             ReductionAccessSet &) override {}
-  void getAllReductionAccesses(const Value *, ReductionAccessSet &) override {}
+  void getRelatedReductionAccesses(const Value *, ReductionAccessSet &) override {}
 
   iterator end() { return RAV.end(); }
   iterator begin() { return RAV.begin(); }

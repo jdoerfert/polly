@@ -40,6 +40,8 @@ using namespace llvm;
 
 namespace polly {
 
+extern bool HideReductionDeps;
+
 class Scop;
 class ScopStmt;
 class ReductionInfo;
@@ -74,12 +76,12 @@ public:
 
   Dependences();
 
-  // @brief Check if a new scattering is valid.
-  //
-  // @param NewScattering The new scatterings
-  //
-  // @return bool True if the new scattering is valid, false it it reverses
-  //              dependences.
+  /// @brief Check if a new scattering is valid.
+  ///
+  /// @param NewScattering The new scatterings
+  ///
+  /// @return bool True if the new scattering is valid, false it it reverses
+  ///              dependences.
   bool isValidScattering(StatementToIslMapTy *NewScatterings);
 
   /// @brief Check if a dimension of the Scop can be executed in parallel.
@@ -88,14 +90,13 @@ public:
   ///                   parallel.
   /// @param ParallelDimension The scattering dimension that is being executed
   ///                          in parallel.
-  /// @param IgnoreReductions Ignore dependences caused by reductions.
   /// @param RAV Vector to collect redcuction accesses which need to be ignored
+  ///            If this is a nullptr reductions are 'disabled'
   ///
   /// @return bool Returns true, if executing parallelDimension in parallel is
   ///              valid for the scattering domain subset given.
   bool isParallelDimension(__isl_take isl_set *LoopDomain,
                            unsigned ParallelDimension,
-                           bool IgnoreReductions = false,
                            ReductionAccessSet *RAS = nullptr);
 
   /// @brief Get the dependences in this Scop.
@@ -103,7 +104,9 @@ public:
   /// @param Kinds This integer defines the different kinds of dependences
   ///              that will be returned. To return more than one kind, the
   ///              different kinds are 'ored' together.
-  __isl_give isl_union_map *getDependences(int Kinds);
+  /// @param InclRedDeps Indicate if reduction dependences should be included
+  __isl_give isl_union_map *getDependences(int Kinds,
+                                           bool InclRedDeps = false);
 
   /// @brief Report if valid dependences are available.
   bool hasValidDependences();
@@ -116,12 +119,12 @@ public:
 private:
 
   /// @brief The reduction info analysis available
-  ReductionInfo *RI;
+  ReductionInfo *RI = nullptr;
 
   // The different kinds of dependences we calculate.
-  isl_union_map *RAW;
-  isl_union_map *WAR;
-  isl_union_map *WAW;
+  isl_union_map *RAW = nullptr, *ORIG_RAW = nullptr;
+  isl_union_map *WAR = nullptr, *ORIG_WAR = nullptr;
+  isl_union_map *WAW = nullptr, *ORIG_WAW = nullptr;
 
   /// @brief Collect information about the SCoP.
   void collectInfo(Scop &S, isl_union_map **Read, isl_union_map **Write,

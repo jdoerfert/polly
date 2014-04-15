@@ -70,10 +70,13 @@ class MemoryAccess;
 /// loops).
 ///
 class ReductionAccess {
-  /// @brief Types of dependences we can compute
-  enum DependencyType { RED_DEPS, PRIV_DEPS };
-
 public:
+  /// @brief Types of dependences we can compute
+  enum DependencyType {
+    RED_DEPS, ///< Reduction dependences
+    PRIV_DEPS ///< Privatization dependences
+  };
+
   /// @brief Reduction access type
   ///
   /// Commutative and associative binary operations suitable for reductions
@@ -138,7 +141,7 @@ public:
 
   /// @brief Add the effects of the memory access @p MA in statement @p Stmt
   ///
-  /// @param MA   The memory access which might interact with the reduction access
+  /// @param MA The memory access which might interact with the reduction access
   /// @param Stmt The statement containting the memory access @p MA
   void addMemoryAccess(MemoryAccess *MA, ScopStmt *Stmt);
 
@@ -146,6 +149,7 @@ public:
   ///
   /// @param S The currently processed SCoP
   /// @param AType The kind of dependency analysis to use
+  /// @param DType The kind of dependences to compute (reduction/privatizati.)
   ///
   /// @note This will use all memory accesses added so far and no more are
   ///       allowed to be added afterwards.
@@ -158,6 +162,9 @@ public:
   ///              that will be returned. To return more than one kind, the
   ///              different kinds are 'ored' together.
   __isl_give isl_union_map *getReductionDependences(int kinds) const;
+
+  /// @brief Set the SCoP statement isl identifier (currently only one!)
+  void setStmtIslId(__isl_keep isl_id *Id);
 
   /// @brief Test if this reduction access is realized
   bool isRealized() const { return IsRealized; }
@@ -302,23 +309,28 @@ public:
   using ReductionAccessVec = llvm::SmallVector<ReductionAccess *, 4>;
   using ReductionAccessSet = llvm::SmallPtrSet<ReductionAccess *, 4>;
 
-  /// @brief  Iterators for a reduction access set
+  /// @brief Iterators for a reduction access set
   using iterator = ReductionAccessVec::iterator;
   using const_iterator = ReductionAccessVec::const_iterator;
+
+  /// @brief Simple rename
+  using DependencyType = ReductionAccess::DependencyType;
 
   /// @brief Calculate the dependences of this reduction access
   ///
   /// @param S The currently processed SCoP
   /// @param AType The kind of dependency analysis to use
+  /// @param DType The kind of dependences to compute  (reduction/privatizati.)
   /// @param RAW The read after write dependences
   /// @param WAW The write after write dependences
   /// @param WAR The write after read dependences
   ///
+  /// @return The calculated dependences added to @p RAW, @p WAW and @p WAR
   /// @note This will use all memory accesses added so far and no more are
   ///       allowed to be added afterwards.
-  void calculateDependences(Scop &S, enum Dependences::AnalysisType AType,
-                            isl_union_map **RAW, isl_union_map **WAW,
-                            isl_union_map **WAR);
+  void calculateDependences(Scop &S, Dependences::AnalysisType AType,
+                                     DependencyType DType, isl_union_map **RAW,
+                                     isl_union_map **WAW, isl_union_map **WAR);
 
   /// @brief Find a maximal reduction access for the given @p BaseInst
   ///
@@ -352,14 +364,16 @@ public:
   ///
   /// @returns The found reduction accesses are inserted into @p RedAccSet
   ///
-  virtual void getAllReductionAccesses(const llvm::Value *BaseValue,
-                                       ReductionAccessSet &RedAccSet);
+  virtual void getRelatedReductionAccesses(const llvm::Value *BaseValue,
+                                           ReductionAccessSet &RedAccSet);
   /// @}
 
   /// @name Iterator access to all (cached) reduction accesses
   ///
-  /// @note Depending on the actual reduction info used you might need to create
-  ///       the reduction accesses first (so they are cached) in order to access
+  /// @note Depending on the actual reduction info used you might need to
+  /// create
+  ///       the reduction accesses first (so they are cached) in order to
+  ///       access
   ///       them with the iterator interface.
   ///
   /// @{
@@ -368,7 +382,6 @@ public:
   virtual const_iterator end() const;
   virtual const_iterator begin() const;
   /// @}
-
 };
 
 llvm::Pass *createNoReductionInfoPass();

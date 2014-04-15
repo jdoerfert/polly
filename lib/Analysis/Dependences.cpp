@@ -42,6 +42,10 @@
 using namespace polly;
 using namespace llvm;
 
+namespace polly {
+bool HideReductionDeps;
+}
+
 static cl::opt<int>
 OptComputeOut("polly-dependences-computeout",
               cl::desc("Bound the dependence analysis by a maximal amount of "
@@ -65,13 +69,10 @@ static cl::opt<enum Dependences::AnalysisType> OptAnalysisType(
     cl::Hidden, cl::init(Dependences::VALUE_BASED_ANALYSIS), cl::ZeroOrMore,
     cl::cat(PollyCategory));
 
-namespace polly {
-bool HideReductionDependences;
-}
 static cl::opt<bool, true>
-HideReductionDeps("polly-hide-reduction-dependences",
-                  cl::desc("Hide reduction dependences from the scheduler"),
-                  cl::location(polly::HideReductionDependences),
+HideReductionDependences("polly-hide-reduction-dependences",
+                  cl::desc("Hide reduction dependences during scheduling"),
+                  cl::location(polly::HideReductionDeps),
                   cl::init(false), cl::ZeroOrMore, cl::cat(PollyCategory));
 
 //===----------------------------------------------------------------------===//
@@ -92,7 +93,6 @@ void Dependences::collectInfo(Scop &S, isl_union_map **Read,
     for (ScopStmt::memacc_iterator MI = Stmt->memacc_begin(),
                                    ME = Stmt->memacc_end();
          MI != ME; ++MI) {
-
 
       isl_set *domcp = Stmt->getDomain();
       isl_map *accdom = (*MI)->getAccessRelation();
@@ -170,17 +170,45 @@ void Dependences::calculateDependences(Scop &S) {
   isl_union_map_free(Read);
   isl_union_map_free(Schedule);
 
-  RI->calculateDependences(S, OptAnalysisType, &RAW, &WAW, &WAR);
-
   RAW = isl_union_map_coalesce(RAW);
   WAW = isl_union_map_coalesce(WAW);
   WAR = isl_union_map_coalesce(WAR);
+
+  if (HideReductionDeps) {
+    ORIG_RAW = isl_union_map_copy(RAW);
+    ORIG_WAW = isl_union_map_copy(WAW);
+    ORIG_WAR = isl_union_map_copy(WAR);
+
+    isl_union_map *PrivRAW = nullptr, *PrivWAW = nullptr, *PrivWAR = nullptr;
+    RI->calculateDependences(S, OptAnalysisType, ReductionAccess::PRIV_DEPS,
+                             &PrivRAW, &PrivWAW, &PrivWAR);
+
+    RAW = isl_union_map_union(RAW, PrivRAW);
+    WAW = isl_union_map_union(WAW, PrivWAW);
+    WAR = isl_union_map_union(WAR, PrivWAR);
+
+    isl_union_map *RedRAW = nullptr, *RedWAW = nullptr, *RedWAR = nullptr;
+    RI->calculateDependences(S, OptAnalysisType, ReductionAccess::RED_DEPS,
+                             &RedRAW, &RedWAW, &RedWAR);
+
+    RAW = isl_union_map_subtract(RAW, RedRAW);
+    WAW = isl_union_map_subtract(WAW, RedWAW);
+    WAR = isl_union_map_subtract(WAR, RedWAR);
+
+    RAW = isl_union_map_coalesce(RAW);
+    WAW = isl_union_map_coalesce(WAW);
+    WAR = isl_union_map_coalesce(WAR);
+  }
 
   if (isl_ctx_last_error(S.getIslCtx()) == isl_error_quota) {
     isl_union_map_free(RAW);
     isl_union_map_free(WAW);
     isl_union_map_free(WAR);
     RAW = WAW = WAR = nullptr;
+    isl_union_map_free(ORIG_RAW);
+    isl_union_map_free(ORIG_WAW);
+    isl_union_map_free(ORIG_WAR);
+    ORIG_RAW = ORIG_WAW = ORIG_WAR = nullptr;
     isl_ctx_reset_error(S.getIslCtx());
   }
   isl_options_set_on_error(S.getIslCtx(), ISL_ON_ERROR_ABORT);
@@ -298,7 +326,6 @@ static bool isDependencyFree(__isl_keep isl_union_map *Deps,
 
 bool Dependences::isParallelDimension(__isl_take isl_set *ScheduleSubset,
                                       unsigned ParallelDim,
-                                      bool IgnoreReductions,
                                       ReductionAccessSet *RAS) {
   // To check if a loop is parallel, we perform the following steps:
   //
@@ -315,11 +342,12 @@ bool Dependences::isParallelDimension(__isl_take isl_set *ScheduleSubset,
     return false;
   }
 
-  Deps = getDependences(TYPE_ALL);
+  Deps = getDependences(TYPE_ALL, true);
 
   for (ReductionAccess *RA : *RI)
     if (RA->isRealized())
-      Deps = isl_union_map_subtract(Deps, RA->getReductionDependences(TYPE_ALL));
+      Deps =
+          isl_union_map_subtract(Deps, RA->getReductionDependences(TYPE_ALL));
 
   if (isl_union_map_is_empty(Deps)) {
     isl_union_map_free(Deps);
@@ -360,23 +388,17 @@ bool Dependences::isParallelDimension(__isl_take isl_set *ScheduleSubset,
   }
 
   DEBUG(dbgs() << "DP: Reduction dependences will "
-               << (IgnoreReductions ? "" : "not ") << " be ignored\n");
+               << (RAS != nullptr ? "" : "not ") << " be ignored\n");
 
-  if (!IgnoreReductions) {
+  if (RAS == nullptr) {
     isl_union_map_free(Deps);
     isl_union_map_free(Schedule);
     isl_set_free(ScheduleSubset);
     return false;
   }
 
-  assert(RAS && "Cannot ignore reductions without collection realized one");
-
   DEBUG(dbgs() << "DP: Original dependences: " << Deps << "\n");
-  isl_union_map *RelaxedDeps = isl_union_map_copy(Deps);
-  for (ReductionAccess *RA : *RI)
-    RelaxedDeps = isl_union_map_subtract(RelaxedDeps,
-                                         RA->getReductionDependences(TYPE_ALL));
-
+  isl_union_map *RelaxedDeps = getDependences(TYPE_ALL, false);
   DEBUG(dbgs() << "DP: Relaxed dependences: " << RelaxedDeps << "\n");
 
   IsParallel =
@@ -441,12 +463,11 @@ bool Dependences::isParallelDimension(__isl_take isl_set *ScheduleSubset,
     if (RealizableReductionSet)
       ReductionAccessRealizableSets.emplace(std::move(RS));
 
-    DEBUG(
-      dbgs() << "DP: "<<(RealizableReductionSet ? "R" : "Not r")<<"ealizable reduction set:\n";
-      for (auto *RA : RS)
-        RA->print(dbgs());
-      dbgs() << "\n\n";
-    );
+    DEBUG(dbgs() << "DP: " << (RealizableReductionSet ? "R" : "Not r")
+                 << "ealizable reduction set:\n";
+          for (auto *RA
+               : RS) RA->print(dbgs());
+          dbgs() << "\n\n";);
   }
 
   isl_union_map_free(Deps);
@@ -457,8 +478,10 @@ bool Dependences::isParallelDimension(__isl_take isl_set *ScheduleSubset,
 }
 
 void Dependences::printScop(raw_ostream &OS) const {
-  OS << "\tRAW dependences:\n\t\t";
-  if (RAW)
+  if (ORIG_RAW && ORIG_WAW && ORIG_WAR)
+    OS << "\tReduction dependency free:\n";
+
+  OS << "\tRAW dependences:\n\t\t"; if (RAW)
     OS << RAW << "\n";
   else
     OS << "n/a\n";
@@ -474,36 +497,67 @@ void Dependences::printScop(raw_ostream &OS) const {
     OS << WAW << "\n";
   else
     OS << "n/a\n";
+
+  if (!ORIG_RAW || !ORIG_WAW || !ORIG_WAR)
+    return;
+
+  OS << "\tReduction dependency included:\n";
+
+  OS << "\tRAW dependences:\n\t\t";
+  if (ORIG_RAW)
+    OS << ORIG_RAW << "\n";
+  else
+    OS << "n/a\n";
+
+  OS << "\tWAR dependences:\n\t\t";
+  if (ORIG_WAR)
+    OS << ORIG_WAR << "\n";
+  else
+    OS << "n/a\n";
+
+  OS << "\tWAW dependences:\n\t\t";
+  if (ORIG_WAW)
+    OS << ORIG_WAW << "\n";
+  else
+    OS << "n/a\n";
 }
 
 void Dependences::releaseMemory() {
   isl_union_map_free(RAW);
   isl_union_map_free(WAR);
   isl_union_map_free(WAW);
-
   RAW = WAR = WAW = nullptr;
+  isl_union_map_free(ORIG_RAW);
+  isl_union_map_free(ORIG_WAW);
+  isl_union_map_free(ORIG_WAR);
+  ORIG_RAW = ORIG_WAW = ORIG_WAR = nullptr;
 }
 
-isl_union_map *Dependences::getDependences(int Kinds) {
+isl_union_map *Dependences::getDependences(int Kinds, bool InclRedDeps) {
   assert(hasValidDependences() && "No valid dependences available");
 
-  isl_space *Space = isl_union_map_get_space(RAW);
+  isl_union_map *LOC_RAW, *LOC_WAW, *LOC_WAR;
+  if (InclRedDeps && ORIG_RAW) {
+    LOC_RAW = ORIG_RAW;
+    LOC_WAW = ORIG_WAW;
+    LOC_WAR = ORIG_WAR;
+  } else {
+    LOC_RAW = RAW;
+    LOC_WAW = WAW;
+    LOC_WAR = WAR;
+  }
+
+  isl_space *Space = isl_union_map_get_space(LOC_RAW);
   isl_union_map *Deps = isl_union_map_empty(Space);
 
   if (Kinds & TYPE_RAW)
-    Deps = isl_union_map_union(Deps, isl_union_map_copy(RAW));
+    Deps = isl_union_map_union(Deps, isl_union_map_copy(LOC_RAW));
 
   if (Kinds & TYPE_WAR)
-    Deps = isl_union_map_union(Deps, isl_union_map_copy(WAR));
+    Deps = isl_union_map_union(Deps, isl_union_map_copy(LOC_WAR));
 
   if (Kinds & TYPE_WAW)
-    Deps = isl_union_map_union(Deps, isl_union_map_copy(WAW));
-
-  if (HideReductionDependences) {
-    for (ReductionAccess *RA : *RI) {
-      Deps = isl_union_map_union(Deps, RA->getReductionDependences(Kinds));
-    }
-  }
+    Deps = isl_union_map_union(Deps, isl_union_map_copy(LOC_WAW));
 
   Deps = isl_union_map_coalesce(Deps);
   Deps = isl_union_map_detect_equalities(Deps);

@@ -43,12 +43,6 @@
 using namespace llvm;
 using namespace polly;
 
-static cl::opt<bool>
-CollectReductions("polly-collect-reductions",
-                  cl::desc("Collect all reductions (default: demand driven)"),
-                  cl::Hidden, cl::init(true), cl::ZeroOrMore,
-                  cl::cat(PollyCategory));
-
 STATISTIC(INVALID_LOOP, "Number of loops invalidating reduction access");
 STATISTIC(INVALID_BINOP, "Number of BinOps invalidating reduction access");
 STATISTIC(INVALID_PLACING, "Number of placings invalidating reduction access");
@@ -94,6 +88,9 @@ struct BasicReductionInfo : public ScopPass, public ReductionInfo {
   /// Container for all found reduction accesses (deterministic)
   ReductionAccessVec RAV;
 
+  /// Flag to indicate all possible reductions were already tested
+  bool ServeOnlyCached = false;
+
   /// Simple iterator
   using RMapI = ReductionAccessesMapT::const_iterator;
 
@@ -115,21 +112,19 @@ struct BasicReductionInfo : public ScopPass, public ReductionInfo {
     AA = &getAnalysis<AliasAnalysis>();
     SE = &getAnalysis<ScalarEvolution>();
 
-    // Test if all contained reductions should be collected (demand driven
-    // otherwise)
-    if (!CollectReductions)
-      return false;
-
     ReductionAccessSet RAS;
     for (auto *BI : S) {
       for (auto *MI = BI->memacc_begin(), *ME = BI->memacc_end(); MI != ME;
            ++MI) {
         auto *Inst = (*MI)->getAccessInstruction();
         getReductionAccesses(Inst, RAS);
+        for (auto *RA : RAS)
+          RA->setStmtIslId((*MI)->getStatement()->getDomainId());
         RAS.clear();
       }
     }
 
+    ServeOnlyCached = true;
     return false;
   }
 
@@ -230,6 +225,11 @@ struct BasicReductionInfo : public ScopPass, public ReductionInfo {
     if (I != ReductionAccesses.end()) {
       BRI_DEBUG("Reduction access was cached!");
       return I->second;
+    }
+
+    if (ServeOnlyCached) {
+      BRI_DEBUG("No cached reduction access, but only those are served!");
+      return nullptr;
     }
 
     BRI_DEBUG("No cached reduction access, try to create one:");
@@ -406,14 +406,11 @@ struct BasicReductionInfo : public ScopPass, public ReductionInfo {
         continue;
 
       RedAccSet.insert(RA);
-
-      if (!CollectReductions)
-        break;
     }
   }
 
-  void getAllReductionAccesses(const Value *BaseValue,
-                               ReductionAccessSet &RedAccSet) override {
+  void getRelatedReductionAccesses(const Value *BaseValue,
+                                   ReductionAccessSet &RedAccSet) override {
     for (auto *RA : *this)
       if (RA->getBaseValue() == BaseValue)
         RedAccSet.insert(RA);
