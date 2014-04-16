@@ -274,11 +274,13 @@ bool Dependences::isValidScattering(StatementToIslMapTy *NewScattering) {
   return IsValid;
 }
 
-isl_union_map *getCombinedScheduleForSpace(Scop *scop, unsigned dimLevel) {
-  isl_space *Space = scop->getParamSpace();
+isl_union_map *Dependences::getCombinedScheduleForSpace(
+                                                  unsigned dimLevel) {
+  Scop &S = getCurScop();
+  isl_space *Space = S.getParamSpace();
   isl_union_map *schedule = isl_union_map_empty(Space);
 
-  for (Scop::iterator SI = scop->begin(), SE = scop->end(); SI != SE; ++SI) {
+  for (Scop::iterator SI = S.begin(), SE = S.end(); SI != SE; ++SI) {
     ScopStmt *Stmt = *SI;
     unsigned remainingDimensions = Stmt->getNumScattering() - dimLevel;
     isl_map *Scattering = isl_map_project_out(
@@ -335,7 +337,6 @@ bool Dependences::isParallelDimension(__isl_take isl_set *ScheduleSubset,
   // o Check if one of the distances is invalid in presence of parallelism.
 
   isl_union_map *Deps, *Schedule;
-  Scop *S = &getCurScop();
 
   if (!hasValidDependences()) {
     isl_set_free(ScheduleSubset);
@@ -357,7 +358,7 @@ bool Dependences::isParallelDimension(__isl_take isl_set *ScheduleSubset,
     return true;
   }
 
-  Schedule = getCombinedScheduleForSpace(S, ParallelDim);
+  Schedule = getCombinedScheduleForSpace(ParallelDim);
   DEBUG(dbgs() << "DP: Schedule: " << Schedule << "\n");
 
   Deps = isl_union_map_apply_range(Deps, isl_union_map_copy(Schedule));
@@ -469,6 +470,9 @@ bool Dependences::isParallelDimension(__isl_take isl_set *ScheduleSubset,
                : RS) RA->print(dbgs());
           dbgs() << "\n\n";);
   }
+
+  for (auto *RA : *ReductionAccessRealizableSets.begin())
+    RAS->insert(RA);
 
   isl_union_map_free(Deps);
   isl_union_map_free(Schedule);

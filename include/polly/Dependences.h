@@ -111,6 +111,9 @@ public:
   /// @brief Report if valid dependences are available.
   bool hasValidDependences();
 
+  /// @brief TODO
+  isl_union_map *getCombinedScheduleForSpace(unsigned dimLevel);
+
   bool runOnScop(Scop &S);
   void printScop(raw_ostream &OS) const;
   virtual void releaseMemory();

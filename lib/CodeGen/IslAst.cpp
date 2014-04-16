@@ -163,6 +163,11 @@ static bool astScheduleDimIsParallel(__isl_keep isl_ast_build *Build,
 
   Schedule = isl_ast_build_get_schedule(Build);
   ScheduleSpace = isl_ast_build_get_schedule_space(Build);
+  errs() << "Schedule: ";
+  isl_union_map_dump(Schedule);
+  errs() << "\nScheduleSpace: ";
+  isl_space_dump(ScheduleSpace);
+  errs() << "\n\n";
 
   Dimension = isl_space_dim(ScheduleSpace, isl_dim_out) - 1;
 

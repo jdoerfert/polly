@@ -29,6 +29,7 @@
 #include "polly/Options.h"
 #include "polly/ScopInfo.h"
 #include "polly/TempScopInfo.h"
+#include "polly/ReductionInfo.h"
 #include "polly/CodeGen/CodeGeneration.h"
 #include "polly/CodeGen/BlockGenerators.h"
 #include "polly/CodeGen/LoopGenerators.h"
@@ -876,7 +877,26 @@ bool ClastStmtCodeGen::isParallelFor(const clast_for *f) {
   Dependences &D = P->getAnalysis<Dependences>();
 
   Dependences::ReductionAccessSet RAS;
-  return D.isParallelDimension(Domain, isl_set_n_dim(Domain), &RAS);
+  bool IsParallel =
+      D.isParallelDimension(isl_set_copy(Domain), isl_set_n_dim(Domain), &RAS);
+
+  if (!IsParallel) {
+    isl_set_free(Domain);
+    return false;
+  }
+
+  unsigned Dim = isl_set_n_dim(Domain);
+  for (auto *RA : RAS) {
+    errs() << *RA->getBaseValue() << " in "
+           << RA->getReductionLoop()->getLoopDepth() << "("
+           << RA->getReductionLoopDim(*S) << ")\n#ReductionLocations: "
+           << RA->getNumberOfReductionLocations(
+                  isl_set_copy(Domain), D.getCombinedScheduleForSpace(Dim), Dim)
+           << "\n";
+  }
+
+  isl_set_free(Domain);
+  return true;
 }
 
 void ClastStmtCodeGen::codegen(const clast_for *f) {
@@ -1041,6 +1061,7 @@ public:
 
     ClastStmtCodeGen CodeGen(&S, Builder, this);
     CloogInfo &C = getAnalysis<CloogInfo>();
+    C.pprint(errs());
     CodeGen.codegen(C.getClast());
 
     ParallelLoops.insert(ParallelLoops.begin(),

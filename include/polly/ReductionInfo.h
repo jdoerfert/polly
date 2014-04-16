@@ -7,8 +7,9 @@
 //
 //===----------------------------------------------------------------------===//
 //
-// Define an abstract reduction detection analysis interface and the reduction
-// (access) itself. Descriptions are inlined.
+// An abstract reduction detection analysis interface and the reduction accesses
+//
+// Descriptions are inlined.
 //
 //===----------------------------------------------------------------------===//
 
@@ -63,11 +64,28 @@ class MemoryAccess;
 ///   1) The reduction properties (listed above) hold
 ///   2) The reduction base value (memory address/register) is not changed
 ///
+/// The following code gives an example:
+///
+/// void f(int *column_sums, int *matrices) {
+///   // assume N matrices and we aggregate the columns
+///   for (i = 0; i < N; i++)                     // Loop L1
+///     for (j = 0; j < N; j++)                   // Loop L2
+///       for (k = 0; k < N; k++)                 // Loop L3
+///         column_sums[j] += matrices[i][j][k];
+/// }
+///
+/// L1 and L3 are reduction loops, while L2 is not. However there is a
+/// difference between L1 and L3 with regards to the identity schedule (e.g.,
+/// a schedule which swaps L1 and L3 would also swap the properties descriebed
+/// here). The number of privatization locations (int variables) needed to parallelize
+/// L1 is N while it is only 1 for L3.
+///
 /// While a reduction can basically be valid in multiple loops we allow only
 /// one 'reduction-loop' per reduction access. This is motivated by the fact
 /// that in surrounding loops a reduction could consist of more instructions
 /// then at a deeper level (or there might be problems like aliasing in outer
-/// loops).
+/// loops). However, if there are multiple reduction loops, the reduction info
+/// implementation is free to report them as multiple reduction accesses.
 ///
 class ReductionAccess {
 public:
@@ -100,38 +118,6 @@ public:
 
   /// @brief Get the reduction loop of this reduction access
   const llvm::Loop *getReductionLoop() const { return ReductionLoop; }
-
-  /// @brief Construct an identity element for this reduction access
-  ///
-  /// @param Ty The type of the returned element
-  ///
-  /// @returns The identity element of type @p Ty wrt the reduction type
-  llvm::Value *getIdentityElement(llvm::Type *Ty) const;
-
-  /// @brief Create a binary operation matching the reduction access type
-  ///
-  /// @param S1 The first operand
-  /// @param S2 The second operand
-  /// @param Builder The instruction builder
-  ///
-  /// @returns Value created with @p Builder repr.: @p S1 <RedBinOp> @p S2
-  llvm::Value *getBinaryOperation(llvm::Value *S1, llvm::Value *S2,
-                                  llvm::IRBuilder<> &Builder) const;
-
-  /// @brief Create an atomic read-modify-write binary 'operation'
-  ///
-  /// @param Val     The value operand
-  /// @param Ptr     The pointer operand
-  /// @param Builder The instruction builder
-  /// @param Pass    The current pass to update available analyses
-  ///
-  /// Creates Instruction(s) using @p Builder to compute:
-  ///   *@p ptr = *@p ptr <RedBinOp> @p Val
-  /// atomically.
-  /// In case the IR does not offer an intrinsic to compute this atomically,
-  /// (e.g., on floating point values) a compare-exchange loop will be used.
-  void createAtomicBinOp(llvm::Value *Val, llvm::Value *Ptr,
-                         llvm::IRBuilder<> &Builder, llvm::Pass *P = 0) const;
 
   /// @name Dependency interface
   /// @{
@@ -167,13 +153,66 @@ public:
   void setStmtIslId(__isl_keep isl_id *Id);
 
   /// @brief Test if this reduction access is realized
+  ///
+  /// @note A realized reduction access does not impose any dependences, thus
+  ///       we can *safely* ignore the reduction dependences.
   bool isRealized() const { return IsRealized; }
 
-  /// @brief Set this reduction access to realized
+  /// @brief Mark this reduction access as realized
   void setRealized() {
     assert(!IsRealized && "Realized reduction access twice");
     IsRealized = true;
   }
+
+  ///  @}
+
+  /// @name Code generation interface
+  /// @{
+
+  /// @brief Construct an identity element for this reduction access
+  ///
+  /// @param Ty The type of the returned element
+  ///
+  /// @returns The identity element of type @p Ty wrt the reduction type
+  llvm::Value *getIdentityElement(llvm::Type *Ty) const;
+
+  /// @brief Create a binary operation matching the reduction access type
+  ///
+  /// @param S1 The first operand
+  /// @param S2 The second operand
+  /// @param Builder The instruction builder
+  ///
+  /// @returns Value created with @p Builder repr.: @p S1 <RedBinOp> @p S2
+  llvm::Value *getBinaryOperation(llvm::Value *S1, llvm::Value *S2,
+                                  llvm::IRBuilder<> &Builder) const;
+
+  /// @brief Create an atomic read-modify-write binary 'operation'
+  ///
+  /// @param Val     The value operand
+  /// @param Ptr     The pointer operand
+  /// @param Builder The instruction builder
+  /// @param Pass    The current pass to update available analyses
+  ///
+  /// Creates Instruction(s) using @p Builder to compute:
+  ///   *@p ptr = *@p ptr <RedBinOp> @p Val
+  /// atomically.
+  /// In case the IR does not offer an intrinsic to compute this atomically,
+  /// (e.g., on floating point values) a compare-exchange loop will be used.
+  void createAtomicBinOp(llvm::Value *Val, llvm::Value *Ptr,
+                         llvm::IRBuilder<> &Builder, llvm::Pass *P = 0) const;
+
+
+  /// @brief Compute the number of reduction locations needed for this access
+  ///
+  /// @param Domain    The subset of the scattering space that is TODO
+  /// @param Schedule TODO
+  /// @param Dimension The scattering dimension ... TODO
+  ///
+  /// @return The number of reduction locations or -1 if it is not an integer or
+  ///         not computable
+  int getNumberOfReductionLocations(__isl_take isl_set *Domain,
+                                    __isl_take isl_union_map *Schedule,
+                                    unsigned Dimension) const;
 
   ///  @}
 
@@ -227,7 +266,7 @@ private:
 
   /// @brief A representation of the memory accesses of this reduction
   isl_union_map *Read = nullptr, *Write = nullptr, *MayWrite = nullptr,
-                *Schedule = nullptr;
+                *Schedule = nullptr, *Accesses = nullptr;
 
   /// Ensure only ReductionInfo subclasses create reduction accesses
   friend class ReductionInfo;

@@ -17,6 +17,7 @@
 #include "polly/Options.h"
 #include "polly/ScopInfo.h"
 #include "polly/ScopPass.h"
+#include "polly/CodeGen/CodeGeneration.h"
 #include "polly/Support/GICHelper.h"
 
 #include "llvm/Pass.h"
@@ -206,6 +207,7 @@ ReductionAccess::~ReductionAccess() {
   isl_union_map_free(Write);
   isl_union_map_free(MayWrite);
   isl_union_map_free(Schedule);
+  isl_union_map_free(Accesses);
 }
 
 Value *ReductionAccess::getBinaryOperation(Value *S1, Value *S2,
@@ -336,6 +338,21 @@ void ReductionAccess::createAtomicBinOp(Value *Val, Value *Ptr,
   Builder.SetInsertPoint(PostLoopBB);
 }
 
+int ReductionAccess::getNumberOfReductionLocations(
+    __isl_take isl_set *Domain, __isl_take isl_union_map *Schedule,
+    unsigned Dimension) const {
+  for (unsigned i = 0; i < Dimension - 1; i++)
+    Domain = isl_set_fix_si(Domain, isl_dim_set, i, 0);
+  auto *ACC = isl_union_map_apply_domain(isl_union_map_copy(Accesses), isl_union_map_copy(Schedule));
+  auto *ADD = isl_map_from_union_map(ACC);
+  ADD = isl_map_intersect_domain(ADD, isl_set_copy(Domain));
+  ADD = isl_map_project_out(ADD, isl_dim_in, 0, isl_map_n_in(ADD));
+  isl_set *D = isl_map_range(ADD);
+  D = isl_set_reset_tuple_id(D);
+  int NumIterations = getNumberOfIterations(D);
+  return NumIterations == -1 ? -1 : NumIterations + 1;
+}
+
 void ReductionAccess::addMemoryAccess(MemoryAccess *MA, ScopStmt *Stmt) {
   if (!Read) {
     assert(!Write && !Schedule &&
@@ -464,6 +481,13 @@ void ReductionAccess::calculateDependences(Scop &S,
   Read = isl_union_map_coalesce(Read);
   Write = isl_union_map_coalesce(Write);
   MayWrite = isl_union_map_coalesce(MayWrite);
+
+  if (!Accesses && DType == ReductionAccess::RED_DEPS) {
+    Accesses = isl_union_map_copy(Read);
+    Accesses = isl_union_map_union(Accesses, isl_union_map_copy(Write));
+    Accesses = isl_union_map_union(Accesses, isl_union_map_copy(MayWrite));
+    Accesses = isl_union_map_coalesce(Accesses);
+  }
 
   if (RAW) {
     isl_union_map_free(RAW);

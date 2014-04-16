@@ -2,9 +2,9 @@
 ;
 ; void f(int *__restrict__ S, int *__restrict__ B, int *__restrict__ sum) {
 ;   int i, j, k;
-;   for (i = 0; i < 100; i++) {
-;     for (j = 0; j < 100; j++) {
-;       for (k = 0; k < 100; k++) {
+;   for (i = 0; i < 128; i++) {
+;     for (j = 0; j < 256; j++) {
+;       for (k = 0; k < 512; k++) {
 ;         S[j] += B[i + j + k];
 ;         sum[i] += B[i];
 ;       }
@@ -49,17 +49,17 @@ for.body6:                                        ; preds = %for.cond4.preheader
   %add15 = add nsw i32 %tmp13, %tmp12
   store i32 %add15, i32* %arrayidx14, align 4
   %2 = add nuw nsw i64 %indvars.iv1, 1
-  %exitcond4 = icmp eq i64 %2, 100
+  %exitcond4 = icmp eq i64 %2, 512
   br i1 %exitcond4, label %for.inc16, label %for.body6
 
 for.inc16:                                        ; preds = %for.body6
   %3 = add nuw nsw i64 %indvars.iv22, 1
-  %exitcond = icmp eq i64 %3, 100
+  %exitcond = icmp eq i64 %3, 256
   br i1 %exitcond, label %for.inc19, label %for.cond4.preheader
 
 for.inc19:                                        ; preds = %for.inc16
   %4 = add nuw nsw i64 %indvars.iv63, 1
-  %exitcond5 = icmp eq i64 %4, 100
+  %exitcond5 = icmp eq i64 %4, 128
   br i1 %exitcond5, label %for.end21, label %for.cond1.preheader
 
 for.end21:                                        ; preds = %for.inc19
