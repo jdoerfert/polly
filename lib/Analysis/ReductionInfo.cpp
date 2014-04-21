@@ -338,19 +338,23 @@ void ReductionAccess::createAtomicBinOp(Value *Val, Value *Ptr,
   Builder.SetInsertPoint(PostLoopBB);
 }
 
-int ReductionAccess::getNumberOfReductionLocations(
-    __isl_take isl_set *Domain, __isl_take isl_union_map *Schedule,
-    unsigned Dimension) const {
+int ReductionAccess::getNumberOfReductionLocations(isl_set *Domain,
+                                                   isl_union_map *Schedule,
+                                                   unsigned Dimension) const {
   for (unsigned i = 0; i < Dimension - 1; i++)
     Domain = isl_set_fix_si(Domain, isl_dim_set, i, 0);
-  auto *ACC = isl_union_map_apply_domain(isl_union_map_copy(Accesses), isl_union_map_copy(Schedule));
-  auto *ADD = isl_map_from_union_map(ACC);
-  ADD = isl_map_intersect_domain(ADD, isl_set_copy(Domain));
-  ADD = isl_map_project_out(ADD, isl_dim_in, 0, isl_map_n_in(ADD));
-  isl_set *D = isl_map_range(ADD);
-  D = isl_set_reset_tuple_id(D);
-  int NumIterations = getNumberOfIterations(D);
+  isl_map *RemAcc = isl_map_from_union_map(
+      isl_union_map_apply_domain(isl_union_map_copy(Accesses), Schedule));
+  RemAcc = isl_map_intersect_domain(RemAcc, Domain);
+  RemAcc = isl_map_project_out(RemAcc, isl_dim_in, 0, isl_map_n_in(RemAcc));
+  isl_set *MemLocs = isl_map_range(RemAcc);
+  MemLocs = isl_set_reset_tuple_id(MemLocs);
+  int NumIterations = getNumberOfIterations(MemLocs);
   return NumIterations == -1 ? -1 : NumIterations + 1;
+}
+
+isl_union_map *ReductionAccess::getAccessedLocations() const {
+  return isl_union_map_copy(Accesses);
 }
 
 void ReductionAccess::addMemoryAccess(MemoryAccess *MA, ScopStmt *Stmt) {

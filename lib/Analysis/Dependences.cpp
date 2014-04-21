@@ -303,6 +303,10 @@ static bool isDependencyFree(__isl_keep isl_union_map *Deps,
   Deps = isl_union_map_copy(Deps);
   Deps = isl_union_map_apply_range(Deps, isl_union_map_copy(Schedule));
   Deps = isl_union_map_apply_domain(Deps, isl_union_map_copy(Schedule));
+
+  if (isl_union_map_is_empty(Deps))
+    return true;
+
   ScheduleDeps = isl_map_from_union_map(Deps);
   ScheduleDeps =
       isl_map_intersect_domain(ScheduleDeps, isl_set_copy(ScheduleSubset));
@@ -336,7 +340,7 @@ bool Dependences::isParallelDimension(__isl_take isl_set *ScheduleSubset,
   // o Calculate distances of the dependences.
   // o Check if one of the distances is invalid in presence of parallelism.
 
-  isl_union_map *Deps, *Schedule;
+  isl_union_map *Schedule, *Deps;
 
   if (!hasValidDependences()) {
     isl_set_free(ScheduleSubset);
@@ -360,20 +364,6 @@ bool Dependences::isParallelDimension(__isl_take isl_set *ScheduleSubset,
 
   Schedule = getCombinedScheduleForSpace(ParallelDim);
   DEBUG(dbgs() << "DP: Schedule: " << Schedule << "\n");
-
-  Deps = isl_union_map_apply_range(Deps, isl_union_map_copy(Schedule));
-  Deps = isl_union_map_apply_domain(Deps, Schedule);
-
-  if (isl_union_map_is_empty(Deps)) {
-    isl_union_map_free(Deps);
-    isl_set_free(ScheduleSubset);
-    return true;
-  }
-
-  ScheduleDeps = isl_map_from_union_map(Deps);
-  ScheduleDeps =
-      isl_map_intersect_domain(ScheduleDeps, isl_set_copy(ScheduleSubset));
-  ScheduleDeps = isl_map_intersect_range(ScheduleDeps, ScheduleSubset);
 
   bool IsParallel =
       isDependencyFree(Deps, Schedule, ScheduleSubset, ParallelDim);

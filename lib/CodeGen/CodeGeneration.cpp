@@ -244,11 +244,18 @@ private:
   Scop *S;
   Pass *P;
 
+  // TODO
+  Dependences *D;
+
   // The Builder specifies the current location to code generate at.
   PollyIRBuilder &Builder;
 
   // Map the Values from the old code to their counterparts in the new code.
   ValueMapT ValueMap;
+
+  // TODO
+  using ReductionAccessSet = Dependences::ReductionAccessSet;
+  SmallVector<ReductionAccessSet, 2> RASVec;
 
   // Map the loops from the old code to expressions function of the induction
   // variables in the new code.  For example, when the code generator produces
@@ -282,6 +289,21 @@ private:
   bool parallelCodeGeneration;
 
   std::vector<std::string> parallelLoops;
+
+  ReductionAccessSet *pushReductionAccessSet() {
+    RASVec.push_back(SmallPtrSet<ReductionAccess *, 4>());
+    return &RASVec[RASVec.size()-1];
+  }
+
+  ReductionAccessSet *peekReductionAccessSet() {
+    if (RASVec.size() == 0)
+      return nullptr;
+    return &RASVec[RASVec.size()-1];
+  }
+
+  void popReductionAccessSet() {
+    RASVec.pop_back();
+  }
 
   void codegen(const clast_assignment *a);
 
@@ -359,7 +381,10 @@ private:
   int getNumberOfIterations(const clast_for *f);
 
   /// @brief Create vector instructions for this loop.
-  void codegenForVector(const clast_for *f);
+  ///
+  /// @param f The clast loop to generate code for
+  /// @param VectorWidth The vector with to use (number of iterations of f)
+  void codegenForVector(const clast_for *f, int VectorWidth);
 
   void codegen(const clast_for *f);
 
@@ -372,6 +397,14 @@ private:
   void addParameters(const CloogNames *names);
 
   IntegerType *getIntPtrTy();
+
+  // TODO
+  void createPrivatizationLocations(ReductionAccessSet &RAS,
+                                    __isl_take isl_set *Domain,
+                                    bool StackAllocated = true);
+
+  // TODO
+  void aggregatePrivatizationLocations(ReductionAccessSet &RAS, __isl_take isl_set *Domain);
 
 public:
   void codegen(const clast_root *r);
@@ -642,8 +675,19 @@ void ClastStmtCodeGen::codegenForOpenMP(const clast_for *For) {
   updateWithValueMap(VMap);
   ClastVars[For->iterator] = IV;
 
+  isl_set *Domain = isl_set_copy(isl_set_from_cloog_domain(For->domain));
+  ReductionAccessSet *RAS = peekReductionAccessSet();
+
+  if (RAS && !RAS->empty())
+    createPrivatizationLocations(*RAS, isl_set_copy(Domain));
+
   if (For->body)
     codegen(For->body);
+
+  if (RAS && !RAS->empty())
+    aggregatePrivatizationLocations(*RAS, isl_set_copy(Domain));
+
+  isl_set_free(Domain);
 
   // Restore the original values.
   ValueMap = ValueMapCopy;
@@ -835,9 +879,9 @@ int ClastStmtCodeGen::getNumberOfIterations(const clast_for *For) {
   return NumberOfIterations / mpz_get_si(For->stride) + 1;
 }
 
-void ClastStmtCodeGen::codegenForVector(const clast_for *F) {
+void ClastStmtCodeGen::codegenForVector(const clast_for *F,
+                                        int VectorWidth) {
   DEBUG(dbgs() << "Vectorizing loop '" << F->iterator << "'\n";);
-  int VectorWidth = getNumberOfIterations(F);
 
   Value *LB = ExpGen.codegen(F->LB, getIntPtrTy());
 
@@ -853,6 +897,10 @@ void ClastStmtCodeGen::codegenForVector(const clast_for *F) {
     IVS[i] = Builder.CreateAdd(IVS[i - 1], StrideValue, "p_vector_iv");
 
   isl_set *Domain = isl_set_copy(isl_set_from_cloog_domain(F->domain));
+  ReductionAccessSet *RAS = peekReductionAccessSet();
+
+  if (RAS && !RAS->empty())
+    createPrivatizationLocations(*RAS, isl_set_copy(Domain));
 
   // Add loop iv to symbols.
   ClastVars[F->iterator] = LB;
@@ -865,6 +913,9 @@ void ClastStmtCodeGen::codegenForVector(const clast_for *F) {
     Stmt = Stmt->next;
   }
 
+  if (RAS && !RAS->empty())
+    aggregatePrivatizationLocations(*RAS, isl_set_copy(Domain));
+
   // Loop is finished, so remove its iv from the live symbols.
   isl_set_free(Domain);
   ClastVars.erase(F->iterator);
@@ -874,62 +925,65 @@ bool ClastStmtCodeGen::isParallelFor(const clast_for *f) {
   isl_set *Domain = isl_set_copy(isl_set_from_cloog_domain(f->domain));
   assert(Domain && "Cannot access domain of loop");
 
-  Dependences &D = P->getAnalysis<Dependences>();
-
-  Dependences::ReductionAccessSet RAS;
-  bool IsParallel =
-      D.isParallelDimension(isl_set_copy(Domain), isl_set_n_dim(Domain), &RAS);
-
-  if (!IsParallel) {
-    isl_set_free(Domain);
-    return false;
-  }
-
-  unsigned Dim = isl_set_n_dim(Domain);
-  for (auto *RA : RAS) {
-    errs() << *RA->getBaseValue() << " in "
-           << RA->getReductionLoop()->getLoopDepth() << "("
-           << RA->getReductionLoopDim(*S) << ")\n#ReductionLocations: "
-           << RA->getNumberOfReductionLocations(
-                  isl_set_copy(Domain), D.getCombinedScheduleForSpace(Dim), Dim)
-           << "\n";
-  }
-
-  isl_set_free(Domain);
-  return true;
+  return D->isParallelDimension(Domain, isl_set_n_dim(Domain),
+                                peekReductionAccessSet());
 }
 
 void ClastStmtCodeGen::codegen(const clast_for *f) {
   bool Vector = PollyVectorizerChoice != VECTORIZER_NONE;
-  if ((Vector || OpenMP) && isParallelFor(f)) {
-    if (Vector && isInnermostLoop(f) && (-1 != getNumberOfIterations(f)) &&
-        (getNumberOfIterations(f) <= 16)) {
-      codegenForVector(f);
-      return;
-    }
 
-    if (OpenMP && !parallelCodeGeneration) {
-      parallelCodeGeneration = true;
-      parallelLoops.push_back(f->iterator);
-      codegenForOpenMP(f);
-      parallelCodeGeneration = false;
-      return;
-    }
+  bool Sequential = !(Vector || OpenMP);
+
+#ifdef GPU_CODEGEN
+  Sequential = Sequential && !GPGPU;
+#endif
+
+  if (Sequential)
+    return codegenForSequential(f);
+
+  pushReductionAccessSet();
+  bool IsParallel = isParallelFor(f);
+
+  if (!IsParallel) {
+    popReductionAccessSet();
+    return codegenForSequential(f);
+  }
+
+  int NoIterations = getNumberOfIterations(f);
+  bool Innermost = isInnermostLoop(f);
+
+  if (Vector && Innermost && (-1 != NoIterations) && (NoIterations <= 16)) {
+    codegenForVector(f, NoIterations);
+    popReductionAccessSet();
+    return;
+  }
+
+  if (parallelCodeGeneration) {
+    popReductionAccessSet();
+    return codegenForSequential(f);
+  }
+
+  if (OpenMP) {
+    parallelCodeGeneration = true;
+    parallelLoops.push_back(f->iterator);
+    codegenForOpenMP(f);
+    parallelCodeGeneration = false;
+    popReductionAccessSet();
+    return;
   }
 
 #ifdef GPU_CODEGEN
-  if (GPGPU && isParallelFor(f)) {
-    if (!parallelCodeGeneration) {
-      parallelCodeGeneration = true;
-      parallelLoops.push_back(f->iterator);
-      codegenForGPGPU(f);
-      parallelCodeGeneration = false;
-      return;
-    }
+  if (GPGPU) {
+    parallelCodeGeneration = true;
+    parallelLoops.push_back(f->iterator);
+    codegenForGPGPU(f);
+    parallelCodeGeneration = false;
+    popReductionAccessSet();
+    return;
   }
 #endif
 
-  codegenForSequential(f);
+  llvm_unreachable("Could not generate code for loop.");
 }
 
 Value *ClastStmtCodeGen::codegen(const clast_equation *eq) {
@@ -1035,8 +1089,89 @@ void ClastStmtCodeGen::codegen(const clast_root *r) {
     codegen(stmt->next);
 }
 
+void ClastStmtCodeGen::createPrivatizationLocations(ReductionAccessSet &RAS,
+                                                    isl_set *Domain,
+                                                    bool StackAllocated) {
+
+  unsigned Dim = isl_set_n_dim(Domain);
+  isl_union_map *Schedule = D->getCombinedScheduleForSpace(Dim);
+
+  auto IP = Builder.GetInsertBlock();
+  BasicBlock &EntryBB = IP->getParent()->getEntryBlock();
+
+  for (ReductionAccess *RA : RAS) {
+    auto *BaseValue = RA->getBaseValue();
+    auto *BaseType = BaseValue->getType();
+    auto *AccessedLocations = RA->getAccessedLocations();
+
+    int NoRedLocations = RA->getNumberOfReductionLocations(
+        isl_set_copy(Domain), isl_union_map_copy(Schedule), Dim);
+    assert(NoRedLocations > 0 &&
+           "Could not compute the number of reduction locations");
+
+    isl_set *RestrictedDomain = isl_set_copy(Domain);
+    for (unsigned i = 0; i < Dim - 1; i++)
+      RestrictedDomain = isl_set_fix_si(RestrictedDomain, isl_dim_set, i, 0);
+
+    // errs() << "Domain: "; isl_set_dump(Domain);
+    // errs() << "RestrictedDomain: "; isl_set_dump(RestrictedDomain);
+    // errs() << *BaseValue << " in " << RA->getReductionLoop()->getLoopDepth()
+    //       << "(" << RA->getReductionLoopDim(*S)
+    //       << ")\n#ReductionLocations: " << NoRedLocations << "\n"
+    //       << AccessedLocations << "\n"
+    //       << Schedule << "\n";
+    isl_map *RemainingAccessMap = isl_map_from_union_map(
+        isl_union_map_apply_domain(isl_union_map_copy(AccessedLocations),
+                                   isl_union_map_copy(Schedule)));
+    // errs() << "RemainingAccessMap: " << RemainingAccessMap << "\n";
+    RemainingAccessMap =
+        isl_map_intersect_domain(RemainingAccessMap, RestrictedDomain);
+    // errs() << "RemainingAccessMap: " << RemainingAccessMap << "\n\n";
+    RemainingAccessMap = isl_map_project_out(RemainingAccessMap, isl_dim_in, 0,
+                                             isl_map_n_in(RemainingAccessMap));
+    // errs() << "RemainingAccessMap: " << RemainingAccessMap << "\n\n";
+    isl_set *MemoryAccesses = isl_map_range(RemainingAccessMap);
+    // errs() << "MemAcc: "; isl_set_dump(MemoryAccesses);
+    isl_set *LexMinMemoryAccess = isl_set_lexmin(isl_set_copy(MemoryAccesses));
+    isl_set *LexMaxMemoryAccess = isl_set_lexmax(MemoryAccesses);
+    assert(isl_set_is_singleton(LexMinMemoryAccess) &&
+           isl_set_is_singleton(LexMaxMemoryAccess) &&
+           "Current codegeneration can only deal with unique min/max accesses "
+           "for privatization");
+
+    isl_point *LexMinPoint = isl_set_sample_point(LexMinMemoryAccess);
+    isl_point *LexMaxPoint = isl_set_sample_point(LexMaxMemoryAccess);
+    errs() << "LexMinPoint: "; isl_point_dump(LexMinPoint);
+    errs() << "LexMaxPoint: "; isl_point_dump(LexMaxPoint);
+
+    isl_val *V = isl_point_get_coordinate_val(LexMinPoint, isl_dim_set, 0);
+    isl_point_free(LexMinPoint);
+
+    Value *ArraySize = ConstantInt::get(Builder.getInt64Ty(), NoRedLocations);
+    Value *PrivPtr = nullptr;
+
+    if (StackAllocated) {
+      PrivPtr =
+          new AllocaInst(BaseType, ArraySize, BaseValue->getName() + "_priv",
+                         EntryBB.getFirstInsertionPt());
+    } else {
+      assert(0 && "TODO");
+    }
+  }
+
+  isl_set_free(Domain);
+  isl_union_map_free(Schedule);
+}
+
+void ClastStmtCodeGen::aggregatePrivatizationLocations(ReductionAccessSet &RAS,
+                                                    isl_set *Domain) {
+
+  isl_set_free(Domain);
+}
+
 ClastStmtCodeGen::ClastStmtCodeGen(Scop *scop, PollyIRBuilder &B, Pass *P)
-    : S(scop), P(P), Builder(B), ExpGen(Builder, ClastVars) {}
+    : S(scop), P(P), D(&P->getAnalysis<Dependences>()), Builder(B),
+      ExpGen(Builder, ClastVars) {}
 
 namespace {
 class CodeGeneration : public ScopPass {
@@ -1064,6 +1199,7 @@ public:
     C.pprint(errs());
     CodeGen.codegen(C.getClast());
 
+    S.getRegion().getEnteringBlock()->getParent()->getParent()->dump();
     ParallelLoops.insert(ParallelLoops.begin(),
                          CodeGen.getParallelLoops().begin(),
                          CodeGen.getParallelLoops().end());

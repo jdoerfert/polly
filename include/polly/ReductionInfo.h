@@ -214,6 +214,9 @@ public:
                                     __isl_take isl_union_map *Schedule,
                                     unsigned Dimension) const;
 
+  /// @brief Return the set of accessed memory locations
+  __isl_give isl_union_map *getAccessedLocations() const;
+
   ///  @}
 
   /// @brief  The destructor
