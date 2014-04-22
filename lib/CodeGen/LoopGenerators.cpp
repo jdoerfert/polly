@@ -247,6 +247,7 @@ Value *OMPGenerator::loadValuesIntoStruct(SetVector<Value *> &Values) {
   auto *EntryBB = &Builder.GetInsertBlock()->getParent()->getEntryBlock();
   Value *Struct =
       new AllocaInst(Ty, 0, "omp.userContext", EntryBB->getFirstInsertionPt());
+  Builder.CreateLifetimeStart(Struct);
 
   for (unsigned i = 0; i < Values.size(); i++) {
     Value *Address = Builder.CreateStructGEP(Struct, i);
@@ -370,6 +371,8 @@ Value *OMPGenerator::createParallelLoop(Value *LowerBound, Value *UpperBound,
                               LowerBound, UpperBound, Stride);
   Builder.CreateCall(SubFunction, SubfunctionParam);
   createCallParallelEnd();
+
+  Builder.CreateLifetimeEnd(Struct);
 
   return IV;
 }
