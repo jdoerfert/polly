@@ -244,7 +244,9 @@ Value *OMPGenerator::loadValuesIntoStruct(SetVector<Value *> &Values) {
     Members.push_back(Values[i]->getType());
 
   StructType *Ty = StructType::get(Builder.getContext(), Members);
-  Value *Struct = Builder.CreateAlloca(Ty, 0, "omp.userContext");
+  auto *EntryBB = &Builder.GetInsertBlock()->getParent()->getEntryBlock();
+  Value *Struct =
+      new AllocaInst(Ty, 0, "omp.userContext", EntryBB->getFirstInsertionPt());
 
   for (unsigned i = 0; i < Values.size(); i++) {
     Value *Address = Builder.CreateStructGEP(Struct, i);
