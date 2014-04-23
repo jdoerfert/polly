@@ -19,8 +19,8 @@
 #include "isl/ctx.h"
 
 #include "polly/Dependences.h"
+#include "polly/CodeGen/IRBuilder.h"
 
-#include "llvm/IR/IRBuilder.h"
 #include "llvm/IR/BasicBlock.h"
 #include "llvm/IR/Instruction.h"
 #include "llvm/IR/Instructions.h"
@@ -159,10 +159,7 @@ public:
   bool isRealized() const { return IsRealized; }
 
   /// @brief Mark this reduction access as realized
-  void setRealized() {
-    assert(!IsRealized && "Realized reduction access twice");
-    IsRealized = true;
-  }
+  void setRealized() { IsRealized = true; }
 
   ///  @}
 
@@ -184,7 +181,7 @@ public:
   ///
   /// @returns Value created with @p Builder repr.: @p S1 <RedBinOp> @p S2
   llvm::Value *getBinaryOperation(llvm::Value *S1, llvm::Value *S2,
-                                  llvm::IRBuilder<> &Builder) const;
+                                  PollyIRBuilder &Builder) const;
 
   /// @brief Create an atomic read-modify-write binary 'operation'
   ///
@@ -199,7 +196,7 @@ public:
   /// In case the IR does not offer an intrinsic to compute this atomically,
   /// (e.g., on floating point values) a compare-exchange loop will be used.
   void createAtomicBinOp(llvm::Value *Val, llvm::Value *Ptr,
-                         llvm::IRBuilder<> &Builder, llvm::Pass *P = 0) const;
+                         PollyIRBuilder &Builder, llvm::Pass *P = 0) const;
 
 
   /// @brief Compute the number of reduction locations needed for this access
@@ -408,6 +405,12 @@ public:
   ///
   virtual void getRelatedReductionAccesses(const llvm::Value *BaseValue,
                                            ReductionAccessSet &RedAccSet);
+
+  /// @brief TODO
+  ///
+  /// @param TODO
+  virtual bool isRealizedReductionBasePtr(const llvm::Value *BaseValue) const;
+
   /// @}
 
   /// @name Iterator access to all (cached) reduction accesses

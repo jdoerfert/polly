@@ -349,10 +349,14 @@ bool Dependences::isParallelDimension(__isl_take isl_set *ScheduleSubset,
 
   Deps = getDependences(TYPE_ALL, true);
 
-  for (ReductionAccess *RA : *RI)
-    if (RA->isRealized())
+  for (ReductionAccess *RA : *RI) {
+    if (RA->isRealized()) {
       Deps =
           isl_union_map_subtract(Deps, RA->getReductionDependences(TYPE_ALL));
+      assert(RAS);
+      RAS->insert(RA);
+    }
+  }
 
   if (isl_union_map_is_empty(Deps)) {
     isl_union_map_free(Deps);
@@ -443,9 +447,21 @@ bool Dependences::isParallelDimension(__isl_take isl_set *ScheduleSubset,
       continue;
 
     isl_union_map *ReductionDeps = isl_union_map_copy(Deps);
-    for (auto *RA : RS)
+    DenseSet<const Value *> ReductionBaseValues;
+    for (auto *RA : RS) {
       ReductionDeps = isl_union_map_subtract(
           ReductionDeps, RA->getReductionDependences(TYPE_ALL));
+      ReductionBaseValues.insert(RA->getBaseValue());
+    }
+
+    for (auto *RA : *RI) {
+      if (RA->isRealized())
+        continue;
+      if (ReductionBaseValues.count(RA->getBaseValue()))
+        continue;
+      ReductionDeps = isl_union_map_union(
+          ReductionDeps, RA->getReductionDependences(TYPE_ALL));
+    }
 
     bool RealizableReductionSet =
         isDependencyFree(ReductionDeps, Schedule, ScheduleSubset, ParallelDim);
@@ -461,8 +477,10 @@ bool Dependences::isParallelDimension(__isl_take isl_set *ScheduleSubset,
           dbgs() << "\n\n";);
   }
 
-  for (auto *RA : *ReductionAccessRealizableSets.begin())
+  for (auto *RA : *ReductionAccessRealizableSets.begin()) {
     RAS->insert(RA);
+    dbgs() << "Realize : " << RA << "\n";
+  }
 
   isl_union_map_free(Deps);
   isl_union_map_free(Schedule);

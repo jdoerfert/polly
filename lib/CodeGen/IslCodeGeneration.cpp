@@ -27,6 +27,7 @@
 #include "polly/Dependences.h"
 #include "polly/LinkAllPasses.h"
 #include "polly/ScopInfo.h"
+#include "polly/ReductionInfo.h"
 #include "polly/Support/GICHelper.h"
 #include "polly/Support/ScopHelper.h"
 #include "polly/TempScopInfo.h"
@@ -1071,6 +1072,7 @@ public:
     AU.addRequired<ScalarEvolution>();
     AU.addRequired<ScopDetection>();
     AU.addRequired<ScopInfo>();
+    AU.addRequired<ReductionInfo>();
     AU.addRequired<LoopInfo>();
 
     AU.addPreserved<Dependences>();
@@ -1084,6 +1086,7 @@ public:
     // FIXME: We do not yet add regions for the newly generated code to the
     //        region tree.
     AU.addPreserved<RegionInfo>();
+    AU.addPreserved<ReductionInfo>();
     AU.addPreserved<TempScopInfo>();
     AU.addPreserved<ScopInfo>();
     AU.addPreservedID(IndependentBlocksID);
@@ -1097,6 +1100,7 @@ Pass *polly::createIslCodeGenerationPass() { return new IslCodeGeneration(); }
 
 INITIALIZE_PASS_BEGIN(IslCodeGeneration, "polly-codegen-isl",
                       "Polly - Create LLVM-IR from SCoPs", false, false);
+INITIALIZE_AG_DEPENDENCY(ReductionInfo);
 INITIALIZE_PASS_DEPENDENCY(Dependences);
 INITIALIZE_PASS_DEPENDENCY(DominatorTreeWrapperPass);
 INITIALIZE_PASS_DEPENDENCY(LoopInfo);

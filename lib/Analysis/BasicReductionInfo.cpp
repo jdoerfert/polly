@@ -151,6 +151,16 @@ struct BasicReductionInfo : public ScopPass, public ReductionInfo {
     return this;
   }
 
+  /// @btrief TODO
+  const Value *getPointerBase(const Value *Ptr) const {
+    const SCEV *AccessFunction = SE->getSCEV(const_cast<Value *>(Ptr));
+    const SCEVUnknown *BasePointer =
+        dyn_cast<SCEVUnknown>(SE->getPointerBase(AccessFunction));
+    assert(BasePointer && "Could not find base pointer");
+
+    return BasePointer->getValue();
+  }
+
   /// @brief Get the base value for the instruction @p Inst
   const Value *getBaseValue(const Instruction *Inst) const {
     const Value *BV = nullptr;
@@ -162,13 +172,16 @@ struct BasicReductionInfo : public ScopPass, public ReductionInfo {
       return Phi;
     else
       return nullptr;
+    return getPointerBase(BV);
+  }
 
-    const SCEV *AccessFunction = SE->getSCEV(const_cast<Value *>(BV));
-    const SCEVUnknown *BasePointer =
-        dyn_cast<SCEVUnknown>(SE->getPointerBase(AccessFunction));
-    assert(BasePointer && "Could not find base pointer");
-
-    return BasePointer->getValue();
+  /// @brief TODO
+  bool isRealizedReductionBasePtr(const Value *BaseValue) const override {
+    const Value *PtrBase = getPointerBase(BaseValue);
+    for (auto *RA : *this)
+      if (RA->isRealized() && RA->getBaseValue() == PtrBase)
+        return true;
+    return false;
   }
 
   /// @brief Find a maximal reduction access
@@ -227,19 +240,31 @@ struct BasicReductionInfo : public ScopPass, public ReductionInfo {
       return I->second;
     }
 
-    if (ServeOnlyCached) {
-      BRI_DEBUG("No cached reduction access, but only those are served!");
-      return nullptr;
-    }
-
-    BRI_DEBUG("No cached reduction access, try to create one:");
-
     // If the base user instruction is not contained in the outer loop we
     // will never find a valid reduction access.
     if (!OuterLoop->contains(BaseInst)) {
       BRI_DEBUG("Outer loop does not contain base user");
       BRI_INVALID(BASE_INST);
     }
+
+    if (ServeOnlyCached) {
+      SmallVector<Loop *, 4> Loops;
+      Loop *L = LI->getLoopFor(BaseInst->getParent());
+      while (L != OuterLoop) {
+        Loops.push_back(L);
+        L = L->getParentLoop();
+      }
+
+      for (auto LI = Loops.rbegin(), LE = Loops.rend(); LI != LE; ++LI) {
+        if (auto *RA = getReductionAccess(BaseInst, *LI))
+          return RA;
+      }
+
+      BRI_DEBUG("No cached reduction access, but only those are served!");
+      return nullptr;
+    }
+
+    BRI_DEBUG("No cached reduction access, try to create one:");
 
     // The unique producer
     const LoadInst *Producer = nullptr;

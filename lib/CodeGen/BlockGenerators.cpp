@@ -19,6 +19,7 @@
 #include "polly/CodeGen/BlockGenerators.h"
 #include "polly/CodeGen/CodeGeneration.h"
 #include "polly/Options.h"
+#include "polly/ReductionInfo.h"
 #include "polly/Support/GICHelper.h"
 #include "polly/Support/SCEVValidator.h"
 #include "polly/Support/ScopHelper.h"
@@ -192,6 +193,7 @@ Value *BlockGenerator::lookupAvailableValue(const Value *Old, ValueMapT &BBMap,
 Value *BlockGenerator::getNewValue(const Value *Old, ValueMapT &BBMap,
                                    ValueMapT &GlobalMap, LoopToScevMapT &LTS,
                                    Loop *L) {
+errs() << "Old: " << *Old << "\n";
   if (Value *New = lookupAvailableValue(Old, BBMap, GlobalMap))
     return New;
 
@@ -225,6 +227,24 @@ void BlockGenerator::copyInstScalar(const Instruction *Inst, ValueMapT &BBMap,
   // generation as the meta-data operands are not correctly copied.
   if (isa<DbgInfoIntrinsic>(Inst))
     return;
+
+  if (const GetElementPtrInst *GEP = dyn_cast<GetElementPtrInst>(Inst)) {
+    auto &RI =  P->getAnalysis<ReductionInfo>();
+    const Value *BasePtr = GEP->getPointerOperand();
+    if (RI.isRealizedReductionBasePtr(BasePtr)) {
+      SmallVector<Value *, 4> IdxVector;
+      for (auto IdxI = GEP->idx_begin(), IdxE = GEP->idx_end(); IdxI != IdxE;
+           ++IdxI) {
+        IdxVector.push_back(getNewValue(*IdxI, BBMap, GlobalMap, LTS,
+                                        getLoopForInst(Inst)));
+      }
+      auto *NewGEP = Builder.CreateGEP(
+          getNewValue(BasePtr, BBMap, GlobalMap, LTS, getLoopForInst(Inst)),
+          IdxVector, "p_" + Inst->getName());
+      BBMap[Inst] = NewGEP;
+      return;
+    }
+  }
 
   Instruction *NewInst = Inst->clone();
 
@@ -339,6 +359,7 @@ Value *BlockGenerator::generateScalarStore(const StoreInst *Store,
                                            ValueMapT &BBMap,
                                            ValueMapT &GlobalMap,
                                            LoopToScevMapT &LTS) {
+  errs() << "SS: " << *Store <<"\n";
   const Value *Pointer = Store->getPointerOperand();
   Value *NewPointer =
       generateLocationAccessed(Store, Pointer, BBMap, GlobalMap, LTS);
@@ -525,9 +546,12 @@ void VectorBlockGenerator::generateLoad(const LoadInst *Load,
   }
 
   const MemoryAccess &Access = Statement.getAccessFor(Load);
+  auto &RI =  P->getAnalysis<ReductionInfo>();
 
   Value *NewLoad;
-  if (Access.isStrideZero(isl_map_copy(Schedule)))
+  if (RI.isRealizedReductionBasePtr(Load->getPointerOperand()))
+    NewLoad = generateStrideOneLoad(Load, ScalarMaps);
+  else if (Access.isStrideZero(isl_map_copy(Schedule)))
     NewLoad = generateStrideZeroLoad(Load, ScalarMaps[0]);
   else if (Access.isStrideOne(isl_map_copy(Schedule)))
     NewLoad = generateStrideOneLoad(Load, ScalarMaps);
@@ -575,12 +599,14 @@ void VectorBlockGenerator::copyStore(const StoreInst *Store,
   int VectorWidth = getVectorWidth();
 
   const MemoryAccess &Access = Statement.getAccessFor(Store);
+  auto &RI =  P->getAnalysis<ReductionInfo>();
 
   const Value *Pointer = Store->getPointerOperand();
   Value *Vector = getVectorValue(Store->getValueOperand(), VectorMap,
                                  ScalarMaps, getLoopForInst(Store));
 
-  if (Access.isStrideOne(isl_map_copy(Schedule))) {
+  if (RI.isRealizedReductionBasePtr(Pointer) ||
+      Access.isStrideOne(isl_map_copy(Schedule))) {
     Type *VectorPtrType = getVectorPtrTy(Pointer, VectorWidth);
     Value *NewPointer = getNewValue(Pointer, ScalarMaps[0], GlobalMaps[0],
                                     VLTS[0], getLoopForInst(Store));

@@ -345,6 +345,7 @@ Value *OMPGenerator::createParallelLoop(Value *LowerBound, Value *UpperBound,
                                         Value *Stride,
                                         SetVector<Value *> &Values,
                                         ValueToValueMapTy &Map,
+                                        int NoThreads,
                                         BasicBlock::iterator *LoopBody) {
   Value *Struct, *IV, *SubfunctionParam, *NumberOfThreads;
   Function *SubFunction;
@@ -360,7 +361,8 @@ Value *OMPGenerator::createParallelLoop(Value *LowerBound, Value *UpperBound,
   SubfunctionParam =
       Builder.CreateBitCast(Struct, Builder.getInt8PtrTy(), "omp_data");
 
-  NumberOfThreads = Builder.getInt32(0);
+  assert(NoThreads >= 0 && "Negative number of threads found!");
+  NumberOfThreads = Builder.getInt32(NoThreads);
 
   // Add one as the upper bound provided by openmp is a < comparison
   // whereas the codegenForSequential function creates a <= comparison.

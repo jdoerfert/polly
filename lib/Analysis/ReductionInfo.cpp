@@ -72,6 +72,11 @@ void ReductionInfo::getRelatedReductionAccesses(const Value *BaseValue,
   return RI->getRelatedReductionAccesses(BaseValue, RAS);
 }
 
+bool ReductionInfo::isRealizedReductionBasePtr(const Value *BaseValue) const {
+  assert(RI && "RI didn't call InitializeReductionInfo in its run method!");
+  return RI->isRealizedReductionBasePtr(BaseValue);
+}
+
 // ReductionInfo destructor: DO NOT move this to the header file for
 // ReductionInfo or else clients of the ReductionInfo class may not depend on
 // the ReductionInfo.o file in the current .a file, causing reduction detection
@@ -211,7 +216,7 @@ ReductionAccess::~ReductionAccess() {
 }
 
 Value *ReductionAccess::getBinaryOperation(Value *S1, Value *S2,
-                                           IRBuilder<> &Builder) const {
+                                           PollyIRBuilder &Builder) const {
   switch (Type) {
   case ADD:
     return Builder.CreateAdd(S1, S2, "Red.Add");
@@ -260,7 +265,7 @@ Value *ReductionAccess::getIdentityElement(llvm::Type *Ty) const {
 }
 
 void ReductionAccess::createAtomicBinOp(Value *Val, Value *Ptr,
-                                        IRBuilder<> &Builder, Pass *P) const {
+                                        PollyIRBuilder &Builder, Pass *P) const {
   AtomicOrdering Order = AtomicOrdering::Monotonic;
 
   switch (Type) {
@@ -341,14 +346,31 @@ void ReductionAccess::createAtomicBinOp(Value *Val, Value *Ptr,
 int ReductionAccess::getNumberOfReductionLocations(isl_set *Domain,
                                                    isl_union_map *Schedule,
                                                    unsigned Dimension) const {
-  for (unsigned i = 0; i < Dimension - 1; i++)
-    Domain = isl_set_fix_si(Domain, isl_dim_set, i, 0);
+  // TODO Check if we can always skip every second dimension (2N+1 notation) or
+  //      if we need to check if a dimension is fixed or not.
+  // FIXME it is the latter
+  dbgs() << "Dim: " << Dimension << "\n";
+  dbgs() << "Dom: "; isl_set_dump(Domain);
+  for (unsigned i = 0; i < Dimension - 1; i++) {
+    isl_val *V = isl_set_plain_get_val_if_fixed(Domain, isl_dim_set, i);
+    if (V == nullptr || isl_val_is_nan(V))
+      Domain = isl_set_fix_si(Domain, isl_dim_set, i, 0);
+    if (V != nullptr)
+      isl_val_free(V);
+  }
+
+  dbgs() << "Dom: "; isl_set_dump(Domain);
   isl_map *RemAcc = isl_map_from_union_map(
       isl_union_map_apply_domain(isl_union_map_copy(Accesses), Schedule));
+  dbgs() << "RemAcc: " << RemAcc << "\n";
   RemAcc = isl_map_intersect_domain(RemAcc, Domain);
+  dbgs() << "RemAcc: " << RemAcc << "\n";
   RemAcc = isl_map_project_out(RemAcc, isl_dim_in, 0, isl_map_n_in(RemAcc));
+  dbgs() << "RemAcc: " << RemAcc << "\n";
   isl_set *MemLocs = isl_map_range(RemAcc);
+  dbgs() << "MEMLocs: "; isl_set_dump(MemLocs);
   MemLocs = isl_set_reset_tuple_id(MemLocs);
+  dbgs() << "MEMLocs: "; isl_set_dump(MemLocs);
   int NumIterations = getNumberOfIterations(MemLocs);
   return NumIterations == -1 ? -1 : NumIterations + 1;
 }
@@ -627,6 +649,7 @@ struct NoReductionInfo : public ImmutablePass, public ReductionInfo {
   void getReductionAccesses(const Instruction *,
                             ReductionAccessSet &) override {}
   void getRelatedReductionAccesses(const Value *, ReductionAccessSet &) override {}
+  bool isRealizedReductionBasePtr(const Value *) const override { return false; }
 
   iterator end() { return RAV.end(); }
   iterator begin() { return RAV.begin(); }

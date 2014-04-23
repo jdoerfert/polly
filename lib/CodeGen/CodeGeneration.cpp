@@ -67,6 +67,11 @@ OpenMP("enable-polly-openmp", cl::desc("Generate OpenMP parallel code"),
        cl::value_desc("OpenMP code generation enabled if true"),
        cl::init(false), cl::ZeroOrMore, cl::cat(PollyCategory));
 
+static cl::opt<int>
+OpenMPThreads("polly-openmp-threads", cl::desc("The number of OpenMP threads to use"),
+       cl::value_desc("Limit the number of OpenMP threads (0 = unlimited)"),
+       cl::init(0), cl::ZeroOrMore, cl::cat(PollyCategory));
+
 #ifdef GPU_CODEGEN
 static cl::opt<bool>
 GPGPU("enable-polly-gpgpu", cl::desc("Generate GPU parallel code"), cl::Hidden,
@@ -253,6 +258,21 @@ private:
   // Map the Values from the old code to their counterparts in the new code.
   ValueMapT ValueMap;
 
+  struct PrivatizationInfo {
+    unsigned Locations = 0;
+    unsigned Copies = 0;
+    Value *Ptr = nullptr;
+    Value *InitGep = nullptr;
+    const SCEV *OffsetSCEV = nullptr;
+    PrivatizationInfo(unsigned L, unsigned C, Value *P)
+        : Locations(L), Copies(C), Ptr(P) {}
+    PrivatizationInfo() {}
+  };
+
+  // TODO
+  DenseMap<const Value *, PrivatizationInfo> VecPrivatizationMap;
+  DenseMap<const Value *, PrivatizationInfo> OMPPrivatizationMap;
+
   // TODO
   using ReductionAccessSet = Dependences::ReductionAccessSet;
   SmallVector<ReductionAccessSet, 2> RASVec;
@@ -290,6 +310,8 @@ private:
 
   std::vector<std::string> parallelLoops;
 
+  /// @brief A stack for ReductionAccessSets
+  /// @{
   ReductionAccessSet *pushReductionAccessSet() {
     RASVec.push_back(SmallPtrSet<ReductionAccess *, 4>());
     return &RASVec[RASVec.size()-1];
@@ -304,6 +326,7 @@ private:
   void popReductionAccessSet() {
     RASVec.pop_back();
   }
+  /// @}
 
   void codegen(const clast_assignment *a);
 
@@ -399,12 +422,23 @@ private:
   IntegerType *getIntPtrTy();
 
   // TODO
+  void remapOpenMPPrivatizationLocations(ReductionAccessSet &RAS);
+  void
+  changeOpenMPPrivatizationLocationGEPs(ReductionAccessSet &RAS,
+                                        OMPGenerator::ValueToValueMapTy &VMap);
+  void changeVectorPrivatizationLocationGEPs(ReductionAccessSet &RAS,
+                                             unsigned VectorWidth);
+
+  // TODO
   void createPrivatizationLocations(ReductionAccessSet &RAS,
                                     __isl_take isl_set *Domain,
+                                    unsigned Copies,
+                                    SetVector<Value *> *Values = nullptr,
                                     bool StackAllocated = true);
 
   // TODO
-  void aggregatePrivatizationLocations(ReductionAccessSet &RAS, __isl_take isl_set *Domain);
+  void aggregatePrivatizationLocations(ReductionAccessSet &RAS,
+                                       bool VectorLocations);
 
 public:
   void codegen(const clast_root *r);
@@ -518,9 +552,28 @@ void ClastStmtCodeGen::codegen(const clast_user_stmt *u,
   // Copy the current value map into all vector maps if the key wasn't
   // available yet. This is needed in case vector codegen is performed in
   // OpenMP subfunctions.
-  for (auto KV : ValueMap)
+  Value *IdxList[] = { Builder.getInt64(0), Builder.getInt64(0) };
+  const auto &PEnd = VecPrivatizationMap.end();
+  for (auto KV : ValueMap) {
+    const auto &PIt = VecPrivatizationMap.find(KV.first);
     for (int i = 0; i < VectorDimensions; ++i)
       VectorMap[i].insert(KV);
+    if (PIt != PEnd) {
+      auto &PrivInfo = PIt->second;
+      auto *PrivLocPtr = PrivInfo.Ptr;
+      dbgs() << "KV.f: " << *KV.first << " ==> " << *KV.second << "\n";
+      dbgs() << "      " << *PrivLocPtr << "\n";
+      //auto *VecTy = VectorType::get(
+          //KV.first->getType()->getPointerElementType(), VectorDimensions);
+      //auto *CastedPrivLocPtr =
+          //Builder.CreateBitCast(PrivLocPtr, VecTy->getPointerTo());
+      //dbgs() << "LL: " << *KV.first << " ==> " << *CastedPrivLocPtr << "\n";
+      //PrivInfo.Ptr = CastedPrivLocPtr;
+      for (int i = 0; i < VectorDimensions; ++i)
+        VectorMap[i].insert(std::make_pair(KV.first, PrivLocPtr));
+      //ValueMap[KV.first] = CastedPrivLocPtr;
+    }
+  }
 
   isl_map *Schedule = extractPartialSchedule(Statement, Domain);
   VectorBlockGenerator::generate(Builder, *Statement, VectorMap, VLTS, Schedule,
@@ -634,6 +687,7 @@ ClastStmtCodeGen::updateWithValueMap(OMPGenerator::ValueToValueMapTy &VMap) {
     if (Inserted.count(I->first))
       continue;
 
+    dbgs() << "OMP: " << *I->first << " ==> " << *I->second << "\n";
     ValueMap[I->first] = I->second;
   }
 }
@@ -664,7 +718,13 @@ void ClastStmtCodeGen::codegenForOpenMP(const clast_for *For) {
 
   Values = getOMPValues(For->body);
 
-  IV = OMPGen.createParallelLoop(LB, UB, Stride, Values, VMap, &LoopBody);
+  isl_set *Domain = isl_set_copy(isl_set_from_cloog_domain(For->domain));
+  ReductionAccessSet *RAS = peekReductionAccessSet();
+
+  if (RAS && !RAS->empty())
+    createPrivatizationLocations(*RAS, isl_set_copy(Domain), OpenMPThreads, &Values);
+
+  IV = OMPGen.createParallelLoop(LB, UB, Stride, Values, VMap, OpenMPThreads, &LoopBody);
   BasicBlock::iterator AfterLoop = Builder.GetInsertPoint();
   Builder.SetInsertPoint(LoopBody);
 
@@ -673,21 +733,20 @@ void ClastStmtCodeGen::codegenForOpenMP(const clast_for *For) {
   const CharMapT ClastVarsCopy = ClastVars;
 
   updateWithValueMap(VMap);
-  ClastVars[For->iterator] = IV;
-
-  isl_set *Domain = isl_set_copy(isl_set_from_cloog_domain(For->domain));
-  ReductionAccessSet *RAS = peekReductionAccessSet();
-
   if (RAS && !RAS->empty())
-    createPrivatizationLocations(*RAS, isl_set_copy(Domain));
+    remapOpenMPPrivatizationLocations(*RAS);
+  ClastVars[For->iterator] = IV;
 
   if (For->body)
     codegen(For->body);
 
-  if (RAS && !RAS->empty())
-    aggregatePrivatizationLocations(*RAS, isl_set_copy(Domain));
+  Builder.SetInsertPoint(AfterLoop);
 
-  isl_set_free(Domain);
+  if (RAS && !RAS->empty()) {
+    LoopBody->getParent()->getParent()->dump();
+    changeOpenMPPrivatizationLocationGEPs(*RAS, VMap);
+    aggregatePrivatizationLocations(*RAS, /* Vector locations */ false);
+  }
 
   // Restore the original values.
   ValueMap = ValueMapCopy;
@@ -696,7 +755,7 @@ void ClastStmtCodeGen::codegenForOpenMP(const clast_for *For) {
   clearDomtree((*LoopBody).getParent()->getParent(),
                P->getAnalysis<DominatorTreeWrapperPass>().getDomTree());
 
-  Builder.SetInsertPoint(AfterLoop);
+  isl_set_free(Domain);
 }
 
 #ifdef GPU_CODEGEN
@@ -883,6 +942,24 @@ void ClastStmtCodeGen::codegenForVector(const clast_for *F,
                                         int VectorWidth) {
   DEBUG(dbgs() << "Vectorizing loop '" << F->iterator << "'\n";);
 
+  isl_set *Domain = isl_set_copy(isl_set_from_cloog_domain(F->domain));
+  ReductionAccessSet *RAS = peekReductionAccessSet();
+
+  auto IP = Builder.GetInsertPoint();
+  auto *Header = IP->getParent();
+  auto *PreHeader = *pred_begin(Header) == Header ? *(++pred_begin(Header))
+                                                  : *pred_begin(Header);
+  auto *Exit = Header->getTerminator()->getSuccessor(0) == Header
+                    ? Header->getTerminator()->getSuccessor(1)
+                    : Header->getTerminator()->getSuccessor(0);
+
+  if (RAS && !RAS->empty()) {
+    dbgs() <<" REDUCTION VECTOR REDUCTION VECTOR \n";
+    Builder.SetInsertPoint(PreHeader, PreHeader->getTerminator());
+    createPrivatizationLocations(*RAS, isl_set_copy(Domain), VectorWidth);
+    Builder.SetInsertPoint(IP);
+  }
+
   Value *LB = ExpGen.codegen(F->LB, getIntPtrTy());
 
   APInt Stride = APInt_from_MPZ(F->stride);
@@ -896,12 +973,6 @@ void ClastStmtCodeGen::codegenForVector(const clast_for *F,
   for (int i = 1; i < VectorWidth; i++)
     IVS[i] = Builder.CreateAdd(IVS[i - 1], StrideValue, "p_vector_iv");
 
-  isl_set *Domain = isl_set_copy(isl_set_from_cloog_domain(F->domain));
-  ReductionAccessSet *RAS = peekReductionAccessSet();
-
-  if (RAS && !RAS->empty())
-    createPrivatizationLocations(*RAS, isl_set_copy(Domain));
-
   // Add loop iv to symbols.
   ClastVars[F->iterator] = LB;
 
@@ -913,8 +984,11 @@ void ClastStmtCodeGen::codegenForVector(const clast_for *F,
     Stmt = Stmt->next;
   }
 
-  if (RAS && !RAS->empty())
-    aggregatePrivatizationLocations(*RAS, isl_set_copy(Domain));
+  Builder.SetInsertPoint(Exit, Exit->getTerminator());
+  if (RAS && !RAS->empty()) {
+    changeVectorPrivatizationLocationGEPs(*RAS, VectorWidth);
+    aggregatePrivatizationLocations(*RAS, /* Vector locations */ true);
+  }
 
   // Loop is finished, so remove its iv from the live symbols.
   isl_set_free(Domain);
@@ -957,6 +1031,16 @@ void ClastStmtCodeGen::codegen(const clast_for *f) {
     popReductionAccessSet();
     return;
   }
+
+  if (Vector && !OpenMP) {
+    return codegenForSequential(f);
+  }
+
+#ifdef GPU_CODEGEe
+  if (Vector && !GPGPU) {
+    return codegenForSequential(f);
+  }
+#endif
 
   if (parallelCodeGeneration) {
     popReductionAccessSet();
@@ -1089,84 +1173,466 @@ void ClastStmtCodeGen::codegen(const clast_root *r) {
     codegen(stmt->next);
 }
 
-void ClastStmtCodeGen::createPrivatizationLocations(ReductionAccessSet &RAS,
-                                                    isl_set *Domain,
-                                                    bool StackAllocated) {
+static Value* getThreadID(PollyIRBuilder &Builder) {
+  const char *Name = "omp_get_thread_num";
+  Module *M = Builder.GetInsertBlock()->getParent()->getParent();
+  Function *F = M->getFunction(Name);
 
-  unsigned Dim = isl_set_n_dim(Domain);
-  isl_union_map *Schedule = D->getCombinedScheduleForSpace(Dim);
+  // If F is not available, declare it.
+  if (!F) {
+    GlobalValue::LinkageTypes Linkage = Function::ExternalLinkage;
 
-  auto IP = Builder.GetInsertBlock();
-  BasicBlock &EntryBB = IP->getParent()->getEntryBlock();
+    FunctionType *Ty = FunctionType::get(Builder.getInt32Ty(), false);
+    F = Function::Create(Ty, Linkage, Name, M);
+  }
+
+  return Builder.CreateCall(F);
+}
+
+void ClastStmtCodeGen::remapOpenMPPrivatizationLocations(ReductionAccessSet &RAS) {
+  BasicBlock::iterator IP = Builder.GetInsertPoint();
+  Builder.SetInsertPoint(IP->getParent()->getParent()->getEntryBlock().getTerminator());
+
+  Value *ThreadID = getThreadID(Builder);
+  SmallVector<Value *, 3> IdxList;
+  IdxList.push_back(Builder.getInt64(0));
+  IdxList.push_back(ThreadID);
+  IdxList.push_back(Builder.getInt64(0));
 
   for (ReductionAccess *RA : RAS) {
     auto *BaseValue = RA->getBaseValue();
-    auto *BaseType = BaseValue->getType();
-    auto *AccessedLocations = RA->getAccessedLocations();
+    auto *OMPStructVal = ValueMap[OMPPrivatizationMap[BaseValue].Ptr];
+    auto *OMPStructValAdjusted = Builder.CreateGEP(OMPStructVal, IdxList);
+    ValueMap[BaseValue] = OMPStructValAdjusted;
+  }
+
+  Builder.SetInsertPoint(IP);
+}
+
+void ClastStmtCodeGen::changeVectorPrivatizationLocationGEPs(
+    ReductionAccessSet &RAS, unsigned VectorWidth) {
+  dbgs() << "\n\ncVPLG!!!\n";
+  ScalarEvolution &SE = P->getAnalysis<ScalarEvolution>();
+  SCEVExpander Rewriter(SE, "polly");
+  for (ReductionAccess *RA : RAS) {
+    auto *BaseValue = RA->getBaseValue();
+    dbgs() << "BV: " << *BaseValue << "\n";
+    auto &PrivInfo = VecPrivatizationMap[BaseValue];
+    dbgs() << "PIP: " << *PrivInfo.Ptr << "\n";
+    auto *PrivPtrCasted = cast<Instruction>(PrivInfo.Ptr);
+    auto *BaseSCEV = SE.getSCEV(PrivPtrCasted);
+    dbgs() << "PPC: "<< *PrivPtrCasted << "\n";
+    assert(BaseValue && PrivPtrCasted && BaseSCEV);
+
+    SmallSetVector<Value *, 8> Users(PrivPtrCasted->user_begin(),
+                                     PrivPtrCasted->user_end());
+    SmallPtrSet<const SCEV *, 1> SCEVs;
+    while (!Users.empty()) {
+      auto *User = Users.pop_back_val();
+      dbgs() << "   U: "<< *User << "\n";
+      //if (auto *BC = dyn_cast<BitCastInst>(User)) {
+        //Users.insert(BC->user_begin(), BC->user_end());
+        //continue;
+      //}
+      auto *GEP = dyn_cast<GetElementPtrInst>(User);
+      if (!GEP || GEP == PrivInfo.InitGep)
+        continue;
+      auto *AccessSCEV = SE.getSCEV(GEP);
+      dbgs() << "AS: " << *AccessSCEV << "\n";
+      auto *AddRecAccessSCEV = dyn_cast<SCEVAddRecExpr>(AccessSCEV);
+      // FIXME look at the loop dimensions to remove addrecs
+      auto *OffsetSCEV = SE.getMinusSCEV(AccessSCEV, BaseSCEV);
+      dbgs() << " GEP: " << *GEP << "\n";
+      dbgs() << " SCEVS insert " << *OffsetSCEV << "\n";
+      SCEVs.insert(OffsetSCEV);
+    }
+    assert(SCEVs.size() <= 1);
+
+    if (SCEVs.empty())
+      continue;
+
+    auto *OffsetSCEV = *SCEVs.begin();
+    for (auto *User : PrivPtrCasted->users()) {
+      auto *OldGEP = dyn_cast<GetElementPtrInst>(User);
+      if (!OldGEP || OldGEP == PrivInfo.InitGep)
+        continue;
+      auto *OldAccessSCEV = SE.getSCEV(OldGEP);
+      auto *NewAccessSCEV = SE.getMinusSCEV(OldAccessSCEV, OffsetSCEV);
+      auto *NewGEP =
+          Rewriter.expandCodeFor(NewAccessSCEV, OldGEP->getType(), OldGEP);
+      dbgs() << "OLD: " << *OldAccessSCEV << "\n";
+      dbgs() << "NEW: " << *NewAccessSCEV << "\n";
+      dbgs() << "NEWG: " << *NewGEP << "\n";
+      OldGEP->replaceAllUsesWith(NewGEP);
+    }
+
+    // FIXME why squared ?
+    PrivInfo.OffsetSCEV =
+        SE.getUDivExpr(OffsetSCEV, SE.getConstant(OffsetSCEV->getType(),
+                                                  VectorWidth * VectorWidth));
+  }
+}
+
+void ClastStmtCodeGen::changeOpenMPPrivatizationLocationGEPs(
+    ReductionAccessSet &RAS, OMPGenerator::ValueToValueMapTy &VMap) {
+  ScalarEvolution &SE = P->getAnalysis<ScalarEvolution>();
+  SCEVExpander Rewriter(SE, "polly");
+  ValueMapT VMapReverse;
+  for (const auto &I : VMap) {
+    VMapReverse.insert(std::make_pair(I.second, I.first));
+  }
+
+  for (ReductionAccess *RA : RAS) {
+    auto *BaseValue = RA->getBaseValue();
+    auto &PrivInfo = OMPPrivatizationMap[BaseValue];
+    auto *OMPStructValAdjusted = cast<Instruction>(PrivInfo.Ptr);
+    auto *BaseSCEV = SE.getSCEV(OMPStructValAdjusted);
+    dbgs() << "BS: " << *BaseSCEV <<"\n";
+
+    SmallPtrSet<const SCEV *, 1> SCEVs;
+    for (auto *User : OMPStructValAdjusted->users()) {
+      auto *GEP = dyn_cast<GetElementPtrInst>(User);
+      dbgs() << "GP: " << *GEP <<"\n";
+      if (!GEP || GEP == PrivInfo.InitGep)
+        continue;
+      auto *AccessSCEV = SE.getSCEV(GEP);
+      dbgs() << "AS: " << *AccessSCEV <<"\n";
+      if (auto *AddRecAccessSCEV = dyn_cast<SCEVAddRecExpr>(AccessSCEV)) {
+        assert(PrivInfo.Locations > 1);
+        AccessSCEV = AddRecAccessSCEV->getStart();
+      } else {
+        assert(PrivInfo.Locations == 1);
+      }
+      auto *OffsetSCEV = SE.getMinusSCEV(AccessSCEV, BaseSCEV);
+      SCEVs.insert(OffsetSCEV);
+    }
+    assert(SCEVs.size() <= 1);
+
+    if (SCEVs.empty())
+      continue;
+
+    auto *OffsetSCEV = *SCEVs.begin();
+    for (auto *User : OMPStructValAdjusted->users()) {
+      auto *OldGEP = dyn_cast<GetElementPtrInst>(User);
+      if (!OldGEP)
+        continue;
+      auto *OldAccessSCEV = SE.getSCEV(OldGEP);
+      auto *NewAccessSCEV = SE.getMinusSCEV(OldAccessSCEV, OffsetSCEV);
+      auto *NewGEP =
+          Rewriter.expandCodeFor(NewAccessSCEV, OldGEP->getType(), OldGEP);
+      OldGEP->replaceAllUsesWith(NewGEP);
+    }
+
+    PrivInfo.OffsetSCEV =
+        SCEVParameterRewriter::rewrite(OffsetSCEV, SE, VMapReverse);
+  }
+}
+
+static Value *createEmptyLoop(BasicBlock *CurBB, unsigned iterations,
+                              BasicBlock *&Header, BasicBlock *&Body,
+                              BasicBlock *&Exit, Pass *P, const Twine &Name) {
+  PHINode *IV = nullptr;
+  if (TerminatorInst *TermInst = CurBB->getTerminator()) {
+    if (iterations == 1) {
+      Header = Body = SplitBlock(CurBB, TermInst, P);
+      Header->setName(Name + "_header");
+      Exit = SplitBlock(Body, TermInst, P);
+      Exit->setName(Name + "_exit");
+      return Constant::getNullValue(Type::getInt64Ty(CurBB->getContext()));
+    }
+
+    Header = SplitBlock(CurBB, TermInst, P);
+    Header->setName(Name + "_header");
+    Body = SplitBlock(Header, TermInst, P);
+    Body->setName(Name + "_body");
+    Exit = SplitBlock(Body, TermInst, P);
+    Exit->setName(Name + "_exit");
+
+    Body->getTerminator()->setSuccessor(0, Header);
+    Header->getTerminator()->eraseFromParent();
+    assert(Header->size() == 0 && "Assumed empty BB");
+
+    PollyIRBuilder Builder(Header);
+    IV = Builder.CreatePHI(Builder.getInt64Ty(), 2, Name + "_IV");
+    IV->addIncoming(Builder.getInt64(0), CurBB);
+    auto *ExitCond = Builder.CreateICmpSGE(IV, Builder.getInt64(iterations));
+    Builder.CreateCondBr(ExitCond, Exit, Body);
+
+    Builder.SetInsertPoint(Body, Body->getTerminator());
+    auto *IVInc = Builder.CreateAdd(IV, Builder.getInt64(1), Name + "_IVInc");
+    IV->addIncoming(IVInc, Body);
+
+  } else {
+    assert(0);
+  }
+  return IV;
+}
+
+void ClastStmtCodeGen::createPrivatizationLocations(ReductionAccessSet &RAS,
+                                                    isl_set *Domain,
+                                                    unsigned Copies,
+                                                    SetVector<Value *> *OMPStructValues,
+                                                    bool StackAllocated) {
+  unsigned Dim = isl_set_n_dim(Domain);
+  isl_union_map *Schedule = D->getCombinedScheduleForSpace(Dim);
+
+  auto *CurBB = Builder.GetInsertBlock();
+  BasicBlock &EntryBB = CurBB->getParent()->getEntryBlock();
+
+  SmallVector<Value *, 3> IdxList;
+  for (ReductionAccess *RA : RAS) {
+    RA->setRealized();
+
+    auto *BaseValue = RA->getBaseValue();
+    auto *BaseType = BaseValue->getType()->getPointerElementType();
 
     int NoRedLocations = RA->getNumberOfReductionLocations(
         isl_set_copy(Domain), isl_union_map_copy(Schedule), Dim);
     assert(NoRedLocations > 0 &&
            "Could not compute the number of reduction locations");
 
-    isl_set *RestrictedDomain = isl_set_copy(Domain);
-    for (unsigned i = 0; i < Dim - 1; i++)
-      RestrictedDomain = isl_set_fix_si(RestrictedDomain, isl_dim_set, i, 0);
-
-    // errs() << "Domain: "; isl_set_dump(Domain);
-    // errs() << "RestrictedDomain: "; isl_set_dump(RestrictedDomain);
-    // errs() << *BaseValue << " in " << RA->getReductionLoop()->getLoopDepth()
-    //       << "(" << RA->getReductionLoopDim(*S)
-    //       << ")\n#ReductionLocations: " << NoRedLocations << "\n"
-    //       << AccessedLocations << "\n"
-    //       << Schedule << "\n";
-    isl_map *RemainingAccessMap = isl_map_from_union_map(
-        isl_union_map_apply_domain(isl_union_map_copy(AccessedLocations),
-                                   isl_union_map_copy(Schedule)));
-    // errs() << "RemainingAccessMap: " << RemainingAccessMap << "\n";
-    RemainingAccessMap =
-        isl_map_intersect_domain(RemainingAccessMap, RestrictedDomain);
-    // errs() << "RemainingAccessMap: " << RemainingAccessMap << "\n\n";
-    RemainingAccessMap = isl_map_project_out(RemainingAccessMap, isl_dim_in, 0,
-                                             isl_map_n_in(RemainingAccessMap));
-    // errs() << "RemainingAccessMap: " << RemainingAccessMap << "\n\n";
-    isl_set *MemoryAccesses = isl_map_range(RemainingAccessMap);
-    // errs() << "MemAcc: "; isl_set_dump(MemoryAccesses);
-    isl_set *LexMinMemoryAccess = isl_set_lexmin(isl_set_copy(MemoryAccesses));
-    isl_set *LexMaxMemoryAccess = isl_set_lexmax(MemoryAccesses);
-    assert(isl_set_is_singleton(LexMinMemoryAccess) &&
-           isl_set_is_singleton(LexMaxMemoryAccess) &&
-           "Current codegeneration can only deal with unique min/max accesses "
-           "for privatization");
-
-    isl_point *LexMinPoint = isl_set_sample_point(LexMinMemoryAccess);
-    isl_point *LexMaxPoint = isl_set_sample_point(LexMaxMemoryAccess);
-    errs() << "LexMinPoint: "; isl_point_dump(LexMinPoint);
-    errs() << "LexMaxPoint: "; isl_point_dump(LexMaxPoint);
-
-    isl_val *V = isl_point_get_coordinate_val(LexMinPoint, isl_dim_set, 0);
-    isl_point_free(LexMinPoint);
-
-    Value *ArraySize = ConstantInt::get(Builder.getInt64Ty(), NoRedLocations);
     Value *PrivPtr = nullptr;
-
     if (StackAllocated) {
-      PrivPtr =
-          new AllocaInst(BaseType, ArraySize, BaseValue->getName() + "_priv",
-                         EntryBB.getFirstInsertionPt());
+      unsigned InnerDim = OMPStructValues ? NoRedLocations : Copies;
+      unsigned OuterDim = OMPStructValues ? Copies : NoRedLocations;
+      Type *InnerTy = OMPStructValues ? (Type*) ArrayType::get(BaseType, InnerDim)
+                                      : (Type*) VectorType::get(BaseType, InnerDim);
+      Type *ArrayType = ArrayType::get(InnerTy, OuterDim);
+      PrivPtr = new AllocaInst(ArrayType, 0, BaseValue->getName() + "_priv",
+                                 EntryBB.getFirstInsertionPt());
     } else {
       assert(0 && "TODO");
     }
+
+    assert(PrivPtr && "Privatization locations were not created");
+    if (OMPStructValues) {
+    dbgs() << " PRIV PTR for " << *BaseValue << " is " << *PrivPtr << "\n";
+      (*OMPStructValues).remove(const_cast<Value *>(BaseValue));
+      (*OMPStructValues).insert(PrivPtr);
+      OMPPrivatizationMap.insert(
+          std::make_pair(BaseValue, PrivatizationInfo(NoRedLocations, Copies, PrivPtr)));
+    } else {
+      if (OMPPrivatizationMap.count(BaseValue)) {
+        dbgs() << "PRIV ---- Red priv in OMP priv\n";
+        dbgs() << " PRIV PTR for " << *ValueMap[BaseValue] << " is " << *PrivPtr
+               << "\n";
+        ValueMap[PrivPtr] = ValueMap[BaseValue];
+        ValueMap[ValueMap[PrivPtr]] = PrivPtr;
+        VecPrivatizationMap.insert(
+            std::make_pair(BaseValue, PrivatizationInfo(NoRedLocations, Copies, PrivPtr)));
+        dbgs() << "VM: " << *BaseValue << " ==> " << *ValueMap[BaseValue] <<"\n";
+        dbgs() << "VM: " << *ValueMap[BaseValue] << " ==> " << *ValueMap[ValueMap[BaseValue]] <<"\n";
+        dbgs() << "VM: " << *PrivPtr << " ==> " << *ValueMap[PrivPtr] <<"\n";
+        dbgs() << "VM: " << *ValueMap[PrivPtr] << " ==> " << *ValueMap[ValueMap[PrivPtr]] <<"\n";
+      } else {
+        dbgs() << " PRIV PTR for " << *BaseValue << " is " << *PrivPtr << "\n";
+        ValueMap[PrivPtr] = ValueMap[BaseValue];
+        ValueMap[BaseValue] = PrivPtr;
+        VecPrivatizationMap.insert(
+            std::make_pair(BaseValue, PrivatizationInfo(NoRedLocations, Copies, PrivPtr)));
+      }
+    }
+
+    Builder.SetInsertPoint(CurBB, CurBB->getFirstInsertionPt());
+    Builder.CreateLifetimeStart(PrivPtr);
+
+    BasicBlock *LLoopHeader, *LLoopBody, *LLoopExit;
+    Value *LLoopIV =
+        createEmptyLoop(CurBB, NoRedLocations, LLoopHeader,
+                        LLoopBody, LLoopExit, P, "polly_initPriv_lloop");
+
+    BasicBlock *CLoopHeader, *CLoopBody, *CLoopExit;
+    Value *CLoopIV =
+        createEmptyLoop(LLoopBody, Copies, CLoopHeader, CLoopBody,
+                        CLoopExit, P, "polly_initPriv_cLoop");
+
+    Builder.SetInsertPoint(CLoopBody, CLoopBody->getFirstInsertionPt());
+    IdxList.clear();
+    IdxList.push_back(Builder.getInt64(0));
+    IdxList.push_back(OMPStructValues ? CLoopIV : LLoopIV);
+    IdxList.push_back(OMPStructValues ? LLoopIV : CLoopIV);
+
+    auto *PrivGep = Builder.CreateGEP(PrivPtr, IdxList);
+    if (OMPStructValues) {
+      assert(OMPPrivatizationMap.count(BaseValue));
+      OMPPrivatizationMap[BaseValue].InitGep = PrivGep;
+    } else {
+      assert(VecPrivatizationMap.count(BaseValue));
+      VecPrivatizationMap[BaseValue].InitGep = PrivGep;
+    }
+    Builder.CreateStore(RA->getIdentityElement(BaseType), PrivGep);
+
+    CurBB = LLoopExit;
   }
+
+  Builder.SetInsertPoint(CurBB->getTerminator());
 
   isl_set_free(Domain);
   isl_union_map_free(Schedule);
 }
 
 void ClastStmtCodeGen::aggregatePrivatizationLocations(ReductionAccessSet &RAS,
-                                                    isl_set *Domain) {
+                                                       bool VectorLocations) {
+  ScalarEvolution &SE = P->getAnalysis<ScalarEvolution>();
+  SCEVExpander Rewriter(SE, "polly");
 
-  isl_set_free(Domain);
+  auto *CurBB = Builder.GetInsertBlock();
+  SmallVector<Value *, 2> IdxList;
+
+  for (ReductionAccess *RA : RAS) {
+    auto *BaseValue = const_cast<Value *>(RA->getBaseValue());
+    dbgs() << "AGG BV: " << *BaseValue << "\n";
+    auto &PrivInfo = VectorLocations ? VecPrivatizationMap[BaseValue]
+                                     : OMPPrivatizationMap[BaseValue];
+    BaseValue = VectorLocations && OMPPrivatizationMap.count(BaseValue)
+                    ? ValueMap[BaseValue]
+                    : BaseValue;
+    auto *PrivPtr = PrivInfo.Ptr;
+    BasicBlock *LLoopHeader, *LLoopBody, *LLoopExit;
+    Value *LLoopIV =
+        createEmptyLoop(CurBB, PrivInfo.Locations, LLoopHeader,
+                        LLoopBody, LLoopExit, P, "polly_aggPriv_lloop");
+
+    Builder.SetInsertPoint(LLoopBody, LLoopBody->getFirstInsertionPt());
+
+    auto *OffsetSCEV = SE.getSCEV(LLoopIV);
+    dbgs() << "OFFSET: " << *OffsetSCEV << "\n";
+    if (PrivInfo.OffsetSCEV)
+      OffsetSCEV = SE.getAddExpr(OffsetSCEV, PrivInfo.OffsetSCEV);
+    dbgs() << "OFFSET: " << *OffsetSCEV << "\n";
+    auto *OffsetValue =
+        Rewriter.expandCodeFor(OffsetSCEV, OffsetSCEV->getType(), Builder.GetInsertPoint());
+    dbgs() << "OFFSET: " << *OffsetValue << "\n";
+    auto *BaseGep =  Builder.CreateGEP(BaseValue, OffsetValue);
+    cast<Instruction>(BaseGep)->getParent()->getParent()->dump();
+    dbgs() << "BASEGEP: " << *BaseGep << "\n";
+    auto *BaseLoad = Builder.CreateLoad(BaseGep);
+
+    BasicBlock *CLoopHeader, *CLoopBody, *CLoopExit;
+    Value *CLoopIV =
+        createEmptyLoop(LLoopBody, PrivInfo.Copies, CLoopHeader, CLoopBody,
+                        CLoopExit, P, "polly_aggPriv_cLoop");
+
+    Builder.SetInsertPoint(CLoopHeader, CLoopHeader->getFirstInsertionPt());
+    auto *PrivVal =
+        Builder.CreatePHI(BaseValue->getType()->getPointerElementType(), 2);
+
+    Builder.SetInsertPoint(CLoopBody, CLoopBody->getFirstInsertionPt());
+    IdxList.clear();
+    IdxList.push_back(Builder.getInt64(0));
+    IdxList.push_back(VectorLocations ? LLoopIV : CLoopIV);
+    IdxList.push_back(VectorLocations ? CLoopIV : LLoopIV);
+    dbgs() << "PrivPtr: " << *PrivPtr << "\n";
+    auto *PrivGep = Builder.CreateGEP(PrivPtr, IdxList);
+    auto *PrivLoad = Builder.CreateLoad(PrivGep);
+    auto *PrivAgg = RA->getBinaryOperation(PrivVal, PrivLoad, Builder);
+
+    PrivVal->addIncoming(PrivAgg, CLoopBody);
+    PrivVal->addIncoming(BaseLoad, LLoopBody);
+
+    Builder.SetInsertPoint(CLoopExit, CLoopExit->getFirstInsertionPt());
+    Builder.CreateStore(PrivVal, BaseGep);
+
+    Builder.SetInsertPoint(LLoopExit, LLoopExit->getFirstInsertionPt());
+    Builder.CreateLifetimeEnd(PrivPtr);
+
+    ValueMap.erase(BaseValue);
+    CurBB = LLoopExit;
+  }
+
+  Builder.SetInsertPoint(CurBB->getTerminator());
+#if 0
+  dbgs() << "Pointer " << *Pointer << "\n";
+  dbgs() << "VecPtr " << *VecPointer << "\n";
+  Type *Int32T = Builder.getInt32Ty();
+  VectorType *VType;
+  Value *V1, *V2, *Mask;
+
+  PointerType *PointerTy = dyn_cast<PointerType>(Pointer->getType());
+  assert(PointerTy && "PointerType expected");
+  Type *ScalarType = PointerTy->getElementType();
+  assert(ScalarType && "ScalarType expected");
+  dbgs() << "PointerType: " << *PointerTy <<"\n";
+  dbgs() << "ScalarType: " << *ScalarType <<"\n";
+
+  Value *Init;
+  if (isa<PointerType>(VecPointer->getType())) {
+    Init = Builder.CreateLoad(VecPointer);
+    //Builder.CreateLifetimeEnd(VecPointer);
+  } else {
+    Init = VecPointer;
+  }
+
+  V1 = Init;
+  while (VectorDim > 2) {
+    VType = VectorType::get(ScalarType, VectorDim);
+    V2    = UndefValue::get(VType);
+    Mask  = getSequentialConstantVector(0, VectorDim / 2, Int32T);
+    Value *SV1 = Builder.CreateShuffleVector(V1, V2, Mask);
+    Mask  = getSequentialConstantVector(VectorDim / 2, VectorDim, Int32T);
+    Value *SV2 = Builder.CreateShuffleVector(V1, V2, Mask);
+    V1 = RA.getBinaryOperation(SV1, SV2, Builder.GetInsertPoint());
+    VectorDim /= 2;
+  }
+
+  assert(VectorDim == 2);
+  Value *L1 = Builder.CreateExtractElement(V1, Builder.getInt32(0));
+  Value *L2 = Builder.CreateExtractElement(V1, Builder.getInt32(1));
+  Value *TV = RA.getBinaryOperation(L1, L2, Builder.GetInsertPoint());
+
+  Value *LV = Builder.CreateLoad(Pointer);
+  Value *OS = RA.getBinaryOperation(TV, LV, Builder.GetInsertPoint());
+  Builder.CreateStore(OS, Pointer);
+//}
+
+//void ReductionHandler::aggregateReductionArrays(
+    //Type *ScalarType, Value *TargetArray, Value *SourceArrays,
+    //IRBuilder<> &Builder, const ReductionAccess &RA, LoopInfo &LI) {
+
+  LLVMContext &Ctx = Builder.getContext();
+  BasicBlock *BB = Builder.GetInsertBlock();
+  Function *OldFunc = BB->getParent();
+
+  auto InitialInsertPoint = Builder.GetInsertPoint();
+  SmallVector<Type *, 2> ArgTypes;
+  ArgTypes.push_back(TargetArray->getType());
+  ArgTypes.push_back(SourceArrays->getType());
+  FunctionType *FT = FunctionType::get(Type::getVoidTy(Ctx), ArgTypes, false);
+  Function *SubFunc = createSubFunc(FT, BB->getName() + ".tl.reduce",
+                                    OldFunc->getParent(), Builder);
+  Value *TargetArrayArg = SubFunc->arg_begin();
+  Value *SourceArraysArg = ++SubFunc->arg_begin();
+
+  Type *SourceArraysType = SourceArrays->getType()->getPointerElementType();
+  assert(SourceArraysType);
+  ArrayType *SrcArrayType =
+      cast<ArrayType>(SourceArraysType->getArrayElementType()->getPointerElementType());
+
+  SmallVector<Value *, 8> SrcIndices, TrgIndices;
+  buildLoopStructure(SrcArrayType, Builder, RA, LI, SrcIndices,
+                     TrgIndices);
+
+  Value *Sum = RA.getIdentityElement(ScalarType);
+  for (unsigned u = 0; u < SourceArraysType->getArrayNumElements(); u++) {
+    SmallVector<Value *, 4> Indices;
+    Indices.push_back(Builder.getInt32(0));
+    Indices.push_back(Builder.getInt32(u));
+    auto Gep0 = Builder.CreateGEP(SourceArraysArg, Indices);
+    auto Load = Builder.CreateLoad(Gep0);
+    auto Gep1 = Builder.CreateGEP(Load, SrcIndices);
+    auto Val = Builder.CreateLoad(Gep1);
+    // TODO mark Load/Store/Loop as parallelizable
+    Sum = RA.getBinaryOperation(Sum, Val, Builder.GetInsertPoint());
+  }
+
+  auto TrgGep = Builder.CreateGEP(TargetArrayArg, TrgIndices);
+  Builder.CreateStore(Sum, TrgGep);
+
+  Builder.SetInsertPoint(InitialInsertPoint);
+  Builder.CreateCall2(SubFunc, TargetArray, SourceArrays);
+
+//}
+#endif
 }
 
 ClastStmtCodeGen::ClastStmtCodeGen(Scop *scop, PollyIRBuilder &B, Pass *P)
@@ -1219,6 +1685,7 @@ public:
     AU.addRequired<DominatorTreeWrapperPass>();
     AU.addRequired<RegionInfo>();
     AU.addRequired<ScalarEvolution>();
+    AU.addRequired<ReductionInfo>();
     AU.addRequired<ScopDetection>();
     AU.addRequired<ScopInfo>();
     AU.addRequired<DataLayoutPass>();
@@ -1227,6 +1694,7 @@ public:
     AU.addPreserved<CloogInfo>();
     AU.addPreserved<Dependences>();
     AU.addPreserved<LoopInfo>();
+    AU.addPreserved<ReductionInfo>();
     AU.addPreserved<DominatorTreeWrapperPass>();
     AU.addPreserved<ScopDetection>();
     AU.addPreserved<ScalarEvolution>();
@@ -1247,6 +1715,7 @@ Pass *polly::createCodeGenerationPass() { return new CodeGeneration(); }
 
 INITIALIZE_PASS_BEGIN(CodeGeneration, "polly-codegen",
                       "Polly - Create LLVM-IR from SCoPs", false, false);
+INITIALIZE_AG_DEPENDENCY(ReductionInfo);
 INITIALIZE_PASS_DEPENDENCY(CloogInfo);
 INITIALIZE_PASS_DEPENDENCY(Dependences);
 INITIALIZE_PASS_DEPENDENCY(DominatorTreeWrapperPass);

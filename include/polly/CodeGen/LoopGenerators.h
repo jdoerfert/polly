@@ -66,6 +66,7 @@ public:
   /// @param VMap        This map is filled by createParallelLoop(). It
   ///                    maps the values in UsedValues to Values through which
   ///                    their content is available within the loop body.
+  /// @param NoThreads   The number of OpenMP threads to use (0 = unbounded)
   /// @param LoopBody    A pointer to an iterator that is set to point to the
   ///                    body of the created loop. It should be used to insert
   ///                    instructions that form the actual loop body.
@@ -73,7 +74,7 @@ public:
   /// @return Value*     The newly created induction variable for this loop.
   Value *createParallelLoop(Value *LowerBound, Value *UpperBound, Value *Stride,
                             SetVector<Value *> &UsedValues,
-                            ValueToValueMapTy &VMap,
+                            ValueToValueMapTy &VMap, int NoThreads,
                             BasicBlock::iterator *LoopBody);
 
 private:
