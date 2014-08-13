@@ -341,6 +341,39 @@ PWACtx SCEVAffinator::visitZeroExtendExpr(const SCEVZeroExtendExpr *Expr) {
   // bit-width is bigger than MaxZextSmallBitWidth we will employ overflow
   // assumptions and assume the "former negative" piece will not exist.
 
+
+  // Pattern matching rules to capture some bit and modulo computations:
+  //
+  //       EXP   %  2^C      <==>
+  // [A] (i + c) & (2^C - 1)  ==> zext iC {c,+,1}<%for_i> to IXX
+  // [B] (p + q) & (2^C - 1)  ==> zext iC (trunc iXX %p_add_q to iC) to iXX
+  // [C] (i + p) & (2^C - 1)  ==> zext iC {p & (2^C - 1),+,1}<%for_i> to iXX
+  //                          ==> zext iC {trunc iXX %p to iC,+,1}<%for_i> to
+  //       EXP   &  Cst      <==> (for specific constants)
+  // [D]    e    &   c        ==> zext iT %and to i64
+  // [E]    e    &  2^C       ==> zext i1 (trunc i32 (e /u 2^C) to i1)
+
+  // Check for [B] and [E].
+  //if (auto *OpTR = dyn_cast<SCEVTruncateExpr>(OpS)) {
+    //const SCEV *OpTROp = OpTR->getOperand();
+
+    //if (auto *OpTROpUD = dyn_cast<SCEVUDivExpr>(OpTROp)) {
+      //const SCEV *OpTROpUDLhs = OpTROpUD->getLHS();
+      //auto *OpTROpUDRhsCST = dyn_cast<SCEVConstant>(OpTROpUD->getRHS());
+      //assert(OpTROpUDRhsCST && "Assumed constant rhs of unsigned division");
+
+      //isl_val *CstVal = isl_val_int_from_ui(
+          //Ctx, OpTROpUDRhsCST->getValue()->getValue().getZExtValue());
+      //return buildAndExpr(visit(OpTROpUDLhs), CstVal);
+    //}
+
+    //return isl_pw_aff_mod_val(visit(OpTROp), isl_val_int_from_si(Ctx, ModCst));
+  //}
+
+  //// Check for [D].
+  //if (auto *OpUK = dyn_cast<SCEVUnknown>(OpS))
+    //return visitUnknown(OpUK);
+
   auto *Op = Expr->getOperand();
   auto OpPWAC = visit(Op);
 
@@ -524,6 +557,16 @@ PWACtx SCEVAffinator::visitUnknown(const SCEVUnknown *Expr) {
       return visitSDivInstruction(I);
     case Instruction::SRem:
       return visitSRemInstruction(I);
+    case Instruction::And:
+      return visitBinAndInstruction(I);
+    case Instruction::Or:
+      return visitBinOrInstruction(I);
+    case Instruction::XOr:
+      return visitBinXOrInstruction(I);
+      case Instruction::Shl:
+      case Instruction::AShr:
+      case Instruction::LShr:
+      return visitShiftInstruction(I);
     default:
       break; // Fall through.
     }
@@ -532,3 +575,140 @@ PWACtx SCEVAffinator::visitUnknown(const SCEVUnknown *Expr) {
   llvm_unreachable(
       "Unknowns SCEV was neither parameter nor a valid instruction.");
 }
+
+uint64_t SCEVAffinator::buildPowValues(uint64_t Cst,
+                                       __isl_give isl_val **PowVal,
+                                       __isl_give isl_val **NextPowVal) {
+  assert(Cst != 0 && "Zero constant should be catched earlier!");
+
+  uint64_t Pow, NextPow;
+  bool FirstBitSet;
+
+  NextPow = NextPowerOf2(Cst);
+  Pow = NextPow / 2;
+
+  FirstBitSet = (NextPow == 0);
+  if (FirstBitSet)
+    NextPow = Pow = 1ul << 63ul;
+
+  *NextPowVal = isl_val_int_from_ui(Ctx, NextPow);
+  if (FirstBitSet)
+    *NextPowVal = isl_val_mul_ui(*NextPowVal, 2);
+
+  do {
+    Cst = Cst - Pow;
+    Pow = Pow / 2;
+  } while (Cst & Pow);
+
+  *PowVal = isl_val_int_from_ui(Ctx, Pow ? Pow * 2 : 1);
+  return Cst;
+}
+
+
+__isl_give isl_pw_aff *
+SCEVAffinator::visitBinOrInstruction(Instruction *BinOr) {
+  isl_val *PowVal, *NextPowVal;
+  isl_pw_aff *ModSub, *ModAdd;
+  uint64_t Cst, Pow, NextPow;
+
+  auto *SE = S->getSE();
+  isl_pw_aff *LHS = visit(SE->getSCEV(I->getOperand(0)));
+
+  ConstantInt *RHS = cast<ConstantInt>(I->getOperand(1));
+  isl_val *RHSVal = isl_valFromAPInt(Ctx, RHS->getValue(), /* isSigned */ true);
+
+  assert(isl_val_get_den_si(RHSVal) == 1 &&
+         "Bit-expression assumed integer constant");
+
+  Cst = isl_val_get_num_si(RHSVal);
+  isl_val_free(RHSVal);
+
+  if (Cst == 0)
+    return LHS;
+
+  // For Cst = 00011010 we compute:
+  //   LHS + (-(LHS % 32) + LHS % 8 + (32-8)) + (-(LHS % 4) + LHS % 2 + (4-2))
+  // For Cst = 00011011 we compute:
+  //   LHS + (-(LHS % 32) + LHS % 8 + (32-8)) + (-(LHS % 4) + (4-1))
+  do {
+    Cst = buildPowValues(Cst, &PowVal, &NextPowVal);
+
+    ModSub = isl_pw_aff_mod_val(isl_pw_aff_copy(LHS), isl_val_copy(NextPowVal));
+    ModAdd = isl_pw_aff_mod_val(isl_pw_aff_copy(LHS), isl_val_copy(PowVal));
+    ModAdd = isl_pw_aff_add(
+        ModAdd, polly::getPwAff(LHS, isl_val_sub(NextPowVal, PowVal)));
+
+    LHS = isl_pw_aff_sub(isl_pw_aff_add(LHS, ModAdd), ModSub);
+  } while (Cst);
+
+  return LHS;
+}
+
+__isl_give isl_pw_aff *
+SCEVAffinator::visitBinAndInstruction(Instruction *BinAnd) {
+  isl_val *PowVal, *NextPowVal;
+  isl_pw_aff *ModSub, *ModAdd, *Res;
+  uint64_t Cst;
+
+  assert(isl_val_get_den_si(RHSVal) == 1 &&
+         "Bit-expression assumed integer constant");
+
+  Cst = isl_val_get_num_si(RHSVal);
+  isl_val_free(RHSVal);
+
+  // Early exit.
+  if (Cst == 0)
+    return isl_pw_aff_sub(isl_pw_aff_copy(LHS), LHS);
+
+  Res = isl_pw_aff_zero_on_domain(
+      isl_local_space_from_space(isl_pw_aff_get_domain_space(LHS)));
+
+  // For Cst = 00011010 we compute:
+  //  (LHS % 32 - LHS % 8) + (LHS % 4 - LHS % 2)
+  // For Cst = 00011011 we compute:
+  //  (LHS % 32 - LHS % 8) + (LHS % 4)
+  do {
+    Cst = buildPowValues(Cst, &PowVal, &NextPowVal);
+
+    ModAdd = isl_pw_aff_mod_val(isl_pw_aff_copy(LHS), NextPowVal);
+    ModSub = isl_pw_aff_mod_val(isl_pw_aff_copy(LHS), PowVal);
+    Res = isl_pw_aff_sub(isl_pw_aff_add(Res, ModAdd), ModSub);
+
+  } while (Cst);
+
+  isl_pw_aff_free(LHS);
+
+  return Res;
+}
+
+
+__isl_give isl_pw_aff *SCEVAffinator::visitShiftInstruction(Instruction *Shift) {
+  auto *SE = S->getSE();
+  isl_pw_aff *LHS = visit(SE->getSCEV(Shift->getOperand(0)));
+
+  ConstantInt *RHS = cast<ConstantInt>(Shift->getOperand(1));
+  isl_val *RHSVal = isl_valFromAPInt(Ctx, RHS->getValue(), /* isSigned */ true);
+
+  switch (Shift->getOpcode()) {
+  case Instruction::Shl:
+    return isl_pw_aff_scale_val(LHS, isl_val_2exp(RHSVal));
+  case Instruction::AShr:
+  case Instruction::LShr:
+    return isl_pw_aff_floor(isl_pw_aff_scale_down_val(LHS, isl_val_2exp(RHSVal)));
+  default:
+    llvm_unreachable("Assumed shift instruction");
+  }
+}
+
+
+__isl_give isl_pw_aff *
+ SCEVAffinator::visitBinXOrInstruction(Instruction *BinXOr) {
+   // We compute Xor using and and or operations:
+   //   LHS <xor> Cst <==> (LHS | Cst) - (LHS & Cst)
+   isl_pw_aff *OrExp, *AndExp;
+   // TODO:
+   //OrExp = buildOrExpr(isl_pw_aff_copy(LHS), isl_val_copy(RHSVal));
+   //AndExp = buildAndExpr(LHS, RHSVal);
+   //return isl_pw_aff_sub(OrExp, AndExp);
+   return nullptr;
+ }

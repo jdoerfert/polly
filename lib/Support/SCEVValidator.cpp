@@ -159,7 +159,78 @@ public:
     if (Type == SCEVType::IV)
       return ValidatorResult(SCEVType::INVALID);
     return ValidatorResult(SCEVType::PARAM, Expr);
+
+// Pattern matching rules to capture some bit and modulo computations:
+//
+//       EXP   %  2^C      <==>
+// [A] (i + c) & (2^C - 1)  ==> zext iC {c,+,1}<%for_i> to IXX
+// [B] (p + q) & (2^C - 1)  ==> zext iC (trunc iXX %p_add_q to iC) to iXX
+// [C] (i + p) & (2^C - 1)  ==> zext iC {p & (2^C - 1),+,1}<%for_i> to iXX
+//                          ==> zext iC {trunc iXX %p to iC,+,1}<%for_i> to
+//       EXP   &  Cst      <==>
+// [D]    e    &   c        ==> zext iT %and to i64 (for some constants)
+// [E]    e    &  2^C       ==> zext i1 (trunc i32 (e /u 2^C) to i1)
+
+// Check for [A] and [C].
+const SCEV *OpS = Expr->getOperand();
+if (auto *OpAR = dyn_cast<SCEVAddRecExpr>(OpS)) {
+  if (R->contains(OpAR->getLoop())) {
+    const SCEV *OpARStart = OpAR->getStart();
+
+    // Special case for [C].
+    if (auto *OpARStartTR = dyn_cast<SCEVTruncateExpr>(OpARStart))
+      OpARStart = OpARStartTR->getOperand();
+
+    ValidatorResult OpARStartVR = visit(OpARStart);
+    if (OpARStartVR.isConstant() && OpAR->getStepRecurrence(SE)->isOne())
+      return OpARStartVR;
   }
+}
+
+// Check for [B], [E].
+if (auto *OpTR = dyn_cast<SCEVTruncateExpr>(OpS)) {
+  const SCEV *OpTROp = OpTR->getOperand();
+
+  if (auto *OpTROpUD = dyn_cast<SCEVUDivExpr>(OpTROp)) {
+    const SCEV *OpTROpUDLhs = OpTROpUD->getLHS();
+    const SCEV *OpTROpUDRhs = OpTROpUD->getRHS();
+    if (auto *OpTROpUDRhsCST = dyn_cast<SCEVConstant>(OpTROpUDRhs))
+      if (OpTROpUDRhsCST->getValue()->getValue().isPowerOf2())
+        return visit(OpTROpUDLhs);
+  }
+
+  ValidatorResult OpTRVR = visit(OpTROp);
+  if (OpTRVR.isConstant())
+    return OpTRVR;
+}
+
+ValidatorResult Op = visit(OpS);
+switch (Op.getType()) {
+case SCEVType::INT:
+case SCEVType::PARAM:
+  // We currently do not represent a truncate expression as an affine
+  // expression. If it is constant during Scop execution, we treat it as a
+  // parameter.
+  return ValidatorResult(SCEVType::PARAM, Expr);
+case SCEVType::IV:
+  DEBUG(dbgs() << "INVALID: ZeroExtend of SCEVType::IV expression");
+  return ValidatorResult(SCEVType::INVALID);
+case SCEVType::INVALID:
+  return Op;
+}
+
+
+  }
+
+ValidatorResult visitShiftInstruction(Instruction *Shift, const SCEV *S) {
+  auto *RHS = Shift->getOperand(1);
+  auto *CI = dyn_cast<ConstantInt>(RHS);
+  if (!CI)
+    return visitGenericInst(Shift, S);
+
+  auto *LHS = Shift->getOperand(0);
+  return visit(SE.getSCEV(LHS));
+}
 
   class ValidatorResult visitTruncateExpr(const SCEVTruncateExpr *Expr) {
     return visitZeroExtendOrTruncateExpr(Expr, Expr->getOperand());
@@ -225,7 +296,7 @@ public:
 
   class ValidatorResult visitAddRecExpr(const SCEVAddRecExpr *Expr) {
     if (!Expr->isAffine()) {
-      DEBUG(dbgs() << "INVALID: AddRec is not affine");
+      DEBUG(dbgs() << "INVALID: AddRec is not affine\n");
       return ValidatorResult(SCEVType::INVALID);
     }
 
@@ -254,7 +325,7 @@ public:
       }
 
       DEBUG(dbgs() << "INVALID: AddRec within scop has non-int"
-                      "recurrence part");
+                      "recurrence part\n");
       return ValidatorResult(SCEVType::INVALID);
     }
 
@@ -299,7 +370,7 @@ public:
       ValidatorResult Op = visit(Expr->getOperand(i));
 
       if (!Op.isConstant()) {
-        DEBUG(dbgs() << "INVALID: UMaxExpr has a non-constant operand");
+        DEBUG(dbgs() << "INVALID: UMaxExpr has a non-constant operand\n");
         return ValidatorResult(SCEVType::INVALID);
       }
     }
@@ -394,6 +465,22 @@ public:
     return visit(DividendSCEV);
   }
 
+  ValidatorResult visitBinaryInstruction(Instruction *BinOr, const SCEV *S) {
+    assert(BinOr->getOpcode() == Instruction::Or &&
+           "Assumed or instruction!");
+
+    auto *LHS = BinOr->getOperand(0);
+    auto *RHS = BinOr->getOperand(1);
+    auto *CI = dyn_cast<ConstantInt>(LHS);
+    if (!CI)
+       *CI = dyn_cast<ConstantInt>(RHS);
+
+    if (!CI)
+      return visitGenericInst(BinOr, S);
+
+    return visit(SE.getSCEV(LHS == CI ? RHS : LHS));
+  }
+
   ValidatorResult visitUnknown(const SCEVUnknown *Expr) {
     Value *V = Expr->getValue();
 
@@ -403,7 +490,7 @@ public:
     }
 
     if (isa<UndefValue>(V)) {
-      DEBUG(dbgs() << "INVALID: UnknownExpr references an undef value");
+      DEBUG(dbgs() << "INVALID: UnknownExpr references an undef value\n");
       return ValidatorResult(SCEVType::INVALID);
     }
 
@@ -421,6 +508,14 @@ public:
         return visitSRemInstruction(I, Expr);
       case Instruction::Call:
         return visitCallInstruction(I, Expr);
+      case Instruction::And:
+      case Instruction::Or:
+      case Instruction::XOr:
+        return visitBinaryInstruction(I, Expr);
+      case Instruction::Shl:
+      case Instruction::AShr:
+      case Instruction::LShr:
+        return visitShiftInstruction(I, Expr);
       default:
         return visitGenericInst(I, Expr);
       }

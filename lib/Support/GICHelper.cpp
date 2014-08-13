@@ -25,6 +25,23 @@
 
 using namespace llvm;
 
+isl_pw_aff *polly::getPwAff(isl_pw_aff *Domain, isl_val *Val) {
+  isl_aff *Zero = isl_aff_zero_on_domain(
+      isl_local_space_from_space(isl_pw_aff_get_domain_space(Domain)));
+  isl_aff *Inc = isl_aff_add_constant_val(Zero, Val);
+  return isl_pw_aff_from_aff(Inc);
+}
+
+isl_pw_aff *polly::getPwAff(isl_space *Domain, int i) {
+  isl_aff *Zero = isl_aff_zero_on_domain(isl_local_space_from_space(Domain));
+  isl_aff *Inc = isl_aff_add_constant_si(Zero, i);
+  return isl_pw_aff_from_aff(Inc);
+}
+
+isl_pw_aff *polly::incrementPwAff(isl_pw_aff *Aff, int i) {
+  return isl_pw_aff_add(Aff, getPwAff(isl_pw_aff_get_domain_space(Aff), i));
+}
+
 __isl_give isl_val *polly::isl_valFromAPInt(isl_ctx *Ctx, const APInt Int,
                                             bool IsSigned) {
   APInt Abs;

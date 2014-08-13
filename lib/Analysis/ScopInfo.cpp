@@ -742,7 +742,8 @@ isl::basic_map MemoryAccess::createBasicAccessMap(ScopStmt *Statement) {
 // expression of each array evaluates for each statement instance that is
 // executed to a value that is larger than zero and strictly smaller than the
 // size of the corresponding dimension). The only exception is the outermost
-// dimension for which we do not need to assume any upper bound.  At this point
+// dimension for which we do not need to assume any upper bound.  At this
+// point
 // we formalize this assumption to ensure that at code generation time the
 // relevant run-time checks can be generated.
 //
@@ -754,7 +755,8 @@ isl::basic_map MemoryAccess::createBasicAccessMap(ScopStmt *Statement) {
 // statement. If we now project out all loop dimensions, we obtain a set of
 // parameters that may cause statement instances to be executed that may
 // possibly yield out of bound memory accesses. The complement of these
-// constraints is the set of constraints that needs to be assumed to ensure such
+// constraints is the set of constraints that needs to be assumed to ensure
+// such
 // statement instances are never executed.
 void MemoryAccess::assumeNoOutOfBound() {
   if (PollyIgnoreInbounds)

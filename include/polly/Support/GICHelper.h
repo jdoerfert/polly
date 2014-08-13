@@ -69,6 +69,11 @@ namespace polly {
 __isl_give isl_val *isl_valFromAPInt(isl_ctx *Ctx, const llvm::APInt Int,
                                      bool IsSigned);
 
+__isl_give isl_pw_aff *getPwAff(__isl_keep isl_pw_aff *Domain, __isl_take isl_val *Val);
+__isl_give isl_pw_aff *getPwAff(__isl_take isl_space *Domain, int i);
+__isl_give isl_pw_aff *incrementPwAff(__isl_take isl_pw_aff *Aff, int i);
+
+
 /// Translate an llvm::APInt to an isl::val.
 ///
 /// Translate the bitsequence without sign information as provided by APInt into
