@@ -288,10 +288,11 @@ private:
 
   /// Check if all basic block in the region are valid.
   ///
+  /// @param SR The currently traversed subregion.
   /// @param Context The context of scop detection.
   ///
   /// @return True if all blocks in R are valid, false otherwise.
-  bool allBlocksValid(DetectionContext &Context) const;
+  bool allBlocksValid(Region &SR, DetectionContext &Context) const;
 
   /// Check if a region has sufficient compute instructions.
   ///
@@ -452,11 +453,10 @@ private:
   ///
   /// @param BB               The BB to check the control flow.
   /// @param IsLoopBranch     Flag to indicate the branch is a loop exit/latch.
-  //  @param AllowUnreachable Allow unreachable statements.
   /// @param Context          The context of scop detection.
   ///
   /// @return True if the BB contains only valid control flow.
-  bool isValidCFG(BasicBlock &BB, bool IsLoopBranch, bool AllowUnreachable,
+  bool isValidCFG(BasicBlock &BB, bool IsLoopBranch,
                   DetectionContext &Context) const;
 
   /// Is a loop valid with respect to a given region.

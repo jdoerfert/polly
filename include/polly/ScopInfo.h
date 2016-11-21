@@ -2277,6 +2277,8 @@ public:
     return getRequiredInvariantLoads().count(LI);
   }
 
+  bool isErrorBlock(BasicBlock &BB) const { return DC.ErrorBlocks.count(&BB); }
+
   /// Return the set of boxed (thus overapproximated) loops.
   const BoxedLoopsSetTy &getBoxedLoops() const { return DC.BoxedLoopsSet; }
 

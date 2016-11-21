@@ -375,28 +375,6 @@ Value *polly::expandCodeFor(Scop &S, ScalarEvolution &SE, const DataLayout &DL,
   return Expander.expandCodeFor(E, Ty, IP);
 }
 
-bool polly::isErrorBlock(BasicBlock &BB, const Region &R) {
-  if (!PollyAllowErrorBlocks)
-    return false;
-
-  if (!R.contains(&BB))
-    return false;
-
-  if (isa<UnreachableInst>(BB.getTerminator()))
-    return true;
-
-  for (Instruction &Inst : BB)
-    if (CallInst *CI = dyn_cast<CallInst>(&Inst)) {
-      if (isIgnoredIntrinsic(CI))
-        continue;
-
-      if (!CI->doesNotAccessMemory())
-        return true;
-    }
-
-  return false;
-}
-
 Value *polly::getConditionFromTerminator(TerminatorInst *TI) {
   if (BranchInst *BR = dyn_cast<BranchInst>(TI)) {
     if (BR->isUnconditional())

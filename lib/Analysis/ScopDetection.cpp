@@ -51,6 +51,7 @@
 #include "polly/ScopDetectionDiagnostic.h"
 #include "polly/Support/SCEVValidator.h"
 #include "polly/Support/ScopLocation.h"
+#include "llvm/ADT/PostOrderIterator.h"
 #include "llvm/ADT/Statistic.h"
 #include "llvm/Analysis/AliasAnalysis.h"
 #include "llvm/Analysis/LoopInfo.h"
@@ -1065,7 +1066,8 @@ Region *ScopDetection::expandRegion(Region &R) {
       // If the exit is valid check all blocks
       //  - if true, a valid region was found => store it + keep expanding
       //  - if false, .tbd. => stop  (should this really end the loop?)
-      if (!allBlocksValid(Context) || Context.Log.hasErrors()) {
+      if (!allBlocksValid(Context.CurRegion, Context) ||
+          Context.Log.hasErrors()) {
         removeCachedResults(*ExpandedRegion);
         DetectionContextMap.erase(It.first);
         break;
@@ -1186,48 +1188,43 @@ void ScopDetection::findScops(Region &R) {
   }
 }
 
-bool ScopDetection::allBlocksValid(DetectionContext &Context) const {
-  Region &CurRegion = Context.CurRegion;
+bool ScopDetection::allBlocksValid(Region &SR,
+                                   DetectionContext &Context) const {
+  auto &CurRegion = Context.CurRegion;
 
-  for (const BasicBlock *BB : CurRegion.blocks()) {
-    Loop *L = LI->getLoopFor(BB);
+  ReversePostOrderTraversal<Region *> RTraversal(&SR);
+  for (auto *RN : RTraversal) {
+    if (RN->isSubRegion()) {
+      if (!allBlocksValid(*RN->getNodeAs<Region>(), Context))
+        return false;
+      continue;
+    }
+
+    auto *BB = RN->getNodeAs<BasicBlock>();
+    auto *L = LI->getLoopFor(BB);
     if (L && L->getHeader() == BB && CurRegion.contains(L) &&
         (!isValidLoop(L, Context) && !KeepGoing))
       return false;
-  }
 
-  SmallPtrSet<BasicBlock *, 32> Visited;
-  for (BasicBlock *BB : CurRegion.blocks()) {
-    Visited.insert(BB);
-    bool IsErrorBlock = isErrorBlock(*BB, CurRegion);
-
-    if (!IsErrorBlock) {
-      // If all predecessors are error blocks the block will become one too.
-      auto PredIsErrorBB = [&](BasicBlock *PredBB) {
-        if (PredBB == BB)
-          return true;
-        if (!Visited.count(PredBB))
-          return isErrorBlock(*PredBB, CurRegion);
-        return Context.ErrorBlocks.count(PredBB) > 0;
-      };
-      IsErrorBlock = std::all_of(pred_begin(BB), pred_end(BB), PredIsErrorBB);
-    }
-
-    if (IsErrorBlock)
-      Context.ErrorBlocks.insert(BB);
-
-    // Also check exception blocks (and possibly register them as non-affine
-    // regions). Even though exception blocks are not modeled, we use them
-    // to forward-propagate domain constraints during ScopInfo construction.
     if (!isValidCFG(*BB, false, Context) && !KeepGoing)
       return false;
 
-    if (IsErrorBlock)
-      continue;
+    // Predicate to check if a block is an error blocks or the current one.
+    auto IsErrorOrSelf = [&](BasicBlock *PredBB) {
+      if (PredBB == BB)
+        return true;
+      return Context.ErrorBlocks.count(PredBB) > 0;
+    };
 
-    for (BasicBlock::iterator I = BB->begin(), E = --BB->end(); I != E; ++I)
-      if (!isValidInstruction(*I, Context) && !KeepGoing)
-        return false;
+    // Check if all predecessors are error blocks.
+    if (std::all_of(pred_begin(BB), pred_end(BB), IsErrorOrSelf))
+      Context.ErrorBlocks.insert(BB);
+
+    for (auto &I : *BB)
+      if (!isValidInstruction(I, Context) && !KeepGoing) {
+        Context.ErrorBlocks.insert(BB);
+        break;
+      }
   }
 
   auto IsOutsideOrErroBlock = [&](BasicBlock *BB) {
@@ -1339,7 +1336,7 @@ bool ScopDetection::isValidRegion(DetectionContext &Context) const {
       &(CurRegion.getEntry()->getParent()->getEntryBlock()))
     return invalid<ReportEntry>(Context, /*Assert=*/true, CurRegion.getEntry());
 
-  if (!allBlocksValid(Context))
+  if (!allBlocksValid(Context.CurRegion, Context))
     return false;
 
   DebugLoc DbgLoc;
