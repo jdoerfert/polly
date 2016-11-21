@@ -919,16 +919,6 @@ bool ScopDetection::isValidMemoryAccess(MemAccInst Inst,
 
 bool ScopDetection::isValidInstruction(Instruction &Inst,
                                        DetectionContext &Context) const {
-  for (auto &Op : Inst.operands()) {
-    auto *OpInst = dyn_cast<Instruction>(&Op);
-
-    if (!OpInst)
-      continue;
-
-    if (isErrorBlock(*OpInst->getParent(), Context.CurRegion, *LI, *DT))
-      return false;
-  }
-
   if (isa<LandingPadInst>(&Inst) || isa<ResumeInst>(&Inst))
     return false;
 
