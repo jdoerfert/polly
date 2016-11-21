@@ -1196,8 +1196,25 @@ bool ScopDetection::allBlocksValid(DetectionContext &Context) const {
       return false;
   }
 
+  SmallPtrSet<BasicBlock *, 32> Visited;
   for (BasicBlock *BB : CurRegion.blocks()) {
-    bool IsErrorBlock = isErrorBlock(*BB, CurRegion, *LI, *DT);
+    Visited.insert(BB);
+    bool IsErrorBlock = isErrorBlock(*BB, CurRegion);
+
+    if (!IsErrorBlock) {
+      // If all predecessors are error blocks the block will become one too.
+      auto PredIsErrorBB = [&](BasicBlock *PredBB) {
+        if (PredBB == BB)
+          return true;
+        if (!Visited.count(PredBB))
+          return isErrorBlock(*PredBB, CurRegion);
+        return Context.ErrorBlocks.count(PredBB) > 0;
+      };
+      IsErrorBlock = std::all_of(pred_begin(BB), pred_end(BB), PredIsErrorBB);
+    }
+
+    if (IsErrorBlock)
+      Context.ErrorBlocks.insert(BB);
 
     // Also check exception blocks (and possibly register them as non-affine
     // regions). Even though exception blocks are not modeled, we use them
@@ -1212,6 +1229,14 @@ bool ScopDetection::allBlocksValid(DetectionContext &Context) const {
       if (!isValidInstruction(*I, Context) && !KeepGoing)
         return false;
   }
+
+  auto IsOutsideOrErroBlock = [&](BasicBlock *BB) {
+    return !CurRegion.contains(BB) || Context.ErrorBlocks.count(BB);
+  };
+
+  auto *ExitBB = CurRegion.getExit();
+  if (std::all_of(pred_begin(ExitBB), pred_end(ExitBB), IsOutsideOrErroBlock))
+    return false;
 
   if (!hasAffineMemoryAccesses(Context))
     return false;

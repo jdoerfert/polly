@@ -2246,12 +2246,11 @@ static inline unsigned getNumBlocksInRegionNode(RegionNode *RN) {
   return std::distance(R->block_begin(), R->block_end());
 }
 
-static bool containsErrorBlock(RegionNode *RN, const Region &R, LoopInfo &LI,
-                               const DominatorTree &DT) {
+static bool containsErrorBlock(RegionNode *RN, const Region &R) {
   if (!RN->isSubRegion())
-    return isErrorBlock(*RN->getNodeAs<BasicBlock>(), R, LI, DT);
+    return isErrorBlock(*RN->getNodeAs<BasicBlock>(), R);
   for (BasicBlock *BB : RN->getNodeAs<Region>()->blocks())
-    if (isErrorBlock(*BB, R, LI, DT))
+    if (isErrorBlock(*BB, R))
       return true;
   return false;
 }
@@ -2302,7 +2301,7 @@ bool Scop::buildDomains(Region *R, DominatorTree &DT, LoopInfo &LI) {
   DomainMap[EntryBB] = S;
 
   if (IsOnlyNonAffineRegion)
-    return !containsErrorBlock(R->getNode(), *R, LI, DT);
+    return !containsErrorBlock(R->getNode(), *R);
 
   if (!buildDomainsWithBranchConstraints(R, DT, LI))
     return false;
@@ -2407,7 +2406,7 @@ bool Scop::propagateInvalidStmtDomains(Region *R, DominatorTree &DT,
       }
     }
 
-    bool ContainsErrorBlock = containsErrorBlock(RN, getRegion(), LI, DT);
+    bool ContainsErrorBlock = containsErrorBlock(RN, getRegion());
     BasicBlock *BB = getRegionNodeBasicBlock(RN);
     ScopStmt *Stmt = getStmtFor(BB);
     isl_set *&Domain = DomainMap[BB];
@@ -2550,7 +2549,7 @@ bool Scop::buildDomainsWithBranchConstraints(Region *R, DominatorTree &DT,
       }
     }
 
-    if (containsErrorBlock(RN, getRegion(), LI, DT))
+    if (containsErrorBlock(RN, getRegion()))
       HasErrorBlock = true;
 
     BasicBlock *BB = getRegionNodeBasicBlock(RN);

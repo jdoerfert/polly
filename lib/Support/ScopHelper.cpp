@@ -375,37 +375,15 @@ Value *polly::expandCodeFor(Scop &S, ScalarEvolution &SE, const DataLayout &DL,
   return Expander.expandCodeFor(E, Ty, IP);
 }
 
-bool polly::isErrorBlock(BasicBlock &BB, const Region &R, LoopInfo &LI,
-                         const DominatorTree &DT) {
+bool polly::isErrorBlock(BasicBlock &BB, const Region &R) {
   if (!PollyAllowErrorBlocks)
+    return false;
+
+  if (!R.contains(&BB))
     return false;
 
   if (isa<UnreachableInst>(BB.getTerminator()))
     return true;
-
-  if (LI.isLoopHeader(&BB))
-    return false;
-
-  // Basic blocks that are always executed are not considered error blocks,
-  // as their execution can not be a rare event.
-  bool DominatesAllPredecessors = true;
-  for (auto Pred : predecessors(R.getExit()))
-    if (R.contains(Pred) && !DT.dominates(&BB, Pred))
-      DominatesAllPredecessors = false;
-
-  if (DominatesAllPredecessors)
-    return false;
-
-  // FIXME: This is a simple heuristic to determine if the load is executed
-  //        in a conditional. However, we actually would need the control
-  //        condition, i.e., the post dominance frontier. Alternatively we
-  //        could walk up the dominance tree until we find a block that is
-  //        not post dominated by the load and check if it is a conditional
-  //        or a loop header.
-  auto *DTNode = DT.getNode(&BB);
-  auto *IDomBB = DTNode->getIDom()->getBlock();
-  if (LI.isLoopHeader(IDomBB))
-    return false;
 
   for (Instruction &Inst : BB)
     if (CallInst *CI = dyn_cast<CallInst>(&Inst)) {

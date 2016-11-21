@@ -446,7 +446,7 @@ void ScopBuilder::buildAccessFunctions(BasicBlock &BB,
                                        bool IsExitBlock) {
   // We do not build access functions for error blocks, as they may contain
   // instructions we can not model.
-  if (isErrorBlock(BB, scop->getRegion(), LI, DT) && !IsExitBlock)
+  if (isErrorBlock(BB, scop->getRegion()) && !IsExitBlock)
     return;
 
   Loop *L = LI.getLoopFor(&BB);

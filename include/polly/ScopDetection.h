@@ -131,6 +131,9 @@ public:
     AliasSetTracker AST; // The AliasSetTracker to hold the alias information.
     bool Verifying;      // If we are in the verification phase?
 
+    /// Set of error blocks in this context.
+    SmallPtrSet<llvm::BasicBlock *, 8> ErrorBlocks;
+
     /// Container to remember rejection reasons for this region.
     RejectLog Log;
 
