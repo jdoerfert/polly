@@ -440,9 +440,6 @@ bool ScopDetection::isValidCFG(BasicBlock &BB, bool IsLoopBranch,
 
 bool ScopDetection::isValidCallInst(CallInst &CI,
                                     DetectionContext &Context) const {
-  if (CI.doesNotReturn())
-    return false;
-
   if (CI.doesNotAccessMemory())
     return true;
 

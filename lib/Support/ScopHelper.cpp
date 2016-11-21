@@ -414,8 +414,6 @@ bool polly::isErrorBlock(BasicBlock &BB, const Region &R, LoopInfo &LI,
 
       if (!CI->doesNotAccessMemory())
         return true;
-      if (CI->doesNotReturn())
-        return true;
     }
 
   return false;
