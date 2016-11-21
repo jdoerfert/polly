@@ -407,14 +407,10 @@ bool ScopDetection::isValidBranch(BasicBlock &BB, BranchInst *BI,
 }
 
 bool ScopDetection::isValidCFG(BasicBlock &BB, bool IsLoopBranch,
-                               bool AllowUnreachable,
                                DetectionContext &Context) const {
   Region &CurRegion = Context.CurRegion;
 
   TerminatorInst *TI = BB.getTerminator();
-
-  if (AllowUnreachable && isa<UnreachableInst>(TI))
-    return true;
 
   // Return instructions are only valid if the region is the top level region.
   if (isa<ReturnInst>(TI) && !CurRegion.getExit() && TI->getNumOperands() == 0)
@@ -971,7 +967,7 @@ bool ScopDetection::canUseISLTripCount(Loop *L,
   L->getExitingBlocks(LoopControlBlocks);
   L->getLoopLatches(LoopControlBlocks);
   for (BasicBlock *ControlBB : LoopControlBlocks) {
-    if (!isValidCFG(*ControlBB, true, false, Context))
+    if (!isValidCFG(*ControlBB, true, Context))
       return false;
   }
 
@@ -1218,7 +1214,7 @@ bool ScopDetection::allBlocksValid(DetectionContext &Context) const {
     // Also check exception blocks (and possibly register them as non-affine
     // regions). Even though exception blocks are not modeled, we use them
     // to forward-propagate domain constraints during ScopInfo construction.
-    if (!isValidCFG(*BB, false, IsErrorBlock, Context) && !KeepGoing)
+    if (!isValidCFG(*BB, false, Context) && !KeepGoing)
       return false;
 
     if (IsErrorBlock)
