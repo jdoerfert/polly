@@ -21,6 +21,7 @@ bb:
 bb1:                                              ; preds = %bb6, %bb
   %tmp2 = phi %struct.wibble* [ %tmp7, %bb6 ], [ undef, %bb ]
   %tmp = load %struct.blam*, %struct.blam** @global, align 8, !tbaa !1
+  call void @wobble()
   br label %bb3
 
 bb3:                                              ; preds = %bb1
@@ -32,13 +33,14 @@ bb5:                                              ; preds = %bb3
 
 bb6:                                              ; preds = %bb5, %bb3
   %tmp7 = phi %struct.wibble* [ %tmp2, %bb3 ], [ undef, %bb5 ]
+  call void @wobble()
   br i1 undef, label %bb8, label %bb1
 
 bb8:                                              ; preds = %bb6
   br label %bb9
 
 bb9:                                              ; preds = %bb8
-  unreachable
+  ret void
 }
 
 attributes #0 = { nounwind uwtable "disable-tail-calls"="false" "less-precise-fpmad"="false" "no-frame-pointer-elim"="false" "no-infs-fp-math"="false" "no-nans-fp-math"="false" "stack-protector-buffer-size"="8" "target-cpu"="x86-64" "target-features"="+mmx,+sse,+sse2" "unsafe-fp-math"="false" "use-soft-float"="false" }

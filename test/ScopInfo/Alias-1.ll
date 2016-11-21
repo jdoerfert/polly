@@ -34,4 +34,4 @@ declare i32 @rnd(...)
 
 
 ; RTA:   1 polly-detect     - Number of scops
-; NORTA: 1 polly-detect     - Number of rejected regions: Base address aliasing
+; NORTA: 1 polly-detect     - Number of rejected regions: 

@@ -29,22 +29,22 @@ bb18:                                             ; preds = %bb14
 
 bb19:                                             ; preds = %bb18, %bb15, %bb13
   %tmp20 = phi i32 [ undef, %bb13 ], [ %tmp, %bb15 ], [ %tmp, %bb18 ]
-  unreachable
+  ret void
 
 bb21:                                             ; preds = %bb8
-  unreachable
+  ret void
 
 bb22:                                             ; preds = %bb8, %bb8, %bb8, %bb8
   br label %bb23
 
 bb23:                                             ; preds = %bb22
-  unreachable
+  ret void
 
 bb24:                                             ; preds = %bb8, %bb8
-  unreachable
+  ret void
 
 bb25:                                             ; preds = %bb2
-  unreachable
+  ret void
 }
 
 declare void @quux() #1

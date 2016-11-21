@@ -533,6 +533,7 @@ private:
   /// reachable.
   void markAndSweep(LoopInfo *LI) {
     DenseSet<MemoryAccess *> UsedMA;
+    DenseMap<Instruction *, SmallPtrSet<const ScopArrayInfo *, 4>> RetMAs;
     DenseSet<VirtualInstruction> UsedInsts;
 
     // Get all reachable instructions and accesses.
@@ -546,6 +547,14 @@ private:
       AllMAs.append(Stmt.begin(), Stmt.end());
 
     for (MemoryAccess *MA : AllMAs) {
+      if (MA->getAccessInstruction() &&
+          isa<ReturnInst>(MA->getAccessInstruction())) {
+        if (MA->isAffine())
+          continue;
+        auto &MAs = RetMAs[MA->getAccessInstruction()];
+        if (MAs.insert(MA->getScopArrayInfo()).second)
+          continue;
+      }
       if (UsedMA.count(MA))
         continue;
       DEBUG(dbgs() << "Removing " << MA << " because its value is not used\n");
@@ -651,6 +660,13 @@ public:
     DEBUG(dbgs() << "Cleanup unused accesses...\n");
     LoopInfo *LI = &getAnalysis<LoopInfoWrapperPass>().getLoopInfo();
     markAndSweep(LI);
+
+    isl::set Ctx = S.getAssumedContext();
+    isl::set InvCtx = S.getInvalidContext();
+    if (isl_set_n_basic_set(InvCtx.get()) < 7)
+      Ctx = Ctx.intersect(InvCtx.complement());
+    for (ScopStmt &Stmt : S)
+      Stmt.simplifyDomain(Ctx);
 
     DEBUG(dbgs() << "Removing statements without side effects...\n");
     removeUnnecessaryStmts();

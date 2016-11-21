@@ -57,7 +57,7 @@ for.body.3:                                       ; preds = %for.cond.1
 
 if.then:                                          ; preds = %for.body.3
   call void (...) @exception() #2
-  unreachable
+  ret void
 
 if.end:                                           ; preds = %for.body.3
   %cmp5 = icmp sgt i64 %i.0, 99
@@ -65,7 +65,7 @@ if.end:                                           ; preds = %for.body.3
 
 if.then.6:                                        ; preds = %if.end
   call void (...) @exception() #2
-  unreachable
+  ret void
 
 if.end.7:                                         ; preds = %if.end
   %conv = sitofp i64 %i.0 to float

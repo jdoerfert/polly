@@ -9,9 +9,9 @@ target datalayout = "e-m:e-i64:64-f80:128-n8:16:32:64-S128"
 @inbuff = external global i8*, align 8
 
 ; Function Attrs: uwtable
-define void @_Z13dotableswitchP9Classfile() {
+define void @_Z13dotableswitchP9Classfile(i1 %i1) {
 entry:
-  br i1 undef, label %for.end, label %while.body
+  br i1 %i1, label %for.end, label %while.body
 
 while.body:                                       ; preds = %while.body, %entry
   store i8* undef, i8** @inbuff, align 8

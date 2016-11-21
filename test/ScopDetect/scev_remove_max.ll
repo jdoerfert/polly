@@ -33,7 +33,7 @@ DrawSegment.exit34:                               ; preds = %.split
   br i1 false, label %bb, label %.lr.ph.i24
 
 bb:                                               ; preds = %.lr.ph.i24
-  unreachable
+  ret void
 
 DrawSegment.exit:                                 ; preds = %.split
   ret void

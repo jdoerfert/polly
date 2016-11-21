@@ -83,7 +83,7 @@ bb35:                                             ; preds = %bb34, %bb27
   br i1 undef, label %bb34, label %bb36
 
 bb36:                                             ; preds = %bb35
-  unreachable
+  ret void
 
 bb37:                                             ; preds = %bb32, %bb26
   %38 = add nsw i32 %band.2, 1                    ; <i32> [#uses=1]
@@ -101,7 +101,7 @@ bb51:                                             ; preds = %bb50
   br i1 undef, label %bb52, label %bb53
 
 bb52:                                             ; preds = %bb51
-  unreachable
+  ret void
 
 bb53:                                             ; preds = %bb51
   br label %bb54

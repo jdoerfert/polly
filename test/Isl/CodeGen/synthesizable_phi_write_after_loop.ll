@@ -14,12 +14,12 @@
 ; CHECK-NEXT:   store i32 2, i32* %phi.phiops
 ; CHECK-NEXT:   br label %polly.stmt.join
 
-define i32 @func() {
+define i32 @func(i1 %a) {
 entry:
   br label %start
 
 start:
-  br i1 true, label %loop, label %join
+  br i1 %a, label %loop, label %join
 
 loop:
   %i = phi i32 [ 0, %start ], [ %i.inc, %loop ]

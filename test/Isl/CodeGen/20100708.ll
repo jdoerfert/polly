@@ -12,6 +12,6 @@ bb.i451:                                          ; preds = %bb.i451, %bb.i451.p
   br label %bb.i451
 
 check_stack.exit456.thread:                       ; preds = %bb116
-  unreachable
+  ret void
 
 }

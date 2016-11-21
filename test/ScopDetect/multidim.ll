@@ -1,7 +1,7 @@
 ; RUN: opt %loadPolly -polly-detect -analyze < %s | FileCheck %s
 target datalayout = "e-m:e-i64:64-f80:128-n8:16:32:64-S128"
 
-; CHECK: Valid Region for Scop: bb19 => bb20
+; CHECK: Valid Region for Scop: bb19 => bb24
 
 ; Make sure we do not crash in this test case.
 
@@ -32,5 +32,5 @@ bb20:                                             ; preds = %bb19
   br label %bb24
 
 bb24:                                             ; preds = %bb20
-  unreachable
+  ret void
 }

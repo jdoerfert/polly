@@ -40,7 +40,7 @@ psetq.exit220.i:                                  ; preds = %bb3.i218.i, %bb2.i2
   br i1 undef, label %bb14.i76, label %bb15.i77
 
 bb14.i76:                                         ; preds = %psetq.exit220.i
-  unreachable
+  ret void
 
 bb15.i77:                                         ; preds = %psetq.exit220.i
   br i1 %0, label %psetq.exit238.i, label %bb2.i235.i
@@ -49,11 +49,11 @@ bb2.i235.i:                                       ; preds = %bb15.i77
   br i1 undef, label %bb3.i236.i, label %psetq.exit238.i
 
 bb3.i236.i:                                       ; preds = %bb2.i235.i
-  unreachable
+  ret void
 
 psetq.exit238.i:                                  ; preds = %bb2.i235.i, %bb15.i77
-  unreachable
+  ret void
 
 bb56.i.loopexit:                                  ; preds = %psetq.exit172.i
-  unreachable
+  ret void
 }

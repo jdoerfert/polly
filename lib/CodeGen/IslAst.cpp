@@ -364,13 +364,6 @@ static isl::ast_expr buildCondition(Scop &S, isl::ast_build Build,
   isl::ast_expr False =
       isl::ast_expr::from_val(isl::val::int_from_ui(Build.get_ctx(), 0));
 
-  const ScopArrayInfo *BaseLeft =
-      ScopArrayInfo::getFromId(Left)->getBasePtrOriginSAI();
-  const ScopArrayInfo *BaseRight =
-      ScopArrayInfo::getFromId(Right)->getBasePtrOriginSAI();
-  if (BaseLeft && BaseLeft == BaseRight)
-    return True;
-
   isl::set Params = S.getContext();
 
   isl::ast_expr NonAliasGroup, MinExpr, MaxExpr;
@@ -805,6 +798,10 @@ bool IslAstInfoWrapperPass::runOnScop(Scop &Scop) {
 
   const Dependences &D =
       getAnalysis<DependenceInfo>().getDependences(Dependences::AL_Statement);
+  if (!D.hasValidDependences()) {
+    Ast.reset();
+    return false;
+  }
 
   if (D.getSharedIslCtx() != Scop.getSharedIslCtx()) {
     DEBUG(dbgs() << "Got dependence analysis for different SCoP/isl_ctx\n");

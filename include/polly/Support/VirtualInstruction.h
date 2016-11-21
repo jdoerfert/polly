@@ -73,18 +73,15 @@ private:
   /// The type of value use.
   UseKind Kind;
 
-  /// The value represented as llvm::SCEV expression.
-  const SCEV *ScevExpr;
-
   /// If this is an inter-statement (or read-only) use, contains the
   /// MemoryAccess that makes the value available in this statement. In case of
   /// intra-statement uses, can contain a MemoryKind::Array access. In all other
   /// cases, it is a nullptr.
   MemoryAccess *InputMA;
 
-  VirtualUse(ScopStmt *User, Value *Val, UseKind Kind, const SCEV *ScevExpr,
+  VirtualUse(ScopStmt *User, Value *Val, UseKind Kind,
              MemoryAccess *InputMA)
-      : User(User), Val(Val), Kind(Kind), ScevExpr(ScevExpr), InputMA(InputMA) {
+      : User(User), Val(Val), Kind(Kind), InputMA(InputMA) {
   }
 
 public:
@@ -139,9 +136,6 @@ public:
 
   /// Return the type of use.
   UseKind getKind() const { return Kind; }
-
-  /// Return the ScalarEvolution representation of @p Val.
-  const SCEV *getScevExpr() const { return ScevExpr; }
 
   /// Return the MemoryAccess that makes the value available in this statement,
   /// if any.

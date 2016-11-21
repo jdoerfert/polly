@@ -12,6 +12,7 @@
 //===----------------------------------------------------------------------===//
 
 #include "polly/CodeGen/LoopGenerators.h"
+#include "polly/CodeGen/RuntimeDebugBuilder.h"
 #include "polly/ScopDetection.h"
 #include "llvm/Analysis/LoopInfo.h"
 #include "llvm/IR/DataLayout.h"
@@ -128,6 +129,11 @@ Value *polly::createLoop(Value *LB, Value *UB, Value *Stride,
   Value *IncrementedIV = Builder.CreateNSWAdd(IV, Stride, "polly.indvar_next");
   Value *LoopCondition =
       Builder.CreateICmp(Predicate, IncrementedIV, UB, "polly.loop_cond");
+
+  if (PollyDebugPrinting)
+    RuntimeDebugBuilder::createCPUPrinter(Builder, "LoopCond: ", IncrementedIV,
+                                          " <p> ", UB, " = ", LoopCondition,
+                                          " in ", HeaderBB->getName(), "\n");
 
   // Create the loop latch and annotate it as such.
   BranchInst *B = Builder.CreateCondBr(LoopCondition, HeaderBB, ExitBB);

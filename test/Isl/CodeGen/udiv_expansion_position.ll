@@ -7,15 +7,15 @@
 target datalayout = "e-m:e-i64:64-f80:128-n8:16:32:64-S128"
 
 ; Function Attrs: nounwind uwtable
-define void @RestartModel() #0 {
+define void @RestartModel(i32 %i32) #0 {
 entry:
   br label %for.cond32.preheader
 
 for.cond32.preheader:                             ; preds = %entry, %for.body50.7
   %i.13 = phi i32 [ 0, %entry ], [ %inc60, %for.body50.7 ]
   %add = add i32 %i.13, 2
-  %div44 = udiv i32 undef, %add
-  %sub45 = sub i32 16384, %div44
+  %div44 = udiv i32 2048, %add
+  %sub45 = sub i32 %i32, %div44
   %conv46 = trunc i32 %sub45 to i16
   br label %for.body35
 

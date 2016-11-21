@@ -40,7 +40,7 @@ land.lhs.true.1736:                               ; preds = %do.cond.1718
   br label %if.then.1742
 
 if.then.1742:                                     ; preds = %land.lhs.true.1736
-  unreachable
+  ret void
 
 cleanup.1785:                                     ; preds = %if.then.1659
   ret void

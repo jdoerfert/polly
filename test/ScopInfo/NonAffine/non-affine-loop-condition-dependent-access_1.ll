@@ -1,4 +1,4 @@
-; RUN: opt %loadPolly -basicaa -polly-scops \
+; RUN: opt %loadPolly -basicaa -polly-scops -polly-allow-error-blocks=false \
 ; RUN:     -polly-allow-nonaffine -polly-allow-nonaffine-branches \
 ; RUN:     -polly-allow-nonaffine-loops=true -analyze < %s | FileCheck %s \
 ; RUN:     -check-prefix=SCALAR

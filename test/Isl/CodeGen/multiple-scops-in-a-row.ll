@@ -35,7 +35,7 @@ bb6:                                              ; preds = %bb4
   br i1 undef, label %bb7, label %bb8
 
 bb7:                                              ; preds = %bb6
-  unreachable
+  ret void
 
 bb8:                                              ; preds = %bb6
   br i1 %tmp5, label %bb9, label %bb10

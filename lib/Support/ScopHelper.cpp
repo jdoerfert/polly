@@ -30,16 +30,11 @@ using namespace polly;
 
 #define DEBUG_TYPE "polly-scop-helper"
 
-static cl::opt<bool> PollyAllowErrorBlocks(
-    "polly-allow-error-blocks",
-    cl::desc("Allow to speculate on the execution of 'error blocks'."),
-    cl::Hidden, cl::init(true), cl::ZeroOrMore, cl::cat(PollyCategory));
-
 // Ensures that there is just one predecessor to the entry node from outside the
 // region.
 // The identity of the region entry node is preserved.
 static void simplifyRegionEntry(Region *R, DominatorTree *DT, LoopInfo *LI,
-                                RegionInfo *RI) {
+                                RegionInfo *RI, ScopDetection *SD) {
   BasicBlock *EnteringBB = R->getEnteringBlock();
   BasicBlock *Entry = R->getEntry();
 
@@ -62,6 +57,8 @@ static void simplifyRegionEntry(Region *R, DominatorTree *DT, LoopInfo *LI,
 
     BasicBlock *NewEntering =
         SplitBlockPredecessors(Entry, Preds, ".region_entering", DT, LI);
+    if (Preds.empty())
+      R->replaceEntry(NewEntering);
 
     if (RI) {
       // The exit block of predecessing regions must be changed to NewEntering
@@ -72,15 +69,20 @@ static void simplifyRegionEntry(Region *R, DominatorTree *DT, LoopInfo *LI,
 
         while (!RegionOfPred->isTopLevelRegion() &&
                RegionOfPred->getExit() == Entry) {
+          if (SD)
+            SD->updateDetectionContextRegion(RegionOfPred, nullptr,
+                                             NewEntering);
           RegionOfPred->replaceExit(NewEntering);
           RegionOfPred = RegionOfPred->getParent();
         }
       }
 
       // Make all ancestors use EnteringBB as entry; there might be edges to it
-      Region *AncestorR = R->getParent();
+      Region *AncestorR = R->getParent() ? R->getParent() : R;
       RI->setRegionFor(NewEntering, AncestorR);
       while (!AncestorR->isTopLevelRegion() && AncestorR->getEntry() == Entry) {
+        if (SD)
+          SD->updateDetectionContextRegion(AncestorR, NewEntering, nullptr);
         AncestorR->replaceEntry(NewEntering);
         AncestorR = AncestorR->getParent();
       }
@@ -88,7 +90,9 @@ static void simplifyRegionEntry(Region *R, DominatorTree *DT, LoopInfo *LI,
 
     EnteringBB = NewEntering;
   }
-  assert(R->getEnteringBlock() == EnteringBB);
+  assert(R->getEnteringBlock() == EnteringBB ||
+         (R->getEntry() == &EnteringBB->getParent()->getEntryBlock() &&
+          !R->getEnteringBlock()));
 
   // After:
   //
@@ -105,6 +109,9 @@ static void simplifyRegionEntry(Region *R, DominatorTree *DT, LoopInfo *LI,
 static void simplifyRegionExit(Region *R, DominatorTree *DT, LoopInfo *LI,
                                RegionInfo *RI) {
   BasicBlock *ExitBB = R->getExit();
+  if (!ExitBB)
+    return;
+
   BasicBlock *ExitingBB = R->getExitingBlock();
 
   // Before:
@@ -126,6 +133,9 @@ static void simplifyRegionExit(Region *R, DominatorTree *DT, LoopInfo *LI,
     //           BB                    //
     ExitingBB =
         SplitBlockPredecessors(ExitBB, Preds, ".region_exiting", DT, LI);
+    // for (auto *PredBB : Preds)
+    // PredBB->getTerminator()->replaceUsesOfWith(ExitBB, ExitingBB);
+
     // Preds[0] Preds[1]      otherBB  //
     //        \  /           /         //
     // BB.region_exiting    /          //
@@ -150,22 +160,10 @@ static void simplifyRegionExit(Region *R, DominatorTree *DT, LoopInfo *LI,
   //           /    \         //
 }
 
-void polly::simplifyRegion(Region *R, DominatorTree *DT, LoopInfo *LI,
-                           RegionInfo *RI) {
-  assert(R && !R->isTopLevelRegion());
-  assert(!RI || RI == R->getRegionInfo());
-  assert((!RI || DT) &&
-         "RegionInfo requires DominatorTree to be updated as well");
-
-  simplifyRegionEntry(R, DT, LI, RI);
-  simplifyRegionExit(R, DT, LI, RI);
-  assert(R->isSimple());
-}
-
 // Split the block into two successive blocks.
 //
 // Like llvm::SplitBlock, but also preserves RegionInfo
-static BasicBlock *splitBlock(BasicBlock *Old, Instruction *SplitPt,
+BasicBlock *polly::splitBlock(BasicBlock *Old, Instruction *SplitPt,
                               DominatorTree *DT, llvm::LoopInfo *LI,
                               RegionInfo *RI) {
   assert(Old && SplitPt);
@@ -194,19 +192,36 @@ static BasicBlock *splitBlock(BasicBlock *Old, Instruction *SplitPt,
   return NewBlock;
 }
 
-void polly::splitEntryBlockForAlloca(BasicBlock *EntryBlock, DominatorTree *DT,
-                                     LoopInfo *LI, RegionInfo *RI) {
-  // Find first non-alloca instruction. Every basic block has a non-alloca
+bool polly::containsEntry(const Region &R) {
+  return R.getEntry() == &R.getEntry()->getParent()->getEntryBlock();
+}
+
+void polly::simplifyRegion(Region *R, DominatorTree *DT, LoopInfo *LI,
+                           RegionInfo *RI, ScopDetection *SD) {
+  assert(!RI || RI == R->getRegionInfo());
+  assert((!RI || DT) &&
+         "RegionInfo requires DominatorTree to be updated as well");
+
+  if (!containsEntry(*R))
+    simplifyRegionEntry(R, DT, LI, RI, SD);
+  simplifyRegionExit(R, DT, LI, RI);
+  assert(R->isSimple() || containsEntry(*R));
+}
+
+BasicBlock *polly::splitEntryBlockForAlloca(BasicBlock *EntryBlock,
+                                            DominatorTree *DT, LoopInfo *LI,
+                                            RegionInfo *RI) {
+  // Find first non-alloca instruction. Every basic block has a non-alloc
   // instruction, as every well formed basic block has a terminator.
   BasicBlock::iterator I = EntryBlock->begin();
   while (isa<AllocaInst>(I))
     ++I;
 
   // splitBlock updates DT, LI and RI.
-  splitBlock(EntryBlock, &*I, DT, LI, RI);
+  return splitBlock(EntryBlock, &*I, DT, LI, RI);
 }
 
-void polly::splitEntryBlockForAlloca(BasicBlock *EntryBlock, Pass *P) {
+BasicBlock *polly::splitEntryBlockForAlloca(BasicBlock *EntryBlock, Pass *P) {
   auto *DTWP = P->getAnalysisIfAvailable<DominatorTreeWrapperPass>();
   auto *DT = DTWP ? &DTWP->getDomTree() : nullptr;
   auto *LIWP = P->getAnalysisIfAvailable<LoopInfoWrapperPass>();
@@ -215,225 +230,7 @@ void polly::splitEntryBlockForAlloca(BasicBlock *EntryBlock, Pass *P) {
   RegionInfo *RI = RIP ? &RIP->getRegionInfo() : nullptr;
 
   // splitBlock updates DT, LI and RI.
-  polly::splitEntryBlockForAlloca(EntryBlock, DT, LI, RI);
-}
-
-/// The SCEVExpander will __not__ generate any code for an existing SDiv/SRem
-/// instruction but just use it, if it is referenced as a SCEVUnknown. We want
-/// however to generate new code if the instruction is in the analyzed region
-/// and we generate code outside/in front of that region. Hence, we generate the
-/// code for the SDiv/SRem operands in front of the analyzed region and then
-/// create a new SDiv/SRem operation there too.
-struct ScopExpander : SCEVVisitor<ScopExpander, const SCEV *> {
-  friend struct SCEVVisitor<ScopExpander, const SCEV *>;
-
-  explicit ScopExpander(const Region &R, ScalarEvolution &SE,
-                        const DataLayout &DL, const char *Name, ValueMapT *VMap,
-                        BasicBlock *RTCBB)
-      : Expander(SCEVExpander(SE, DL, Name)), SE(SE), Name(Name), R(R),
-        VMap(VMap), RTCBB(RTCBB) {}
-
-  Value *expandCodeFor(const SCEV *E, Type *Ty, Instruction *I) {
-    // If we generate code in the region we will immediately fall back to the
-    // SCEVExpander, otherwise we will stop at all unknowns in the SCEV and if
-    // needed replace them by copies computed in the entering block.
-    if (!R.contains(I))
-      E = visit(E);
-    return Expander.expandCodeFor(E, Ty, I);
-  }
-
-private:
-  SCEVExpander Expander;
-  ScalarEvolution &SE;
-  const char *Name;
-  const Region &R;
-  ValueMapT *VMap;
-  BasicBlock *RTCBB;
-
-  const SCEV *visitGenericInst(const SCEVUnknown *E, Instruction *Inst,
-                               Instruction *IP) {
-    if (!Inst || !R.contains(Inst))
-      return E;
-
-    assert(!Inst->mayThrow() && !Inst->mayReadOrWriteMemory() &&
-           !isa<PHINode>(Inst));
-
-    auto *InstClone = Inst->clone();
-    for (auto &Op : Inst->operands()) {
-      assert(SE.isSCEVable(Op->getType()));
-      auto *OpSCEV = SE.getSCEV(Op);
-      auto *OpClone = expandCodeFor(OpSCEV, Op->getType(), IP);
-      InstClone->replaceUsesOfWith(Op, OpClone);
-    }
-
-    InstClone->setName(Name + Inst->getName());
-    InstClone->insertBefore(IP);
-    return SE.getSCEV(InstClone);
-  }
-
-  const SCEV *visitUnknown(const SCEVUnknown *E) {
-
-    // If a value mapping was given try if the underlying value is remapped.
-    Value *NewVal = VMap ? VMap->lookup(E->getValue()) : nullptr;
-    if (NewVal) {
-      auto *NewE = SE.getSCEV(NewVal);
-
-      // While the mapped value might be different the SCEV representation might
-      // not be. To this end we will check before we go into recursion here.
-      if (E != NewE)
-        return visit(NewE);
-    }
-
-    Instruction *Inst = dyn_cast<Instruction>(E->getValue());
-    Instruction *IP;
-    if (Inst && !R.contains(Inst))
-      IP = Inst;
-    else if (Inst && RTCBB->getParent() == Inst->getFunction())
-      IP = RTCBB->getTerminator();
-    else
-      IP = RTCBB->getParent()->getEntryBlock().getTerminator();
-
-    if (!Inst || (Inst->getOpcode() != Instruction::SRem &&
-                  Inst->getOpcode() != Instruction::SDiv))
-      return visitGenericInst(E, Inst, IP);
-
-    const SCEV *LHSScev = SE.getSCEV(Inst->getOperand(0));
-    const SCEV *RHSScev = SE.getSCEV(Inst->getOperand(1));
-
-    if (!SE.isKnownNonZero(RHSScev))
-      RHSScev = SE.getUMaxExpr(RHSScev, SE.getConstant(E->getType(), 1));
-
-    Value *LHS = expandCodeFor(LHSScev, E->getType(), IP);
-    Value *RHS = expandCodeFor(RHSScev, E->getType(), IP);
-
-    Inst = BinaryOperator::Create((Instruction::BinaryOps)Inst->getOpcode(),
-                                  LHS, RHS, Inst->getName() + Name, IP);
-    return SE.getSCEV(Inst);
-  }
-
-  /// The following functions will just traverse the SCEV and rebuild it with
-  /// the new operands returned by the traversal.
-  ///
-  ///{
-  const SCEV *visitConstant(const SCEVConstant *E) { return E; }
-  const SCEV *visitTruncateExpr(const SCEVTruncateExpr *E) {
-    return SE.getTruncateExpr(visit(E->getOperand()), E->getType());
-  }
-  const SCEV *visitZeroExtendExpr(const SCEVZeroExtendExpr *E) {
-    return SE.getZeroExtendExpr(visit(E->getOperand()), E->getType());
-  }
-  const SCEV *visitSignExtendExpr(const SCEVSignExtendExpr *E) {
-    return SE.getSignExtendExpr(visit(E->getOperand()), E->getType());
-  }
-  const SCEV *visitUDivExpr(const SCEVUDivExpr *E) {
-    auto *RHSScev = visit(E->getRHS());
-    if (!SE.isKnownNonZero(RHSScev))
-      RHSScev = SE.getUMaxExpr(RHSScev, SE.getConstant(E->getType(), 1));
-    return SE.getUDivExpr(visit(E->getLHS()), RHSScev);
-  }
-  const SCEV *visitAddExpr(const SCEVAddExpr *E) {
-    SmallVector<const SCEV *, 4> NewOps;
-    for (const SCEV *Op : E->operands())
-      NewOps.push_back(visit(Op));
-    return SE.getAddExpr(NewOps);
-  }
-  const SCEV *visitMulExpr(const SCEVMulExpr *E) {
-    SmallVector<const SCEV *, 4> NewOps;
-    for (const SCEV *Op : E->operands())
-      NewOps.push_back(visit(Op));
-    return SE.getMulExpr(NewOps);
-  }
-  const SCEV *visitUMaxExpr(const SCEVUMaxExpr *E) {
-    SmallVector<const SCEV *, 4> NewOps;
-    for (const SCEV *Op : E->operands())
-      NewOps.push_back(visit(Op));
-    return SE.getUMaxExpr(NewOps);
-  }
-  const SCEV *visitSMaxExpr(const SCEVSMaxExpr *E) {
-    SmallVector<const SCEV *, 4> NewOps;
-    for (const SCEV *Op : E->operands())
-      NewOps.push_back(visit(Op));
-    return SE.getSMaxExpr(NewOps);
-  }
-  const SCEV *visitAddRecExpr(const SCEVAddRecExpr *E) {
-    SmallVector<const SCEV *, 4> NewOps;
-    for (const SCEV *Op : E->operands())
-      NewOps.push_back(visit(Op));
-    return SE.getAddRecExpr(NewOps, E->getLoop(), E->getNoWrapFlags());
-  }
-  ///}
-};
-
-Value *polly::expandCodeFor(Scop &S, ScalarEvolution &SE, const DataLayout &DL,
-                            const char *Name, const SCEV *E, Type *Ty,
-                            Instruction *IP, ValueMapT *VMap,
-                            BasicBlock *RTCBB) {
-  ScopExpander Expander(S.getRegion(), SE, DL, Name, VMap, RTCBB);
-  return Expander.expandCodeFor(E, Ty, IP);
-}
-
-bool polly::isErrorBlock(BasicBlock &BB, const Region &R, LoopInfo &LI,
-                         const DominatorTree &DT) {
-  if (!PollyAllowErrorBlocks)
-    return false;
-
-  if (isa<UnreachableInst>(BB.getTerminator()))
-    return true;
-
-  if (LI.isLoopHeader(&BB))
-    return false;
-
-  // Basic blocks that are always executed are not considered error blocks,
-  // as their execution can not be a rare event.
-  bool DominatesAllPredecessors = true;
-  if (R.isTopLevelRegion()) {
-    for (BasicBlock &I : *R.getEntry()->getParent())
-      if (isa<ReturnInst>(I.getTerminator()) && !DT.dominates(&BB, &I))
-        DominatesAllPredecessors = false;
-  } else {
-    for (auto Pred : predecessors(R.getExit()))
-      if (R.contains(Pred) && !DT.dominates(&BB, Pred))
-        DominatesAllPredecessors = false;
-  }
-
-  if (DominatesAllPredecessors)
-    return false;
-
-  // FIXME: This is a simple heuristic to determine if the load is executed
-  //        in a conditional. However, we actually would need the control
-  //        condition, i.e., the post dominance frontier. Alternatively we
-  //        could walk up the dominance tree until we find a block that is
-  //        not post dominated by the load and check if it is a conditional
-  //        or a loop header.
-  auto *DTNode = DT.getNode(&BB);
-  if (!DTNode)
-    return false;
-
-  DTNode = DTNode->getIDom();
-
-  if (!DTNode)
-    return false;
-
-  auto *IDomBB = DTNode->getBlock();
-  if (LI.isLoopHeader(IDomBB))
-    return false;
-
-  for (Instruction &Inst : BB)
-    if (CallInst *CI = dyn_cast<CallInst>(&Inst)) {
-      if (isIgnoredIntrinsic(CI))
-        continue;
-
-      // memset, memcpy and memmove are modeled intrinsics.
-      if (isa<MemSetInst>(CI) || isa<MemTransferInst>(CI))
-        continue;
-
-      if (!CI->doesNotAccessMemory())
-        return true;
-      if (CI->doesNotReturn())
-        return true;
-    }
-
-  return false;
+  return polly::splitEntryBlockForAlloca(EntryBlock, DT, LI, RI);
 }
 
 Value *polly::getConditionFromTerminator(TerminatorInst *TI) {
@@ -450,32 +247,66 @@ Value *polly::getConditionFromTerminator(TerminatorInst *TI) {
   return nullptr;
 }
 
+// TODO: Add invariant load set and parameter set as this calls isAffineExpr
 bool polly::isHoistableLoad(LoadInst *LInst, Region &R, LoopInfo &LI,
-                            ScalarEvolution &SE, const DominatorTree &DT) {
+                            ScalarEvolution &SE, const DominatorTree &DT,
+                            const SmallPtrSetImpl<BasicBlock *> &ErrorBlocks) {
   Loop *L = LI.getLoopFor(LInst->getParent());
   auto *Ptr = LInst->getPointerOperand();
-  const SCEV *PtrSCEV = SE.getSCEVAtScope(Ptr, L);
+  const SCEV *PtrSCEV = getSCEVAtScope(Ptr, L, R, SE, DT, ErrorBlocks);
   while (L && R.contains(L)) {
     if (!SE.isLoopInvariant(PtrSCEV, L))
       return false;
     L = L->getParentLoop();
   }
 
+  Value *StoredVal = nullptr;
   for (auto *User : Ptr->users()) {
     auto *UserI = dyn_cast<Instruction>(User);
     if (!UserI || !R.contains(UserI))
       continue;
     if (!UserI->mayWriteToMemory())
       continue;
+    if (auto *SI = dyn_cast<StoreInst>(UserI)) {
+      auto *SIVal = SI->getValueOperand();
+      if (!StoredVal || StoredVal == SIVal) {
+        StoredVal = SIVal;
+        auto *SILoop = LI.getLoopFor(SI->getParent());
+        if (auto *SIValLoad = dyn_cast<LoadInst>(SIVal)) {
+          auto *SIVPtr = SIValLoad->getPointerOperand();
+          bool SamePtr = SIVPtr == Ptr;
+          if (!SamePtr) {
+            auto *SIVPtrSCEV =
+                getSCEVAtScope(SIVPtr, SILoop, R, SE, DT, ErrorBlocks);
+            SamePtr = SE.getMinusSCEV(SIVPtrSCEV, PtrSCEV)->isZero();
+          }
+          if (SamePtr)
+            continue;
+        } else {
+          bool IsAffine = isAffineExpr(
+              &R, SILoop, getSCEVAtScope(SIVal, SILoop, R, SE, DT, ErrorBlocks),
+              SE, DT, ErrorBlocks);
+          if (IsAffine)
+            continue;
+        }
+      }
+    } else
+      continue;
 
     auto &BB = *UserI->getParent();
-    if (DT.dominates(&BB, LInst->getParent()))
+    if (DT.dominates(&BB, LInst->getParent())) {
+      // if (isa<GlobalValue>(Ptr)) {
+      // errs() << "Load : " << *LInst << "\n";
+      // errs() << "Invalid userI: " << *UserI << "\n";
+      //}
       return false;
+    }
 
-    bool DominatesAllPredecessors = true;
-    for (auto Pred : predecessors(R.getExit()))
-      if (R.contains(Pred) && !DT.dominates(&BB, Pred))
-        DominatesAllPredecessors = false;
+    bool DominatesAllPredecessors = R.getExit();
+    if (R.getExit())
+      for (auto Pred : predecessors(R.getExit()))
+        if (R.contains(Pred) && !DT.dominates(&BB, Pred))
+          DominatesAllPredecessors = false;
 
     if (!DominatesAllPredecessors)
       continue;
@@ -512,18 +343,85 @@ bool polly::isIgnoredIntrinsic(const Value *V) {
   return false;
 }
 
-bool polly::canSynthesize(const Value *V, const Scop &S, ScalarEvolution *SE,
-                          Loop *Scope) {
-  if (!V || !SE->isSCEVable(V->getType()))
+static bool canSynthesizeHelper(Value *V, const Scop &S, Loop *Scope,
+                                SmallPtrSetImpl<const Loop *> &InFlightLoops) {
+  assert(V);
+  auto *I = dyn_cast<Instruction>(V);
+  if (!I || !S.contains(I))
+    return true;
+
+  if (S.getErrorBlocks().count(I->getParent()))
+    return true;
+
+  if (I->mayHaveSideEffects())
     return false;
 
-  const InvariantLoadsSetTy &ILS = S.getRequiredInvariantLoads();
-  if (const SCEV *Scev = SE->getSCEVAtScope(const_cast<Value *>(V), Scope))
-    if (!isa<SCEVCouldNotCompute>(Scev))
-      if (!hasScalarDepsInsideRegion(Scev, &S.getRegion(), Scope, false, ILS))
+  InvariantLoadsSetTy ILS = S.getRequiredInvariantLoads();
+  if (I->mayReadFromMemory()) {
+    if (!isa<LoadInst>(I) || !ILS.count(cast<LoadInst>(I)))
+      return false;
+    return true;
+  }
+
+  if (auto *PHI = dyn_cast<PHINode>(I)) {
+    BasicBlock *BB = PHI->getParent();
+    if (S.getEntry() == BB && !BB->getUniquePredecessor())
+      if (std::all_of(pred_begin(BB), pred_end(BB),
+                      [&](BasicBlock *PredBB) { return !S.contains(PredBB); }))
         return true;
 
-  return false;
+    if (auto *UniqueInV = getUniqueNonErrorValue(
+            PHI, &S.getRegion(), *S.getSE(), *S.getDT(), S.getErrorBlocks()))
+      return canSynthesizeHelper(UniqueInV, S, Scope, InFlightLoops);
+
+    Loop *L = S.getLI()->getLoopFor(BB);
+    if (!L)
+      return std::all_of(
+          PHI->value_op_begin(), PHI->value_op_end(), [&](Value *OpV) {
+            return canSynthesizeHelper(OpV, S, Scope, InFlightLoops);
+          });
+
+    if (InFlightLoops.count(L))
+      return false;
+
+    if (!S.getSE()->isSCEVable(PHI->getType()))
+      return false;
+
+#if 0
+    Loop *L = S.getLI()->getLoopFor(BB);
+    if (L && L->getHeader() == BB &&
+        !S.getSE()->hasLoopInvariantBackedgeTakenCount(L))
+      return false;
+#endif
+
+    const SCEV *Expr = S.getSCEVAtScope(PHI, Scope);
+    //errs() << "Expr: " << *Expr << " for " << *PHI << " in "
+           //<< (Scope ? Scope->getName() : "<none>") << "\n";
+    SetVector<Value *> Values;
+    findValues(Expr, *S.getSE(), Values);
+
+    InFlightLoops.insert(L);
+    bool Valid = std::all_of(Values.begin(), Values.end(), [&](Value *V) {
+      return canSynthesizeHelper(V, S, Scope, InFlightLoops);
+    });
+    InFlightLoops.erase(L);
+    return Valid;
+  }
+
+  for (auto *Op : I->operand_values())
+    if (!canSynthesizeHelper(Op, S, Scope, InFlightLoops))
+      return false;
+
+  return true;
+}
+
+bool polly::canSynthesize(Value *V, const Scop &S, Loop *Scope) {
+  SmallPtrSet<const Loop *, 4> InFlightLoops;
+  bool R = canSynthesizeHelper(V, S, Scope, InFlightLoops);
+  //errs() << "V: " << *V << " in " << (Scope ? Scope->getName() : "<None>")
+         //<< "\n";
+  //errs() << " ==> " << R  << "\n";
+  return R;
 }
 
 llvm::BasicBlock *polly::getUseBlock(const llvm::Use &U) {
@@ -538,7 +436,8 @@ llvm::BasicBlock *polly::getUseBlock(const llvm::Use &U) {
 }
 
 std::tuple<std::vector<const SCEV *>, std::vector<int>>
-polly::getIndexExpressionsFromGEP(GetElementPtrInst *GEP, ScalarEvolution &SE) {
+polly::getIndexExpressionsFromGEP(Scop &S, GetElementPtrInst *GEP,
+                                  ScalarEvolution &SE) {
   std::vector<const SCEV *> Subscripts;
   std::vector<int> Sizes;
 
@@ -548,7 +447,7 @@ polly::getIndexExpressionsFromGEP(GetElementPtrInst *GEP, ScalarEvolution &SE) {
 
   for (unsigned i = 1; i < GEP->getNumOperands(); i++) {
 
-    const SCEV *Expr = SE.getSCEV(GEP->getOperand(i));
+    const SCEV *Expr = S.getSCEV(GEP->getOperand(i));
 
     if (i == 1) {
       if (auto *PtrTy = dyn_cast<PointerType>(Ty)) {

@@ -22,7 +22,7 @@ bb4:                                              ; preds = %bb3, %bb2
   br i1 undef, label %bb5, label %bb6
 
 bb5:                                              ; preds = %bb4
-  unreachable
+  ret void
 
 bb6:                                              ; preds = %bb4
   %1 = getelementptr inbounds i8, i8* undef, i64 %0   ; <i8*> [#uses=0]

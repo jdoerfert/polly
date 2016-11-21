@@ -13,7 +13,7 @@ entry:
   br i1 undef, label %if.end, label %if.then
 
 if.then:                                          ; preds = %entry
-  unreachable
+  ret void
 
 if.end:                                           ; preds = %entry
   br i1 undef, label %if.end.2, label %if.then.1
@@ -25,7 +25,7 @@ if.end.2:                                         ; preds = %if.end
   br i1 undef, label %for.body.35, label %for.end.126
 
 for.body.35:                                      ; preds = %if.end.2
-  unreachable
+  ret void
 
 for.end.126:                                      ; preds = %if.end.2
   %gain = getelementptr inbounds %struct.FFIIRFilterCoeffs.0.3.6.63.78.81.87.102.150.162.165.168.171, %struct.FFIIRFilterCoeffs.0.3.6.63.78.81.87.102.150.162.165.168.171* %c, i32 0, i32 1

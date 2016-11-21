@@ -1,0 +1,30 @@
+digraph "Scop Graph for 'f2' function" {
+	label="Scop Graph for 'f2' function";
+
+	Node0x1415860 [shape=record,label="{entry:\l  br label %entry.split\l}"];
+	Node0x1415860 -> Node0x148a3b0;
+	Node0x148a3b0 [shape=record,label="{entry.split:                                      \l  %tmp = sext i32 %k to i64\l  br label %for.cond\l}"];
+	Node0x148a3b0 -> Node0x1480e60;
+	Node0x1480e60 [shape=record,label="{for.cond:                                         \l  %indvars.iv = phi i64 [ %indvars.iv.next, %for.body ], [ 0, %entry.split ]\l  %cmp = icmp slt i64 %indvars.iv, %tmp\l  br i1 %cmp, label %for.body, label %for.end\l}"];
+	Node0x1480e60 -> Node0x1425410;
+	Node0x1480e60 -> Node0x14395b0;
+	Node0x1425410 [shape=record,label="{for.body:                                         \l  %mul = shl nsw i32 %i, 1\l  %arrayidx = getelementptr inbounds i32, i32* %A, i64 %indvars.iv\l  store i32 %mul, i32* %arrayidx, align 4\l  %indvars.iv.next = add nuw nsw i64 %indvars.iv, 1\l  br label %for.cond\l}"];
+	Node0x1425410 -> Node0x1480e60[constraint=false];
+	Node0x14395b0 [shape=record,label="{for.end:                                          \l  ret i32 0\l}"];
+	colorscheme = "paired12"
+        subgraph cluster_0x141f4f0 {
+          label = "Region can not profitably be optimized!";
+          style = solid;
+          color = 1
+          subgraph cluster_0x144d150 {
+            label = "";
+            style = solid;
+            color = 6
+            Node0x1480e60;
+            Node0x1425410;
+          }
+          Node0x1415860;
+          Node0x148a3b0;
+          Node0x14395b0;
+        }
+}

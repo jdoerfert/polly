@@ -25,6 +25,8 @@
 using namespace llvm;
 using namespace polly;
 
+#define DEBUG_TYPE "polly-affinator"
+
 static cl::opt<bool> IgnoreIntegerWrapping(
     "polly-ignore-integer-wrapping",
     cl::desc("Do not build run-time checks to proof absence of integer "
@@ -227,7 +229,7 @@ __isl_give PWACtx SCEVAffinator::visit(const SCEV *Expr) {
   Expr = ConstantAndLeftOverPair.second;
 
   auto *Scope = getScope();
-  S->addParams(getParamsInAffineExpr(&S->getRegion(), Scope, Expr, SE));
+  S->addParams(getParamsInAffineExpr(*S, Scope, Expr));
 
   // In case the scev is a valid parameter, we do not further analyze this
   // expression, but create a new parameter in the isl_pw_aff. This allows us
@@ -422,6 +424,7 @@ __isl_give PWACtx SCEVAffinator::visitAddRecExpr(const SCEVAddRecExpr *Expr) {
   if (Expr->getStart()->isZero()) {
     assert(S->contains(Expr->getLoop()) &&
            "Scop does not contain the loop referenced in this AddRec");
+    assert(!S->getBoxedLoops().count(Expr->getLoop()));
 
     PWACtx Step = visit(Expr->getOperand(1));
     isl_space *Space = isl_space_set_alloc(Ctx, 0, NumIterators);
@@ -511,13 +514,13 @@ __isl_give PWACtx SCEVAffinator::visitSDivInstruction(Instruction *SDiv) {
 
   auto *Scope = getScope();
   auto *Divisor = SDiv->getOperand(1);
-  auto *DivisorSCEV = SE.getSCEVAtScope(Divisor, Scope);
+  auto *DivisorSCEV = S->getSCEVAtScope(Divisor, Scope);
   auto DivisorPWAC = visit(DivisorSCEV);
   assert(isa<SCEVConstant>(DivisorSCEV) &&
          "SDiv is no parameter but has a non-constant RHS.");
 
   auto *Dividend = SDiv->getOperand(0);
-  auto *DividendSCEV = SE.getSCEVAtScope(Dividend, Scope);
+  auto *DividendSCEV = S->getSCEVAtScope(Dividend, Scope);
   auto DividendPWAC = visit(DividendSCEV);
   combine(DividendPWAC, DivisorPWAC, isl_pw_aff_tdiv_q);
   return DividendPWAC;
@@ -528,34 +531,237 @@ __isl_give PWACtx SCEVAffinator::visitSRemInstruction(Instruction *SRem) {
 
   auto *Scope = getScope();
   auto *Divisor = SRem->getOperand(1);
-  auto *DivisorSCEV = SE.getSCEVAtScope(Divisor, Scope);
+  auto *DivisorSCEV = S->getSCEVAtScope(Divisor, Scope);
   auto DivisorPWAC = visit(DivisorSCEV);
   assert(isa<ConstantInt>(Divisor) &&
          "SRem is no parameter but has a non-constant RHS.");
 
   auto *Dividend = SRem->getOperand(0);
-  auto *DividendSCEV = SE.getSCEVAtScope(Dividend, Scope);
+  auto *DividendSCEV = S->getSCEVAtScope(Dividend, Scope);
   auto DividendPWAC = visit(DividendSCEV);
   combine(DividendPWAC, DivisorPWAC, isl_pw_aff_tdiv_r);
   return DividendPWAC;
 }
 
+#if 0
+/// Adjust the dimensions of @p AM that was constructed for @p OldL
+///        to be compatible to domains constructed for loop @p NewL.
+///
+/// This function assumes @p NewL and @p OldL are equal or there is a CFG
+/// edge from @p OldL to @p NewL.
+static __isl_give isl_multi_pw_aff *
+adjustDomainDimensions(Scop &S, __isl_take isl_multi_pw_aff *AM, Loop *OldL,
+                       Loop *NewL) {
+  // If the loops are the same there is nothing to do.
+  if (NewL == OldL)
+    return AM;
+
+  int OldDepth = S.getRelativeLoopDepth(OldL);
+  int NewDepth = S.getRelativeLoopDepth(NewL);
+  // If both loops are non-affine loops there is nothing to do.
+  if (OldDepth == -1 && NewDepth == -1)
+    return AM;
+
+  // Distinguish three cases:
+  //   1) The depth is the same but the loops are not.
+  //      => One loop was left one was entered.
+  //   2) The depth increased from OldL to NewL.
+  //      => One loop was entered, none was left.
+  //   3) The depth decreased from OldL to NewL.
+  //      => Loops were left were difference of the depths defines how many.
+  auto *Dom = isl_multi_pw_aff_domain(isl_multi_pw_aff_copy(AM));
+  auto *Map = isl_map_from_multi_pw_aff(AM);
+  int NumDims = isl_set_dim(Dom, isl_dim_set);
+  if (OldDepth == NewDepth) {
+    assert(OldL->getParentLoop() == NewL->getParentLoop());
+    Dom = isl_set_lexmax(Dom);
+    Dom = isl_set_drop_constraints_not_involving_dims(Dom, isl_dim_set,
+                                                      NumDims - 1, 1);
+    Map = isl_map_intersect_domain(Map, Dom);
+    Map = isl_map_project_out(Map, isl_dim_in, NumDims - 1, 1);
+    Map = isl_map_add_dims(Map, isl_dim_in, 1);
+  } else if (OldDepth < NewDepth) {
+    assert(OldDepth + 1 == NewDepth);
+    auto &R = S.getRegion();
+    (void)R;
+    assert(NewL->getParentLoop() == OldL ||
+           ((!OldL || !R.contains(OldL)) && R.contains(NewL)));
+    Map = isl_map_add_dims(Map, isl_dim_in, 1);
+    isl_set_free(Dom);
+  } else {
+    assert(OldDepth > NewDepth);
+    int Diff = OldDepth - NewDepth;
+    assert(NumDims >= Diff);
+    Dom = isl_set_lexmax(Dom);
+    Dom = isl_set_drop_constraints_not_involving_dims(Dom, isl_dim_set,
+                                                      NumDims - Diff, Diff);
+    Map = isl_map_intersect_domain(Map, Dom);
+    Map = isl_map_project_out(Map, isl_dim_in, NumDims - Diff, Diff);
+  }
+
+  return isl_multi_pw_aff_from_pw_multi_aff(isl_pw_multi_aff_from_map(Map));
+}
+#endif
+
 __isl_give PWACtx SCEVAffinator::visitUnknown(const SCEVUnknown *Expr) {
+  if (isa<UndefValue>(Expr->getValue()))
+    return visit(SE.getConstant(Expr->getType(), 0));
+
+  if (isa<PHINode>(Expr->getValue())) {
+    errs() << "Expr: " << *Expr << " : " << *Expr->getValue() << "\n";
+    llvm_unreachable("PHI FOUND");
+  }
+
   if (Instruction *I = dyn_cast<Instruction>(Expr->getValue())) {
+    if (auto *CI = dyn_cast<CallInst>(I)) {
+      auto *F = CI->getCalledFunction();
+      //if (F &&
+          //(F->getName().equals("malloc") || F->getName().equals("calloc") ||
+           //F->getName().equals("realloc")))
+        //return visit(SE.getConstant(Expr->getType(), 1));
+
+      DEBUG(errs() << "Found call " << *CI << "\n");
+      assert(GlobalScopInfoPtr);
+      auto *FS = GlobalScopInfoPtr->getScop(F);
+      assert(FS);
+      DEBUG(errs() << "F: " << CI->getCalledFunction()->getName() << " [F: "
+                   << CI->getCalledFunction() << "] (FS: " << FS << ")\n");
+
+      auto &DC = FS->getDetectionContext();
+
+      assert(BB);
+      //auto *OldBB = BB;
+      //auto OldNumIterators = NumIterators;
+
+      #if 0
+      auto *Stmt = S->getStmtFor(I);
+      // TODO stmt not necessary
+      auto *ArgumentMapping =
+          S->getOrCreateArgumentMapping(*Stmt, *CI, *FS, LI).release();
+      assert(ArgumentMapping);
+      DEBUG(errs() << "ArgumentMapping: ";
+            isl_multi_pw_aff_dump(ArgumentMapping));
+
+      this->BB = OldBB;
+      this->NumIterators = OldNumIterators;
+
+      ArgumentMapping = adjustDomainDimensions(*S, ArgumentMapping,
+                                               LI.getLoopFor(CI->getParent()),
+                                               LI.getLoopFor(BB));
+      DEBUG(errs() << "ArgumentMapping: ";
+            isl_multi_pw_aff_dump(ArgumentMapping));
+
+      unsigned NumParams = isl_multi_pw_aff_dim(ArgumentMapping, isl_dim_param);
+      if (NumParams == 0)
+        ArgumentMapping = isl_multi_pw_aff_free(ArgumentMapping);
+      #endif
+
+      SmallVector<ReturnInst *, 8> Returns;
+      for (auto *RI : DC.Returns)
+        if (!DC.ErrorBlocks.count(RI->getParent()))
+          Returns.push_back(RI);
+
+      DEBUG(errs() << "Got " << Returns.size() << " returns for " << *CI
+                   << "\n");
+      assert(!Returns.empty());
+
+      PWACtx PWAC = visit(SE.getConstant(Expr->getType(), 0));
+      DEBUG(errs() << "  => PWAC " << PWAC.first << "\n");
+
+      PWAC.first = isl_pw_aff_intersect_domain(
+          PWAC.first, isl_set_empty(isl_pw_aff_get_domain_space(PWAC.first)));
+
+      for (ReturnInst *RI : Returns) {
+        DEBUG(errs() << " => RI: " << *RI << " : [" << RI << "]\n");
+#if 1
+        auto *RVIPSCEV = DC.IPSCEVMap.lookup(RI);
+        assert(RVIPSCEV);
+        auto *RVSCEV = getSCEVFromIPSCEV(RVIPSCEV, SE);
+        DEBUG(errs() << " => RVS: " << *RVSCEV << "\n");
+        PWACtx RVPWAC = visit(RVSCEV);
+        DEBUG(errs() << " => RVPWAC: " << RVPWAC.first << "\n");
+        combine(PWAC, RVPWAC, isl_pw_aff_union_add);
+        DEBUG(errs() << " => PWAC " << PWAC.first << "\n");
+#else
+        auto *RV = RI->getReturnValue();
+        errs() << " => RV: " << *RV << "\n";
+        if (auto *PHI = dyn_cast<PHINode>(RV)) {
+          auto *PHIStmt = FS->getStmtFor(PHI);
+          assert(PHIStmt);
+          isl_set *PHIDom = isl_set_params(PHIStmt->getDomain());
+          PHIDom = isl_set_add_dims(PHIDom, isl_dim_set, 0);
+          errs() << " => PHDom: " << PHIDom << "\n";
+
+          if (ArgumentMapping) {
+            PHIDom = isl_set_move_dims(PHIDom, isl_dim_set, 0, isl_dim_param, 0,
+                                       NumParams);
+            PHIDom = isl_set_preimage_multi_pw_aff(
+                PHIDom, isl_multi_pw_aff_copy(ArgumentMapping));
+            errs() << " => PHDom: " << PHIDom << "\n";
+          }
+
+          for (unsigned u = 0, e = PHI->getNumIncomingValues(); u < e; u++) {
+            auto *IncomingBB = PHI->getIncomingBlock(u);
+            if (DC.ErrorBlocks.count(IncomingBB))
+              continue;
+            auto *InStmt = FS->getStmtFor(IncomingBB);
+            if (!InStmt)
+              continue;
+            isl_set *ExDom = isl_set_params(InStmt->getDomain());
+            ExDom = isl_set_add_dims(ExDom, isl_dim_set, 0);
+            errs() << " => InDom: " << ExDom << "\n";
+            if (ArgumentMapping) {
+              ExDom = isl_set_move_dims(ExDom, isl_dim_set, 0, isl_dim_param, 0,
+                                        NumParams);
+              ExDom = isl_set_preimage_multi_pw_aff(
+                  ExDom, isl_multi_pw_aff_copy(ArgumentMapping));
+              errs() << " => InDom: " << ExDom << "\n";
+            }
+            ExDom = isl_set_intersect(ExDom, isl_set_copy(PHIDom));
+            errs() << " => ExDom: " << ExDom << "\n";
+            auto *InV = PHI->getIncomingValue(u);
+            errs() << " => InV: " << *InV << " : " << InV << "\n";
+            auto *InIPSCEV = DC.IPSCEVMap.lookup(InV);
+            assert(InIPSCEV);
+            auto *InSCEV = getSCEV(InIPSCEV, SE);
+            errs() << " => InS: " << *InSCEV << "\n";
+            PWACtx InPWAC = visit(InSCEV);
+            errs() << " InPWAC: " << InPWAC.first << "\n";
+            InPWAC.first = isl_pw_aff_intersect_domain(InPWAC.first, ExDom);
+            errs() << " InPWAC: " << InPWAC.first << "\n";
+            combine(PWAC, InPWAC, isl_pw_aff_union_add);
+          }
+        } else {
+          auto *RVIPSCEV = DC.IPSCEVMap.lookup(RV);
+          assert(RVIPSCEV);
+          auto *RVSCEV = getSCEV(RVIPSCEV, SE);
+          errs() << " => RVS: " << *RVSCEV << "\n";
+          PWACtx RVPWAC = visit(RVSCEV);
+          combine(PWAC, RVPWAC, isl_pw_aff_union_add);
+        }
+#endif
+        DEBUG(errs() << "  => PWAC " << PWAC.first << "\n");
+      }
+
+      //isl_multi_pw_aff_free(ArgumentMapping);
+      return PWAC;
+    }
     switch (I->getOpcode()) {
     case Instruction::IntToPtr:
-      return visit(SE.getSCEVAtScope(I->getOperand(0), getScope()));
+      return visit(S->getSCEVAtScope(I->getOperand(0), getScope()));
     case Instruction::PtrToInt:
-      return visit(SE.getSCEVAtScope(I->getOperand(0), getScope()));
+      return visit(S->getSCEVAtScope(I->getOperand(0), getScope()));
     case Instruction::SDiv:
       return visitSDivInstruction(I);
     case Instruction::SRem:
       return visitSRemInstruction(I);
     default:
+      errs() << "I: " << *I << " in " << I->getFunction()->getName() << "\n";
       break; // Fall through.
     }
   }
 
+  errs() << "S: " << *Expr << " [" << Expr << "]\n";
   llvm_unreachable(
       "Unknowns SCEV was neither parameter nor a valid instruction.");
 }

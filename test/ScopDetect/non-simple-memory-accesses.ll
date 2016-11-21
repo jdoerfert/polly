@@ -25,6 +25,6 @@ bb2:                                              ; preds = %bb1
   br label %bb3
 
 bb3:                                              ; preds = %bb2, %bb1
-  unreachable
+  ret void
 }
 

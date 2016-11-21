@@ -47,6 +47,7 @@ for.body:                                         ; preds = %for.cond
   br i1 %cmp1, label %if.then, label %if.end
 
 if.then:                                          ; preds = %for.body
+  call void @llvm.assume(i1 0)
   call void (...) @f() #2
   %arrayidx2 = getelementptr inbounds i32, i32* %A, i64 %indvars.iv
   %tmp12 = load i32, i32* %arrayidx2, align 4
@@ -70,3 +71,4 @@ for.end:                                          ; preds = %for.cond
 }
 
 declare void @f(...)
+declare void @llvm.assume(i1)

@@ -40,7 +40,7 @@ bb5:                                              ; preds = %bb3, %entry
   br i1 undef, label %return, label %bb7
 
 bb7:                                              ; preds = %bb5
-  unreachable
+  ret void
 
 return:                                           ; preds = %bb5
   ret void

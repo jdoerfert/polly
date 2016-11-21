@@ -16,6 +16,7 @@
 
 #include "polly/LinkAllPasses.h"
 #include "polly/ScopDetection.h"
+#include "polly/ScopInfo.h"
 #include "polly/Support/ScopLocation.h"
 #include "llvm/Analysis/DOTGraphTraitsPass.h"
 #include "llvm/Analysis/RegionInfo.h"
@@ -24,6 +25,7 @@
 
 using namespace polly;
 using namespace llvm;
+
 static cl::opt<std::string>
     ViewFilter("polly-view-only",
                cl::desc("Only view functions that match this pattern"),
@@ -32,6 +34,11 @@ static cl::opt<std::string>
 static cl::opt<bool> ViewAll("polly-view-all",
                              cl::desc("Also show functions without any scops"),
                              cl::Hidden, cl::init(false), cl::ZeroOrMore);
+
+static cl::opt<bool>
+    DebugView("polly-dot-scops-debug-view",
+              cl::desc("Incldue debug information in the dot plots of scops"),
+              cl::Hidden, cl::init(false), cl::ZeroOrMore);
 
 namespace llvm {
 template <>
@@ -48,16 +55,16 @@ struct GraphTraits<ScopDetection *> : public GraphTraits<RegionInfo *> {
 };
 
 template <>
-struct GraphTraits<ScopDetectionWrapperPass *>
-    : public GraphTraits<ScopDetection *> {
-  static NodeRef getEntryNode(ScopDetectionWrapperPass *P) {
-    return GraphTraits<ScopDetection *>::getEntryNode(&P->getSD());
+struct GraphTraits<ScopInfoWrapperPass *> : public GraphTraits<RegionInfo *> {
+  static NodeRef getEntryNode(ScopInfoWrapperPass *SI) {
+    return GraphTraits<RegionInfo *>::getEntryNode(
+        SI->getSI()->getSD()->getRI());
   }
-  static nodes_iterator nodes_begin(ScopDetectionWrapperPass *P) {
-    return nodes_iterator::begin(getEntryNode(P));
+  static nodes_iterator nodes_begin(ScopInfoWrapperPass *SI) {
+    return nodes_iterator::begin(getEntryNode(SI));
   }
-  static nodes_iterator nodes_end(ScopDetectionWrapperPass *P) {
-    return nodes_iterator::end(getEntryNode(P));
+  static nodes_iterator nodes_end(ScopInfoWrapperPass *SI) {
+    return nodes_iterator::end(getEntryNode(SI));
   }
 };
 
@@ -81,19 +88,24 @@ template <> struct DOTGraphTraits<RegionNode *> : public DefaultDOTGraphTraits {
 };
 
 template <>
-struct DOTGraphTraits<ScopDetectionWrapperPass *>
+struct DOTGraphTraits<ScopInfoWrapperPass *>
     : public DOTGraphTraits<RegionNode *> {
   DOTGraphTraits(bool isSimple = false)
       : DOTGraphTraits<RegionNode *>(isSimple) {}
-  static std::string getGraphName(ScopDetectionWrapperPass *SD) {
+  static std::string getGraphName(ScopInfoWrapperPass *SI) {
     return "Scop Graph";
+  }
+
+  static std::string getGraphProperties(ScopInfoWrapperPass *) {
+    if (!DebugView)
+      return "\tstyle=invis;\n";
+    return "";
   }
 
   std::string getEdgeAttributes(RegionNode *srcNode,
                                 GraphTraits<RegionInfo *>::ChildIteratorType CI,
-                                ScopDetectionWrapperPass *P) {
+                                ScopInfoWrapperPass *SI) {
     RegionNode *destNode = *CI;
-    auto *SD = &P->getSD();
 
     if (srcNode->isSubRegion() || destNode->isSubRegion())
       return "";
@@ -102,7 +114,7 @@ struct DOTGraphTraits<ScopDetectionWrapperPass *>
     BasicBlock *srcBB = srcNode->getNodeAs<BasicBlock>();
     BasicBlock *destBB = destNode->getNodeAs<BasicBlock>();
 
-    RegionInfo *RI = SD->getRI();
+    RegionInfo *RI = SI->getSI()->getSD()->getRI();
     Region *R = RI->getRegionFor(destBB);
 
     while (R && R->getParent())
@@ -117,10 +129,136 @@ struct DOTGraphTraits<ScopDetectionWrapperPass *>
     return "";
   }
 
-  std::string getNodeLabel(RegionNode *Node, ScopDetectionWrapperPass *P) {
-    return DOTGraphTraits<RegionNode *>::getNodeLabel(
-        Node, reinterpret_cast<RegionNode *>(
-                  P->getSD().getRI()->getTopLevelRegion()));
+  std::string getNodeLabel(RegionNode *Node, ScopInfoWrapperPass *SI) {
+    if (DebugView)
+      return DOTGraphTraits<RegionNode *>::getNodeLabel(
+          Node, reinterpret_cast<RegionNode *>(
+                    SI->getSI()->getSD()->getRI()->getTopLevelRegion()));
+    return "";
+#if 0
+    if (Node->isSubRegion())
+      return "";
+
+    bool ContainsArray = false;
+    bool ContainsCalls = false;
+    BasicBlock *BB = Node->getNodeAs<BasicBlock>();
+    for (auto &I : *BB){
+      ContainsArray |= isa<LoadInst>(I) || isa<StoreInst>(I);
+      ContainsCalls |= isa<CallInst>(I);
+    }
+
+    if (ContainsArray && ContainsCalls)
+      return "M & C";
+    if (ContainsArray)
+      return "M";
+    if (ContainsCalls)
+      return "C";
+    return "";
+#endif
+  }
+
+  static std::string buildNodeString(const std::string &style,
+                                     const std::string &fillcolor,
+                                     const std::string &shape,
+                                     const std::string &label) {
+    std::string res = "color=black";
+    if (!style.empty()) {
+      res += (res.empty() ? "" : ",");
+      res += "style=" + style;
+    }
+    if (!fillcolor.empty()) {
+      res += (res.empty() ? "" : ",");
+      res += "fillcolor=" + fillcolor;
+    }
+    if (!shape.empty()) {
+      res += (res.empty() ? "" : ",");
+      res += "shape=" + shape;
+    }
+    res += (res.empty() ? "" : ",");
+    res += "penwidth=3,";
+    res += "label=" + (label.empty() ? "\"\"" : label);
+    return res;
+  }
+
+  static std::string getNodeAttributes(RegionNode *Node,
+                                       ScopInfoWrapperPass *SIW) {
+    bool IsSubRegion = Node->isSubRegion();
+    if (IsSubRegion)
+      return "";
+
+    auto *BB = Node->getNodeAs<BasicBlock>();
+    auto *SI = SIW->getSI();
+    auto *R = SI->getSD()->getRI()->getRegionFor(BB);
+    auto *S = SI->getScop(R);
+    auto *ScopR = R;
+    while (ScopR->getParent() && !S) {
+      ScopR = ScopR->getParent();
+      S = SI->getScop(ScopR);
+    }
+
+    std::string style = "filled";
+    std::string fillcolor;
+    std::string shape;
+    std::string label;
+
+    if (!S)
+      return buildNodeString(style, fillcolor, shape, label);
+
+    if (!S->isExecuted(BB))
+      fillcolor = "\"#d7191ca0\"";
+
+    //bool ContainsArray = false;
+    bool ContainsCalls = false;
+    for (auto &I : *BB){
+      //ContainsArray |= isa<LoadInst>(I) || isa<StoreInst>(I);
+      ContainsCalls |= isa<CallInst>(I);
+    }
+
+    const auto &StmtList = S->getStmtListFor(BB);
+    bool ContainsArray = std::any_of(StmtList.begin(), StmtList.end(), [](ScopStmt *Stmt) {
+          return std::any_of(Stmt->begin(), Stmt->end(),
+                             [](MemoryAccess *MA) { return MA->isArrayKind(); });
+        });
+
+    if (!fillcolor.empty()) {
+      // Do not overwrite
+    //} else if (ContainsCalls) {
+      //fillcolor = "\"#2b83baff\"";
+    } else if (ContainsArray) {
+      //fillcolor = "\"#abdda4ff\"";
+      fillcolor = "\"#1a9641ff\"";
+    }
+
+    unsigned MultiPred = !BB->getUniquePredecessor();
+    unsigned NumSucc = BB->getTerminator()->getNumSuccessors();
+    //if (NumSucc > 1 && fillcolor.empty())
+      //fillcolor = "\"#ffff3fff\"";
+
+    if (BB == &BB->getParent()->getEntryBlock()) {
+      shape = "invhouse";
+    } else if (MultiPred && NumSucc > 1) {
+      shape = "octagon";
+      //shape = "diamond";
+    } else if (NumSucc > 1) {
+      shape = "octagon";
+      //shape = "invhouse";
+    } else if (NumSucc == 0) {
+      shape = "house";
+      //shape = "house";
+    }
+
+    if (fillcolor.empty())
+      fillcolor = "\"#eeeeeeff\"";
+
+    if (ContainsCalls && shape == "octagon")
+      shape = "doubleoctagon";
+    else if (ContainsCalls) {
+      if (fillcolor == "\"#d7191ca0\"")
+        fillcolor = "\"#d7191ce0\"";
+      shape = "doublecircle";
+    }
+
+    return buildNodeString(style, fillcolor, shape, label);
   }
 
   static std::string escapeString(std::string String) {
@@ -135,77 +273,193 @@ struct DOTGraphTraits<ScopDetectionWrapperPass *>
     return Escaped;
   }
 
+  static void printSubregion(const ScopInfoWrapperPass *SIW, const Region *R,
+                             raw_ostream &O, unsigned depth, int error,
+                             const Region *SR, Scop *S) {
+    bool IsNonAffineSubRegion =
+        S &&
+        S->getDetectionContext().NonAffineSubRegionSet.count(SR);
+    if (IsNonAffineSubRegion) {
+      O.indent(2 * depth) << "subgraph cluster_non_aff_reg_"
+                          << static_cast<const void *>(R) << " {\n";
+      O.indent(2 * (depth + 1)) << "label = \"\";\n";
+      O.indent(2 * (depth + 1)) << "style = dashed;\n";
+      O.indent(2 * (depth + 1)) << "color = black;\n";
+      O.indent(2 * (depth + 1)) << "penwidth = 3;\n";
+    }
+    printRegionCluster(SIW, SR, O,
+                        depth + IsNonAffineSubRegion, error);
+    if (IsNonAffineSubRegion)
+      O.indent(2 * depth) << "}\n";
+  }
+
   // Print the cluster of the subregions. This groups the single basic blocks
   // and adds a different background color for each group.
-  static void printRegionCluster(const ScopDetection *SD, const Region *R,
-                                 raw_ostream &O, unsigned depth = 0) {
-    O.indent(2 * depth) << "subgraph cluster_" << static_cast<const void *>(R)
-                        << " {\n";
-    unsigned LineBegin, LineEnd;
-    std::string FileName;
+  static void printRegionCluster(const ScopInfoWrapperPass *SIW, const Region *R,
+                                 raw_ostream &O, unsigned depth = 0,
+                                 int error = 0) {
+    auto *SI = SIW->getSI();
 
-    getDebugLocation(R, LineBegin, LineEnd, FileName);
+    if (DebugView) {
+      O.indent(2 * depth) << "subgraph cluster_" << static_cast<const void *>(R)
+                          << " {\n";
 
-    std::string Location;
-    if (LineBegin != (unsigned)-1) {
-      Location = escapeString(FileName + ":" + std::to_string(LineBegin) + "-" +
-                              std::to_string(LineEnd) + "\n");
-    }
+      unsigned LineBegin, LineEnd;
+      std::string FileName;
 
-    std::string ErrorMessage = SD->regionIsInvalidBecause(R);
-    ErrorMessage = escapeString(ErrorMessage);
-    O.indent(2 * (depth + 1))
-        << "label = \"" << Location << ErrorMessage << "\";\n";
+      getDebugLocation(R, LineBegin, LineEnd, FileName);
 
-    if (SD->isMaxRegionInScop(*R)) {
-      O.indent(2 * (depth + 1)) << "style = filled;\n";
+      std::string Location;
+      if (LineBegin != (unsigned)-1) {
+        Location = escapeString(FileName + ":" + std::to_string(LineBegin) +
+                                "-" + std::to_string(LineEnd) + "\n");
+      }
 
-      // Set color to green.
-      O.indent(2 * (depth + 1)) << "color = 3";
+      auto *SD = SI->getSD();
+      std::string ErrorMessage = SD->regionIsInvalidBecause(R);
+      ErrorMessage = escapeString(ErrorMessage);
+      O.indent(2 * (depth + 1)) << "label = \"" << Location << ErrorMessage
+                                << "\";\n";
+      Scop *S = SI->getScop(const_cast<Region *>(R));
+
+      if (SD->isMaxRegionInScop(*R) && S) {
+        assert(S);
+        O.indent(2 * (depth + 1)) << "style = filled;\n";
+
+        // Set color to green.
+        O.indent(2 * (depth + 1)) << "color = 3\n";
+      } else {
+        auto *ScopR = R;
+        while (ScopR->getParent() && !S) {
+          ScopR = ScopR->getParent();
+          S = SI->getScop(const_cast<Region *>(ScopR));
+        }
+
+        if (error == 1)
+          O.indent(2 * (depth + 1)) << "style = filled;\n";
+        else
+          O.indent(2 * (depth + 1)) << "style = solid;\n";
+
+        int color = (R->getDepth() * 2 % 12) + 1;
+
+        // We do not want green again.
+        if (color == 3)
+          color = 6;
+
+        if (error == 1)
+          O.indent(2 * (depth + 1)) << "color = \"#ff000066\"\n";
+        else
+          O.indent(2 * (depth + 1)) << "color = " << color << "\n";
+      }
+
+      for (const auto &SubRegion : *R) {
+        int SRError = error;
+        if (!SRError && S) {
+          for (auto *BB : SubRegion.get()->blocks())
+            if (S->getStmtListFor(BB).size()) {
+              SRError = false;
+              break;
+            }
+        }
+        printRegionCluster(SIW, SubRegion.get(), O, depth + 1, SRError + error);
+      }
+
+      RegionInfo *RI = R->getRegionInfo();
+      auto *TLR = RI->getTopLevelRegion();
+      for (const auto &BB : R->blocks())
+        if (RI->getRegionFor(BB) == R)
+          O.indent(2 * (depth + 1))
+              << "Node" << static_cast<void *>(TLR->getBBNode(BB)) << ";\n";
+
+      O.indent(2 * depth) << "}\n";
     } else {
-      O.indent(2 * (depth + 1)) << "style = solid;\n";
 
-      int color = (R->getDepth() * 2 % 12) + 1;
+      Scop *S = SI->getScop(const_cast<Region *>(R));
+      auto *ScopR = R;
+      while (ScopR->getParent() && !S) {
+        ScopR = ScopR->getParent();
+        S = SI->getScop(const_cast<Region *>(ScopR));
+      }
 
-      // We do not want green again.
-      if (color == 3)
-        color = 6;
+      auto *LI = SIW->getSI()->getSD()->getLI();
+      SmallVector<Loop *, 4> Loops;
+      for (auto *BB : R->blocks())
+        if (auto *L = LI->getLoopFor(BB))
+          if (R->contains(L))
+            Loops.push_back(L);
 
-      O.indent(2 * (depth + 1)) << "color = " << color << "\n";
+      for (const auto &SubRegion : *R) {
+        for (unsigned u = 0; u < Loops.size(); u++)
+          if (Loops[u] && SubRegion->contains(Loops[u]))
+            Loops[u] = nullptr;
+      }
+
+      bool ContainsLoop = std::any_of(Loops.begin(), Loops.end(), [](Loop *L) { return L; });
+      if (ContainsLoop) {
+        O.indent(2 * depth++) << "subgraph cluster_loop_in_reg_"
+                            << static_cast<const void *>(R) << " {\n";
+        O.indent(2 * (depth + 1)) << "label = \"\";\n";
+        O.indent(2 * (depth + 1)) << "style = filled;\n";
+        O.indent(2 * (depth + 1)) << "color = \"#99999940\";\n";
+      }
+
+      SmallVector<const Region *, 4> DefferedRegions;
+      for (const auto &SubRegion : *R) {
+        if (ContainsLoop &&
+            std::all_of(Loops.begin(), Loops.end(), [&](Loop *L) {
+              return !L || !L->contains(SubRegion.get()->getEntry());
+            })) {
+          DefferedRegions.push_back(SubRegion.get());
+          continue;
+        }
+        printSubregion(SIW, R, O, depth, error, SubRegion.get(), S);
+      }
+
+      SmallVector<BasicBlock *, 4> DefferedBlocks;
+      RegionInfo *RI = R->getRegionInfo();
+      auto *TLR = RI->getTopLevelRegion();
+      for (const auto &BB : R->blocks()) {
+        if (RI->getRegionFor(BB) != R)
+          continue;
+        if (ContainsLoop &&
+            std::all_of(Loops.begin(), Loops.end(),
+                        [&](Loop *L) { return !L || !L->contains(BB); })) {
+          DefferedBlocks.push_back(BB);
+          continue;
+        }
+
+        O.indent(2 * (depth + 1))
+            << "Node" << static_cast<void *>(TLR->getBBNode(BB)) << ";\n";
+      }
+
+      if (ContainsLoop)
+        O.indent(2 * --depth) << "}\n";
+
+      for (auto *SR : DefferedRegions)
+        printSubregion(SIW, R, O, depth, error, SR, S);
+
+      for (auto *BB : DefferedBlocks)
+        O.indent(2 * (depth + 1))
+            << "Node" << static_cast<void *>(TLR->getBBNode(BB)) << ";\n";
     }
 
-    for (const auto &SubRegion : *R)
-      printRegionCluster(SD, SubRegion.get(), O, depth + 1);
-
-    RegionInfo *RI = R->getRegionInfo();
-
-    for (const auto &BB : R->blocks())
-      if (RI->getRegionFor(BB) == R)
-        O.indent(2 * (depth + 1))
-            << "Node"
-            << static_cast<void *>(RI->getTopLevelRegion()->getBBNode(BB))
-            << ";\n";
-
-    O.indent(2 * depth) << "}\n";
   }
-  static void
-  addCustomGraphFeatures(const ScopDetectionWrapperPass *SD,
-                         GraphWriter<ScopDetectionWrapperPass *> &GW) {
+  static void addCustomGraphFeatures(const ScopInfoWrapperPass *SI,
+                                     GraphWriter<ScopInfoWrapperPass *> &GW) {
     raw_ostream &O = GW.getOStream();
     O << "\tcolorscheme = \"paired12\"\n";
-    printRegionCluster(&SD->getSD(), SD->getSD().getRI()->getTopLevelRegion(),
-                       O, 4);
+    printRegionCluster(SI, SI->getSI()->getSD()->getRI()->getTopLevelRegion(), O, 4, 0);
   }
 };
 
 } // end namespace llvm
 
 struct ScopViewer
-    : public DOTGraphTraitsViewer<ScopDetectionWrapperPass, false> {
+    : public DOTGraphTraitsViewer<ScopInfoWrapperPass, false> {
   static char ID;
   ScopViewer()
-      : DOTGraphTraitsViewer<ScopDetectionWrapperPass, false>("scops", ID) {}
-  bool processFunction(Function &F, ScopDetectionWrapperPass &SD) override {
+      : DOTGraphTraitsViewer<ScopInfoWrapperPass, false>("scops", ID) {}
+  bool processFunction(Function &F, ScopInfoWrapperPass &SI) override {
     if (ViewFilter != "" && !F.getName().count(ViewFilter))
       return false;
 
@@ -213,33 +467,33 @@ struct ScopViewer
       return true;
 
     // Check that at least one scop was detected.
-    return std::distance(SD.getSD().begin(), SD.getSD().end()) > 0;
+    return std::distance(SI.getSI()->getSD()->begin(),
+                         SI.getSI()->getSD()->end()) > 0;
   }
 };
 char ScopViewer::ID = 0;
 
 struct ScopOnlyViewer
-    : public DOTGraphTraitsViewer<ScopDetectionWrapperPass, true> {
+    : public DOTGraphTraitsViewer<ScopInfoWrapperPass, true> {
   static char ID;
   ScopOnlyViewer()
-      : DOTGraphTraitsViewer<ScopDetectionWrapperPass, true>("scopsonly", ID) {}
+      : DOTGraphTraitsViewer<ScopInfoWrapperPass, true>("scopsonly", ID) {}
 };
 char ScopOnlyViewer::ID = 0;
 
 struct ScopPrinter
-    : public DOTGraphTraitsPrinter<ScopDetectionWrapperPass, false> {
+    : public DOTGraphTraitsPrinter<ScopInfoWrapperPass, false> {
   static char ID;
   ScopPrinter()
-      : DOTGraphTraitsPrinter<ScopDetectionWrapperPass, false>("scops", ID) {}
+      : DOTGraphTraitsPrinter<ScopInfoWrapperPass, false>("scops", ID) {}
 };
 char ScopPrinter::ID = 0;
 
 struct ScopOnlyPrinter
-    : public DOTGraphTraitsPrinter<ScopDetectionWrapperPass, true> {
+    : public DOTGraphTraitsPrinter<ScopInfoWrapperPass, true> {
   static char ID;
   ScopOnlyPrinter()
-      : DOTGraphTraitsPrinter<ScopDetectionWrapperPass, true>("scopsonly", ID) {
-  }
+      : DOTGraphTraitsPrinter<ScopInfoWrapperPass, true>("scopsonly", ID) {}
 };
 char ScopOnlyPrinter::ID = 0;
 
@@ -253,9 +507,12 @@ static RegisterPass<ScopOnlyViewer>
 static RegisterPass<ScopPrinter> M("dot-scops",
                                    "Polly - Print Scops of function");
 
-static RegisterPass<ScopOnlyPrinter>
-    N("dot-scops-only",
-      "Polly - Print Scops of function (with no function bodies)");
+INITIALIZE_PASS_BEGIN(ScopOnlyPrinter, "polly-dot-scops-only-pass",
+                      "Scop dot printer", true, true);
+INITIALIZE_PASS_END(ScopOnlyPrinter, "polly-dot-scops-only-pass",
+                    "Scop dot printer", true, true)
+
+Pass *polly::createScopOnlyPrinterPass() { return new ScopOnlyPrinter(); }
 
 Pass *polly::createDOTViewerPass() { return new ScopViewer(); }
 

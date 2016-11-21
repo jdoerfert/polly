@@ -45,24 +45,30 @@ entry:
   br label %for.cond.preheader
 
 for.cond.preheader:                               ; preds = %for.cond.preheader, %entry
+  call void @build_eq()
   br i1 undef, label %for.cond.316.preheader, label %for.cond.preheader
 
 for.cond.316.preheader:                           ; preds = %for.cond.preheader
+  call void @build_eq()
   br i1 undef, label %for.cond.400.preheader, label %for.body.321
 
 for.cond.400.preheader:                           ; preds = %for.inc.397, %for.cond.316.preheader
+  call void @build_eq()
   br i1 undef, label %for.end.423, label %for.body.405
 
 for.body.321:                                     ; preds = %for.inc.397, %for.cond.316.preheader
   %eq329 = getelementptr inbounds %struct.EqState.41.74.107.338.503.866.932.965.998.1064.2052.2151.2184.2606, %struct.EqState.41.74.107.338.503.866.932.965.998.1064.2052.2151.2184.2606* %0, i64 0, i32 0
+  call void @build_eq()
   br i1 undef, label %for.inc.397, label %land.lhs.true.331
 
 land.lhs.true.331:                                ; preds = %for.body.321
+  call void @build_eq()
   br i1 undef, label %for.inc.397, label %if.then.334
 
 if.then.334:                                      ; preds = %land.lhs.true.331
   %1 = load %struct.State.28.61.94.325.490.853.919.952.985.1051.2039.2138.2171.2605*, %struct.State.28.61.94.325.490.853.919.952.985.1051.2039.2138.2171.2605** %eq329, align 8
   %2 = load %struct.Rule.33.66.99.330.495.858.924.957.990.1056.2044.2143.2176.2588*, %struct.Rule.33.66.99.330.495.858.924.957.990.1056.2044.2143.2176.2588** undef, align 8
+  call void @build_eq()
   br i1 undef, label %for.inc.397, label %land.lhs.true.369
 
 land.lhs.true.369:                                ; preds = %if.then.334
@@ -81,10 +87,11 @@ if.then.383:                                      ; preds = %land.lhs.true.369
   br label %for.inc.397
 
 for.inc.397:                                      ; preds = %if.then.383, %land.lhs.true.369, %if.then.334, %land.lhs.true.331, %for.body.321
+  call void @build_eq()
   br i1 undef, label %for.body.321, label %for.cond.400.preheader
 
 for.body.405:                                     ; preds = %for.cond.400.preheader
-  unreachable
+  ret void
 
 for.end.423:                                      ; preds = %for.cond.400.preheader
   ret void

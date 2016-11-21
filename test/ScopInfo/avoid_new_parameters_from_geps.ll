@@ -43,6 +43,7 @@ for.body36:                                       ; preds = %entry
 
 for.cond56.preheader:                             ; preds = %for.inc158, %for.body36
   %indvars.iv78 = phi i64 [ 0, %for.inc158 ], [ 1, %for.body36 ]
+  call void @common()
   br label %for.body58
 
 for.body58:                                       ; preds = %for.cond56.preheader
@@ -61,7 +62,7 @@ land.lhs.true:                                    ; preds = %if.else71, %if.then
   br i1 undef, label %for.inc158, label %if.then86
 
 if.then86:                                        ; preds = %land.lhs.true
-  unreachable
+  ret void
 
 for.inc158:                                       ; preds = %land.lhs.true
   br label %for.cond56.preheader

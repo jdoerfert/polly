@@ -35,7 +35,7 @@ if.end.18:                                        ; preds = %if.then.12, %land.l
   br i1 undef, label %if.then.21, label %if.end.27
 
 if.then.21:                                       ; preds = %if.end.18
-  unreachable
+  ret void
 
 if.end.27:                                        ; preds = %if.end.18
   br label %cleanup

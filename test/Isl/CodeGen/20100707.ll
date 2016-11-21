@@ -6,7 +6,7 @@ entry:
   br i1 undef, label %bb1, label %bb6
 
 bb1:                                              ; preds = %entry
-  unreachable
+  ret void
 
 bb6:                                              ; preds = %entry
   %tmp = zext i32 %Length to i64                  ; <i64> [#uses=1]

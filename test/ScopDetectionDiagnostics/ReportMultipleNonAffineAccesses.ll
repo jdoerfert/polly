@@ -35,7 +35,8 @@
 ; -> B[0][i] is affine
 ; ALL-NEXT: remark: /tmp/test.c:11:16: The array subscript of "B" is not affine
 ; ALL-NEXT: remark: /tmp/test.c:13:5: The array subscript of "A" is not affine
-; ALL-NEXT: remark: /tmp/test.c:13:51: Invalid Scop candidate ends here.
+; ALL-DAG: remark: /tmp/test.c:13:51: Invalid Scop candidate ends here.
+; ALL-DAG: remark: /tmp/test.c:15:1: Invalid Scop candidate ends here.
 
 ; DELIN: remark: /tmp/test.c:3:20: The following errors keep this region from being a Scop.
 ; DELIN-NEXT: remark: /tmp/test.c:4:16: The array subscript of "A" is not affine

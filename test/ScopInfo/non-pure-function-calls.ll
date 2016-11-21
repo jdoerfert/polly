@@ -25,11 +25,11 @@
 ;        timer_stop();
 ;    }
 ;
-; CHECK:      Region: %for.cond---%if.end.20
+; CHECK:      Region: %entry---%if.end.20
 ; CHECK:      Assumed Context:
-; CHECK-NEXT: [N, timeit] -> {  :  }
+; CHECK-NEXT: [timeit, N] -> {  :  }
 ; CHECK:      Invalid Context:
-; CHECK-NEXT: [N, timeit] -> {  : timeit < 0 or timeit > 0 }
+; CHECK-NEXT: [timeit, N] -> {  : timeit < 0 or timeit > 0 }
 ; CHECK:      Statements {
 ; CHECK:        Stmt
 ; CHECK:        Stmt

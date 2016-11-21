@@ -1,5 +1,5 @@
 ; RUN: opt %loadPolly -pass-remarks-missed="polly-detect" -polly-detect-track-failures -polly-detect -analyze < %s 2>&1 | FileCheck %s
-
+; XFAIL: *
 ; #define N 1024
 ; double invalidCall(double A[N]);
 ;

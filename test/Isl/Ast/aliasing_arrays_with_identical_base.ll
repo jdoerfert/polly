@@ -18,7 +18,8 @@ for.body:
   %i.011 = phi i64 [ 0, %entry ], [ %inc, %for.body ]
   %conv = sitofp i64 %i.011 to float
   %BaseA = load float*, float** %X, align 8
-  %BaseB = load float*, float** %X, align 8
+  %X1 = getelementptr inbounds float*, float** %X, i64 1
+  %BaseB = load float*, float** %X1, align 8
   %arrayidx = getelementptr inbounds float, float* %BaseA, i64 %i.011
   %A = load float, float* %arrayidx, align 4
   %add = fadd float %A, %conv

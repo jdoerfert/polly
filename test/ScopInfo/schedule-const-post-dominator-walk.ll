@@ -10,7 +10,7 @@
 ;
 target datalayout = "e-m:e-i64:64-f80:128-n8:16:32:64-S128"
 
-define void @hoge() {
+define void @hoge(i64* %A) {
 bb:
   br label %bb3
 
@@ -23,6 +23,7 @@ bb2:                                              ; preds = %bb3
 
 bb3:                                              ; preds = %bb5, %bb
   %tmp4 = phi i64 [ 0, %bb ], [ 0, %bb5 ]
+  store i64 0, i64* %A, align 8
   br i1 false, label %bb5, label %bb2
 
 bb5:                                              ; preds = %bb3

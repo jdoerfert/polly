@@ -22,5 +22,5 @@ bb9:                                             ; preds = %bb3
 
 lpad22:                                           ; preds = %invcont12
   %d = landingpad { i8*, i32 } cleanup catch i32* null
-  unreachable
+  ret i16 0
 }

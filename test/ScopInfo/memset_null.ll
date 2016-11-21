@@ -18,16 +18,16 @@
 ;
 target datalayout = "e-m:e-i64:64-i128:128-n8:16:32:64-S128"
 
-define void @test(i32* %A) {
+define void @test(i32* %A, i1 %i1) {
 entry:
-  br i1 undef, label %for.end68, label %for.cond5.preheader.lr.ph
+  br i1 %i1, label %for.end68, label %for.cond5.preheader.lr.ph
 
 for.cond5.preheader.lr.ph:                        ; preds = %entry
   br label %for.cond5.preheader.us221
 
 for.cond5.preheader.us221:                        ; preds = %for.cond5.preheader.us221, %for.cond5.preheader.lr.ph
   store i32 0, i32* %A
-  call void @llvm.memset.p0i8.i64(i8* null, i8 0, i64 undef, i32 1, i1 false)
+  call void @llvm.memset.p0i8.i64(i8* null, i8 0, i64 0, i32 1, i1 false)
   br i1 true, label %for.end68, label %for.cond5.preheader.us221
 
 for.end68:                                        ; preds = %for.cond5.preheader.us221, %entry

@@ -10,11 +10,11 @@ define void @test(%S* %cpi, i1 %b) {
 ; SCOPS-LABEL: Region: %if.then14---%exit
 ; SCOPS:         Invariant Accesses: {
 ; SCOPS-NEXT:            ReadAccess :=       [Reduction Type: NONE] [Scalar: 0]
-; SCOPS-NEXT:                [l2, l1] -> { Stmt_for_body_i[i0] -> MemRef_cpi[0, 0] };
-; SCOPS-NEXT:            Execution Context: [l2, l1] -> {  :  }
+; SCOPS-NEXT:                [l0, l1] -> { Stmt_for_body_i[i0] -> MemRef_cpi[0, 0] };
+; SCOPS-NEXT:            Execution Context: [l0, l1] -> {  :  }
 ; SCOPS-NEXT:            ReadAccess :=       [Reduction Type: NONE] [Scalar: 0]
-; SCOPS-NEXT:                [l2, l1] -> { Stmt_for_body_lr_ph_i[] -> MemRef_cpi[0, 1] };
-; SCOPS-NEXT:            Execution Context: [l2, l1] -> {  : l2 > 0 }
+; SCOPS-NEXT:                [l0, l1] -> { Stmt_for_body_lr_ph_i[] -> MemRef_cpi[0, 1] };
+; SCOPS-NEXT:            Execution Context: [l0, l1] -> {  : l0 > 0 }
 ; SCOPS-NEXT:    }
 ; SCOPS:         Arrays {
 ; SCOPS-NEXT:        i32 MemRef_cpi[*][(10 * %l1)]; // Element size 4

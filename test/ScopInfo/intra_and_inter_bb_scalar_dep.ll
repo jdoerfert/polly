@@ -35,7 +35,8 @@ target datalayout = "e-p:64:64:64-i1:8:8-i8:8:8-i16:16:16-i32:32:32-i64:64:64-f3
 
 define void @f(i64* noalias %A, i64 %N, i64* noalias %init_ptr) #0 {
 entry:
-  br label %for.i
+  %entry.i = icmp sgt i64 %N, 0
+  br i1 %entry.i, label %for.i, label %return
 
 for.i:                                            ; preds = %for.i.end, %entry
   %indvar.i = phi i64 [ 0, %entry ], [ %indvar.i.next, %for.i.end ]

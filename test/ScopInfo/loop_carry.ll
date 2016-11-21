@@ -47,11 +47,22 @@ bb2:                                              ; preds = %bb, %entry
 
 
 ; CHECK:      Statements {
+; CHECK-NEXT:     Stmt_bb_nph
+; CHECK-NEXT:           Domain :=
+; CHECK-NEXT:               [n] -> { Stmt_bb_nph[] : n >= 2 };
+; CHECK-NEXT:           Schedule :=
+; CHECK-NEXT:               [n] -> { Stmt_bb_nph[] -> [0, 0] };
+; CHECK-NEXT:           ReadAccess :=	[Reduction Type: NONE] [Scalar: 0]
+; CHECK-NEXT:               [n] -> { Stmt_bb_nph[] -> MemRef_a[0] };
+; CHECK-NEXT:           MustWriteAccess :=	[Reduction Type: NONE] [Scalar: 1]
+; CHECK-NEXT:               [n] -> { Stmt_bb_nph[] -> MemRef_1__phi[] };
+; CHECK-NEXT:           MustWriteAccess :=	[Reduction Type: NONE] [Scalar: 1]
+; CHECK-NEXT:               [n] -> { Stmt_bb_nph[] -> MemRef_k_05__phi[] };
 ; CHECK-NEXT:     Stmt_bb
 ; CHECK-NEXT:         Domain :=
 ; CHECK-NEXT:             [n] -> { Stmt_bb[i0] : 0 <= i0 <= -2 + n };
 ; CHECK-NEXT:         Schedule :=
-; CHECK-NEXT:             [n] -> { Stmt_bb[i0] -> [i0] };
+; CHECK-NEXT:             [n] -> { Stmt_bb[i0] -> [1, i0] };
 ; CHECK-NEXT:         MustWriteAccess :=    [Reduction Type: NONE] [Scalar: 1]
 ; CHECK-NEXT:             [n] -> { Stmt_bb[i0] -> MemRef_tmp1__phi[] };
 ; CHECK-NEXT:         ReadAccess :=    [Reduction Type: NONE] [Scalar: 1]

@@ -175,6 +175,8 @@ public:
   iterator end() const { return ErrorReports.end(); }
   size_t size() const { return ErrorReports.size(); }
 
+  void shrink(size_t size) { ErrorReports.resize(size); }
+
   /// Returns true, if we store at least one error.
   ///
   /// @return true, if we store at least one error.

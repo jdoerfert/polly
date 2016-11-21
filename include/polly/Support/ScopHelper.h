@@ -16,6 +16,7 @@
 
 #include "llvm/ADT/DenseMap.h"
 #include "llvm/ADT/SetVector.h"
+#include "llvm/Analysis/ScalarEvolutionExpressions.h"
 #include "llvm/IR/Instructions.h"
 #include "llvm/IR/IntrinsicInst.h"
 #include "llvm/IR/ValueHandle.h"
@@ -36,13 +37,14 @@ class GetElementPtrInst;
 
 namespace polly {
 class Scop;
+class ScopDetection;
 
 /// Type to remap values.
 using ValueMapT = llvm::DenseMap<llvm::AssertingVH<llvm::Value>,
                                  llvm::AssertingVH<llvm::Value>>;
 
 /// Type for a set of invariant loads.
-using InvariantLoadsSetTy = llvm::SetVector<llvm::AssertingVH<llvm::LoadInst>>;
+using InvariantLoadsSetTy = llvm::SetVector<llvm::LoadInst *>;
 
 /// Set type for parameters.
 using ParameterSetTy = llvm::SetVector<const llvm::SCEV *>;
@@ -86,16 +88,22 @@ public:
   /* implicit */ MemAccInst(llvm::StoreInst *SI) : I(SI) {}
   /* implicit */ MemAccInst(llvm::MemIntrinsic *MI) : I(MI) {}
   /* implicit */ MemAccInst(llvm::CallInst *CI) : I(CI) {}
+  /* implicit */ MemAccInst(llvm::ReturnInst *RI) : I(RI) {}
+  /* implicit */ MemAccInst(llvm::UnreachableInst *UI) : I(UI) {}
   explicit MemAccInst(llvm::Instruction &I) : I(&I) { assert(isa(I)); }
   explicit MemAccInst(llvm::Instruction *I) : I(I) { assert(isa(I)); }
 
   static bool isa(const llvm::Value &V) {
     return llvm::isa<llvm::LoadInst>(V) || llvm::isa<llvm::StoreInst>(V) ||
-           llvm::isa<llvm::CallInst>(V) || llvm::isa<llvm::MemIntrinsic>(V);
+           llvm::isa<llvm::CallInst>(V) || llvm::isa<llvm::MemIntrinsic>(V) ||
+           llvm::isa<llvm::ReturnInst>(V) ||
+           llvm::isa<llvm::UnreachableInst>(V);
   }
   static bool isa(const llvm::Value *V) {
     return llvm::isa<llvm::LoadInst>(V) || llvm::isa<llvm::StoreInst>(V) ||
-           llvm::isa<llvm::CallInst>(V) || llvm::isa<llvm::MemIntrinsic>(V);
+           llvm::isa<llvm::CallInst>(V) || llvm::isa<llvm::MemIntrinsic>(V) ||
+           llvm::isa<llvm::ReturnInst>(V) ||
+           llvm::isa<llvm::UnreachableInst>(V);
   }
   static MemAccInst cast(llvm::Value &V) {
     return MemAccInst(llvm::cast<llvm::Instruction>(V));
@@ -159,6 +167,14 @@ public:
     I = CI;
     return *this;
   }
+  MemAccInst &operator=(llvm::ReturnInst *RI) {
+    I = RI;
+    return *this;
+  }
+  MemAccInst &operator=(llvm::UnreachableInst *UI) {
+    I = UI;
+    return *this;
+  }
 
   llvm::Instruction *get() const {
     assert(I && "Unexpected nullptr!");
@@ -179,6 +195,8 @@ public:
       return nullptr;
     if (isCallInst())
       return nullptr;
+    if (isTerminatorInst())
+      return nullptr;
     llvm_unreachable("Operation not supported on nullptr");
   }
   llvm::Value *getPointerOperand() const {
@@ -189,6 +207,8 @@ public:
     if (isMemIntrinsic())
       return asMemIntrinsic()->getRawDest();
     if (isCallInst())
+      return nullptr;
+    if (isTerminatorInst())
       return nullptr;
     llvm_unreachable("Operation not supported on nullptr");
   }
@@ -202,6 +222,8 @@ public:
       return asMemIntrinsic()->getAlignment();
     if (isCallInst())
       return 0;
+    if (isTerminatorInst())
+      return 0;
     llvm_unreachable("Operation not supported on nullptr");
   }
   bool isVolatile() const {
@@ -212,6 +234,8 @@ public:
     if (isMemIntrinsic())
       return asMemIntrinsic()->isVolatile();
     if (isCallInst())
+      return false;
+    if (isTerminatorInst())
       return false;
     llvm_unreachable("Operation not supported on nullptr");
   }
@@ -224,6 +248,8 @@ public:
       return !asMemIntrinsic()->isVolatile();
     if (isCallInst())
       return true;
+    if (isTerminatorInst())
+      return true;
     llvm_unreachable("Operation not supported on nullptr");
   }
   llvm::AtomicOrdering getOrdering() const {
@@ -234,6 +260,8 @@ public:
     if (isMemIntrinsic())
       return llvm::AtomicOrdering::NotAtomic;
     if (isCallInst())
+      return llvm::AtomicOrdering::NotAtomic;
+    if (isTerminatorInst())
       return llvm::AtomicOrdering::NotAtomic;
     llvm_unreachable("Operation not supported on nullptr");
   }
@@ -247,6 +275,8 @@ public:
       return !asMemIntrinsic()->isVolatile();
     if (isCallInst())
       return true;
+    if (isTerminatorInst())
+      return true;
     llvm_unreachable("Operation not supported on nullptr");
   }
 
@@ -259,6 +289,13 @@ private:
   bool isLoad() const { return I && llvm::isa<llvm::LoadInst>(I); }
   bool isStore() const { return I && llvm::isa<llvm::StoreInst>(I); }
   bool isCallInst() const { return I && llvm::isa<llvm::CallInst>(I); }
+  bool isReturnInst() const { return I && llvm::isa<llvm::ReturnInst>(I); }
+  bool isUnreachableInst() const {
+    return I && llvm::isa<llvm::UnreachableInst>(I);
+  }
+  bool isTerminatorInst() const {
+    return I && llvm::isa<llvm::TerminatorInst>(I);
+  }
   bool isMemIntrinsic() const { return I && llvm::isa<llvm::MemIntrinsic>(I); }
   bool isMemSetInst() const { return I && llvm::isa<llvm::MemSetInst>(I); }
   bool isMemTransferInst() const {
@@ -268,6 +305,12 @@ private:
   llvm::LoadInst *asLoad() const { return llvm::cast<llvm::LoadInst>(I); }
   llvm::StoreInst *asStore() const { return llvm::cast<llvm::StoreInst>(I); }
   llvm::CallInst *asCallInst() const { return llvm::cast<llvm::CallInst>(I); }
+  llvm::ReturnInst *asReturnInst() const {
+    return llvm::cast<llvm::ReturnInst>(I);
+  }
+  llvm::UnreachableInst *asUnreachableInst() const {
+    return llvm::cast<llvm::UnreachableInst>(I);
+  }
   llvm::MemIntrinsic *asMemIntrinsic() const {
     return llvm::cast<llvm::MemIntrinsic>(I);
   }
@@ -293,6 +336,9 @@ template <> struct simplify_type<polly::MemAccInst> {
 
 namespace polly {
 
+/// Check if the function entry is contained in @p R.
+bool containsEntry(const llvm::Region &R);
+
 /// Simplify the region to have a single unconditional entry edge and a
 /// single exit edge.
 ///
@@ -305,7 +351,8 @@ namespace polly {
 /// @param LI LoopInfo to be updated.
 /// @param RI RegionInfo to be updated.
 void simplifyRegion(llvm::Region *R, llvm::DominatorTree *DT,
-                    llvm::LoopInfo *LI, llvm::RegionInfo *RI);
+                    llvm::LoopInfo *LI, llvm::RegionInfo *RI,
+                    ScopDetection *SD);
 
 /// Split the entry block of a function to store the newly inserted
 ///        allocations outside of all Scops.
@@ -313,7 +360,12 @@ void simplifyRegion(llvm::Region *R, llvm::DominatorTree *DT,
 /// @param EntryBlock The entry block of the current function.
 /// @param P          The pass that currently running.
 ///
-void splitEntryBlockForAlloca(llvm::BasicBlock *EntryBlock, llvm::Pass *P);
+llvm::BasicBlock *splitEntryBlockForAlloca(llvm::BasicBlock *EntryBlock,
+                                           llvm::Pass *P);
+
+llvm::BasicBlock *splitBlock(llvm::BasicBlock *Old, llvm::Instruction *SplitPt,
+                             llvm::DominatorTree *DT, llvm::LoopInfo *LI,
+                             llvm::RegionInfo *RI);
 
 /// Split the entry block of a function to store the newly inserted
 ///        allocations outside of all Scops.
@@ -321,55 +373,10 @@ void splitEntryBlockForAlloca(llvm::BasicBlock *EntryBlock, llvm::Pass *P);
 /// @param DT DominatorTree to be updated.
 /// @param LI LoopInfo to be updated.
 /// @param RI RegionInfo to be updated.
-void splitEntryBlockForAlloca(llvm::BasicBlock *EntryBlock,
-                              llvm::DominatorTree *DT, llvm::LoopInfo *LI,
-                              llvm::RegionInfo *RI);
-
-/// Wrapper for SCEVExpander extended to all Polly features.
-///
-/// This wrapper will internally call the SCEVExpander but also makes sure that
-/// all additional features not represented in SCEV (e.g., SDiv/SRem are not
-/// black boxes but can be part of the function) will be expanded correctly.
-///
-/// The parameters are the same as for the creation of a SCEVExpander as well
-/// as the call to SCEVExpander::expandCodeFor:
-///
-/// @param S     The current Scop.
-/// @param SE    The Scalar Evolution pass.
-/// @param DL    The module data layout.
-/// @param Name  The suffix added to the new instruction names.
-/// @param E     The expression for which code is actually generated.
-/// @param Ty    The type of the resulting code.
-/// @param IP    The insertion point for the new code.
-/// @param VMap  A remapping of values used in @p E.
-/// @param RTCBB The last block of the RTC. Used to insert loop-invariant
-///              instructions in rare cases.
-llvm::Value *expandCodeFor(Scop &S, llvm::ScalarEvolution &SE,
-                           const llvm::DataLayout &DL, const char *Name,
-                           const llvm::SCEV *E, llvm::Type *Ty,
-                           llvm::Instruction *IP, ValueMapT *VMap,
-                           llvm::BasicBlock *RTCBB);
-
-/// Check if the block is a error block.
-///
-/// A error block is currently any block that fulfills at least one of
-/// the following conditions:
-///
-///  - It is terminated by an unreachable instruction
-///  - It contains a call to a non-pure function that is not immediately
-///    dominated by a loop header and that does not dominate the region exit.
-///    This is a heuristic to pick only error blocks that are conditionally
-///    executed and can be assumed to be not executed at all without the domains
-///    being available.
-///
-/// @param BB The block to check.
-/// @param R  The analyzed region.
-/// @param LI The loop info analysis.
-/// @param DT The dominator tree of the function.
-///
-/// @return True if the block is a error block, false otherwise.
-bool isErrorBlock(llvm::BasicBlock &BB, const llvm::Region &R,
-                  llvm::LoopInfo &LI, const llvm::DominatorTree &DT);
+llvm::BasicBlock *splitEntryBlockForAlloca(llvm::BasicBlock *EntryBlock,
+                                           llvm::DominatorTree *DT,
+                                           llvm::LoopInfo *LI,
+                                           llvm::RegionInfo *RI);
 
 /// Return the condition for the terminator @p TI.
 ///
@@ -389,8 +396,10 @@ llvm::Value *getConditionFromTerminator(llvm::TerminatorInst *TI);
 /// @param DT    The dominator tree of the function.
 ///
 /// @return True if @p LInst can be hoisted in @p R.
-bool isHoistableLoad(llvm::LoadInst *LInst, llvm::Region &R, llvm::LoopInfo &LI,
-                     llvm::ScalarEvolution &SE, const llvm::DominatorTree &DT);
+bool isHoistableLoad(
+    llvm::LoadInst *LInst, llvm::Region &R, llvm::LoopInfo &LI,
+    llvm::ScalarEvolution &SE, const llvm::DominatorTree &DT,
+    const llvm::SmallPtrSetImpl<llvm::BasicBlock *> &ErrorBlocks);
 
 /// Return true iff @p V is an intrinsic that we ignore during code
 ///        generation.
@@ -404,13 +413,11 @@ bool isIgnoredIntrinsic(const llvm::Value *V);
 ///
 /// @param V The value to check.
 /// @param S The current SCoP.
-/// @param SE The scalar evolution database.
 /// @param Scope Location where the value would by synthesized.
 /// @return If the instruction I can be regenerated from its
 ///         scalar evolution representation, return true,
 ///         otherwise return false.
-bool canSynthesize(const llvm::Value *V, const Scop &S,
-                   llvm::ScalarEvolution *SE, llvm::Loop *Scope);
+bool canSynthesize(llvm::Value *V, const Scop &S, llvm::Loop *Scope);
 
 /// Return the block in which a value is used.
 ///
@@ -434,7 +441,7 @@ llvm::BasicBlock *getUseBlock(const llvm::Use &U);
 ///
 /// @return A tuple with the subscript expressions and the dimension sizes.
 std::tuple<std::vector<const llvm::SCEV *>, std::vector<int>>
-getIndexExpressionsFromGEP(llvm::GetElementPtrInst *GEP,
+getIndexExpressionsFromGEP(Scop &S, llvm::GetElementPtrInst *GEP,
                            llvm::ScalarEvolution &SE);
 
 // If the loop is nonaffine/boxed, return the first non-boxed surrounding loop

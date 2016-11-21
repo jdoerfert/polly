@@ -1,12 +1,12 @@
 ; RUN: opt %loadPolly -basicaa -sroa -instcombine -simplifycfg -tailcallopt \
 ; RUN:    -simplifycfg -reassociate -loop-rotate -instcombine -indvars \
-; RUN:    -polly-prepare -polly-scops -analyze < %s \
+; RUN:    -polly-scops -analyze < %s \
 ; RUN:    \
 ; RUN:     | FileCheck %s --check-prefix=NOLICM
 
 ; RUN: opt %loadPolly -basicaa -sroa -instcombine -simplifycfg -tailcallopt \
 ; RUN:    -simplifycfg -reassociate -loop-rotate -instcombine -indvars -licm \
-; RUN:    -polly-prepare -polly-scops -analyze < %s \
+; RUN:    -polly-scops -analyze < %s \
 ; RUN:    \
 ; RUN:     | FileCheck %s --check-prefix=LICM
 

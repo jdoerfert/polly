@@ -19,7 +19,7 @@ if.else:                                          ; preds = %entry.split
   br label %if.end.38
 
 if.end.38:                                        ; preds = %if.else, %entry.split
-  unreachable
+  ret void
 }
 
 declare void @BYTES_TO_BITS(...) #1

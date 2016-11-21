@@ -2,7 +2,7 @@
 ; RUN:     -polly-allow-nonaffine-loops=false \
 ; RUN:     -analyze < %s | FileCheck %s --check-prefix=REJECTNONAFFINELOOPS
 ; RUN: opt %loadPolly -polly-detect -polly-allow-nonaffine-branches \
-; RUN:     -polly-allow-nonaffine-loops=true \
+; RUN:     -polly-allow-nonaffine-loops=true -polly-allow-error-blocks=false \
 ; RUN:     -analyze < %s | FileCheck %s --check-prefix=ALLOWNONAFFINELOOPS
 ; RUN: opt %loadPolly -polly-detect -polly-allow-nonaffine \
 ; RUN:     -polly-allow-nonaffine-branches -polly-allow-nonaffine-loops=true \

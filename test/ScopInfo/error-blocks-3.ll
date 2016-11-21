@@ -1,7 +1,4 @@
-; RUN: opt %loadPolly -analyze -polly-scops  -polly-detect-keep-going -polly-allow-nonaffine < %s | FileCheck %s
-;
-; TODO: FIXME: Investigate why "-polly-detect-keep-going" is needed to detect
-;              this SCoP. That flag should not make a difference.
+; RUN: opt %loadPolly -analyze -polly-scops -polly-allow-nonaffine < %s | FileCheck %s
 ;
 ; CHECK:         Context:
 ; CHECK-NEXT:    [N] -> {  : -2147483648 <= N <= 2147483647 }

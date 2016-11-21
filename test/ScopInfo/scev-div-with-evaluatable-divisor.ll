@@ -29,20 +29,17 @@ if.else:                                          ; preds = %for.body
   br i1 undef, label %for.body.i58.lr.ph, label %for.inc
 
 for.body.i58.lr.ph:                               ; preds = %if.else
-  br i1 undef, label %for.body.i58.us, label %for.body.i58.preheader
+  br i1 undef, label %for.body.i58, label %for.body.i58.preheader
 
 for.body.i58.preheader:                           ; preds = %for.body.i58.lr.ph
   br label %for.body.i58
-
-for.body.i58.us:                                  ; preds = %for.body.i58.us, %for.body.i58.lr.ph
-  br i1 undef, label %for.inc, label %for.body.i58.us
 
 for.body.i58:                                     ; preds = %for.body.i58, %for.body.i58.preheader
   store double 0.0, double* %A
   %exitcond42 = icmp eq i32 0, %div.i45
   br i1 %exitcond42, label %for.inc, label %for.body.i58
 
-for.inc:                                          ; preds = %for.body.i58, %for.body.i58.us, %if.else, %if.then
+for.inc:                                          ; preds = %for.body.i58, %for.body.i58, %if.else, %if.then
   br i1 undef, label %for.end, label %for.body
 
 for.end:                                          ; preds = %for.inc, %entry
@@ -57,4 +54,4 @@ attributes #0 = { nounwind uwtable "disable-tail-calls"="false" "less-precise-fp
 
 ; CHECK-LABEL: Stmt_for_body_i58
 ; CHECK-NEXT:      Domain :=
-; CHECK-NEXT:          [n] -> { Stmt_for_body_i58[0] : -3 <= n <= 3 };
+; CHECK-NEXT:          [n] -> { Stmt_for_body_i58[0, 0] : -3 <= n <= 3 };

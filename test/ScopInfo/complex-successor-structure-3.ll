@@ -5,15 +5,21 @@
 ; domains small and concise.
 ;
 ; CHECK:         Assumed Context:
-; CHECK-NEXT:    [tmp5, tmp, tmp8, tmp11, tmp14, tmp17, tmp20, tmp23, tmp26] -> {  :  }
+; CHECK-NEXT:    [tmp, tmp5, tmp8, tmp11, tmp14, tmp17, tmp20, tmp23, tmp26] -> {  :  }
 ; CHECK-NEXT:    Invalid Context:
-; CHECK-NEXT:    [tmp5, tmp, tmp8, tmp11, tmp14, tmp17, tmp20, tmp23, tmp26] -> {  : 1 = 0 }
+; CHECK-NEXT:    [tmp, tmp5, tmp8, tmp11, tmp14, tmp17, tmp20, tmp23, tmp26] -> {  : 1 = 0 }
 ;
 ; CHECK:         Stmt_FINAL
 ; CHECK-NEXT:            Domain :=
-; CHECK-NEXT:                [tmp5, tmp, tmp8, tmp11, tmp14, tmp17, tmp20, tmp23, tmp26] -> { Stmt_FINAL[] };
+; CHECK-NEXT:                [tmp, tmp5, tmp8, tmp11, tmp14, tmp17, tmp20, tmp23, tmp26] -> { Stmt_FINAL[] };
 ; CHECK-NEXT:            Schedule :=
+<<<<<<< HEAD
 ; CHECK-NEXT:                [tmp5, tmp, tmp8, tmp11, tmp14, tmp17, tmp20, tmp23, tmp26] -> { Stmt_FINAL[] -> [16] };
+||||||| merged common ancestors
+; CHECK-NEXT:                [tmp5, tmp, tmp8, tmp11, tmp14, tmp17, tmp20, tmp23, tmp26] -> { Stmt_FINAL[] -> [22] };
+=======
+; CHECK-NEXT:                [tmp, tmp5, tmp8, tmp11, tmp14, tmp17, tmp20, tmp23, tmp26] -> { Stmt_FINAL[] -> [26] };
+>>>>>>> Allow "no-return" function calls.
 ;
 ;
 ;    void f(short *restrict In, int *restrict Out) {

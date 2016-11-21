@@ -76,6 +76,7 @@ class ScopBuilder {
 
   /// Set of instructions that might read any memory location.
   SmallVector<std::pair<ScopStmt *, Instruction *>, 16> GlobalReads;
+  SmallVector<std::pair<ScopStmt *, Instruction *>, 16> Printfs;
 
   /// Set of all accessed array base pointers.
   SmallSetVector<Value *, 16> ArrayBasePointers;
@@ -143,8 +144,8 @@ class ScopBuilder {
   // @}
 
   // Build the SCoP for Region @p R.
-  void buildScop(Region &R, AssumptionCache &AC,
-                 OptimizationRemarkEmitter &ORE);
+  void buildScop(std::shared_ptr<isl_ctx> &IslCtx, Region &R,
+                 AssumptionCache &AC, OptimizationRemarkEmitter &ORE);
 
   /// Try to build a multi-dimensional fixed sized MemoryAccess from the
   /// Load/Store instruction.
@@ -179,6 +180,11 @@ class ScopBuilder {
   ///
   /// @returns True if the access could be built, False otherwise.
   bool buildAccessCallInst(MemAccInst Inst, ScopStmt *Stmt);
+
+  MemoryAccess *copyMemoryAccessIntoStmt(
+      CallInst &CI, Scop &FS, MemoryAccess *FMA, ScopStmt *Stmt, Loop *L,
+      const isl::multi_pw_aff &ArgumentMapping, isl::set ExDomain);
+  bool buildAccessScopInstance(CallInst &CI, Scop &FS, Loop *L);
 
   /// Build a single-dimensional parametric sized MemoryAccess
   ///        from the Load/Store instruction.
@@ -285,11 +291,12 @@ class ScopBuilder {
   /// @param AccessValue Value read or written.
   ///
   /// @see MemoryKind
-  void addArrayAccess(ScopStmt *Stmt, MemAccInst MemAccInst,
-                      MemoryAccess::AccessType AccType, Value *BaseAddress,
-                      Type *ElemType, bool IsAffine,
-                      ArrayRef<const SCEV *> Subscripts,
-                      ArrayRef<const SCEV *> Sizes, Value *AccessValue);
+  MemoryAccess *addArrayAccess(ScopStmt *Stmt, MemAccInst MemAccInst,
+                               MemoryAccess::AccessType AccType,
+                               Value *BaseAddress, Type *ElemType,
+                               bool IsAffine, ArrayRef<const SCEV *> Subscripts,
+                               ArrayRef<const SCEV *> Sizes,
+                               Value *AccessValue);
 
   /// Create a MemoryAccess for writing an llvm::Instruction.
   ///
@@ -379,7 +386,8 @@ class ScopBuilder {
   void buildAccessRelations(ScopStmt &Stmt);
 
 public:
-  explicit ScopBuilder(Region *R, AssumptionCache &AC, AliasAnalysis &AA,
+  explicit ScopBuilder(std::shared_ptr<isl_ctx> &IslCtx, Region *R,
+                       AssumptionCache &AC, AliasAnalysis &AA,
                        const DataLayout &DL, DominatorTree &DT, LoopInfo &LI,
                        ScopDetection &SD, ScalarEvolution &SE,
                        OptimizationRemarkEmitter &ORE);

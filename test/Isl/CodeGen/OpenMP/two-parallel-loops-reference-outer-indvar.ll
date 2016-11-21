@@ -22,6 +22,7 @@ entry:
 for.cond1.preheader:
   %k.014 = phi i64 [ %inc87, %for.inc86 ], [ 0, %entry ]
   %j.010 = add nsw i64 %k.014, 1
+  call void @foo(i64 %nj, [512 x double]* %R)
   br i1 undef, label %for.body35, label %for.inc86
 
 for.body35:

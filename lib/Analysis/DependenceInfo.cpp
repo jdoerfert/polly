@@ -137,6 +137,7 @@ static void collectInfo(Scop &S, isl_union_map *&Read,
       isl_map *accdom = MA->getAccessRelation().release();
 
       accdom = isl_map_intersect_domain(accdom, domcp);
+      assert(accdom);
 
       if (ReductionArrays.count(MA->getScopArrayInfo())) {
         // Wrap the access domain and adjust the schedule accordingly.
@@ -886,10 +887,10 @@ __isl_give isl_union_map *Dependences::getDependences(int Kinds) const {
   if (Kinds & TYPE_WAW)
     Deps = isl_union_map_union(Deps, isl_union_map_copy(WAW));
 
-  if (Kinds & TYPE_RED)
+  if (Kinds & TYPE_RED && RED)
     Deps = isl_union_map_union(Deps, isl_union_map_copy(RED));
 
-  if (Kinds & TYPE_TC_RED)
+  if (Kinds & TYPE_TC_RED && TC_RED)
     Deps = isl_union_map_union(Deps, isl_union_map_copy(TC_RED));
 
   Deps = isl_union_map_coalesce(Deps);

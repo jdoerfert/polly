@@ -29,7 +29,7 @@ target triple = "x86_64-unknown-linux-gnu"
 
 @global = external local_unnamed_addr global %struct.hoge, align 8
 
-define void @widget() local_unnamed_addr {
+define void @widget(i32 %i, i32 %j) local_unnamed_addr {
 bb:
   br label %bb1
 
@@ -47,7 +47,7 @@ bb4:                                              ; preds = %bb3
   br label %bb5
 
 bb5:                                              ; preds = %bb4
-  %tmp6 = and i32 undef, 16711680
+  %tmp6 = and i32 %i, %j
   %tmp7 = icmp eq i32 %tmp6, 0
   br i1 %tmp7, label %bb8, label %bb10
 

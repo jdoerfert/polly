@@ -30,4 +30,4 @@ return:
   ret void
 }
 
-; CHECK: Valid Region for Scop: for.i => return
+; CHECK: Valid Region for Scop: entry => return

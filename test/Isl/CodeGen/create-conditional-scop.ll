@@ -8,12 +8,14 @@ target datalayout = "e-p:32:32:32-i64:64:64-i32:32:32-i16:16:16-i1:32:32-f64:64:
 ; block %polly.start as a basic block to the surrounding loop.
 define void @foo() nounwind {
 entry:
+  call void @foo()
   br i1 undef, label %while.cond14.preheader, label %for.body7.single_entry.single_entry
 
 while.cond14.preheader:                           ; preds = %for.inc02, %for.body7.single_entry.single_entry, %entry
   ret void
 
 for.body7.single_entry.single_entry:              ; preds = %for.inc02, %entry
+  call void @foo()
   br i1 undef, label %while.cond14.preheader, label %while.body
 
 while.body:                                       ; preds = %while.body, %for.body7.single_entry.single_entry
@@ -25,6 +27,7 @@ while.body:                                       ; preds = %while.body, %for.bo
   br i1 %exitcond2, label %for.inc02, label %while.body
 
 for.inc02:                                        ; preds = %while.body
+  call void @foo()
   br i1 undef, label %while.cond14.preheader, label %for.body7.single_entry.single_entry
 }
 

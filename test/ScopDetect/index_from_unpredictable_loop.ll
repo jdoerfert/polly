@@ -46,7 +46,7 @@ for.end:
 ; AFFINE-NEXT:              [octets, p_1, p] -> { Stmt_if_then84[] -> MemRef_input[1 + p] };
 ; AFFINE-NEXT:  }
 
-; NONAFFINE:      Region: %for.body---%for.end
+; NONAFFINE:      Region: %entry---%for.end
 
 ; NONAFFINE:      Statements {
 ; NONAFFINE-NEXT: 	Stmt_for_body

@@ -97,6 +97,8 @@ namespace polly {
 
 using ParamSetType = std::set<const SCEV *>;
 
+struct IPSCEV;
+
 // Description of the shape of an array.
 struct ArrayShape {
   // Base pointer identifying all accesses to this array.
@@ -130,10 +132,18 @@ using BaseToElSize = std::map<const SCEVUnknown *, const SCEV *>;
 extern bool PollyTrackFailures;
 extern bool PollyDelinearize;
 extern bool PollyUseRuntimeAliasChecks;
+extern bool PollyProcessFunctionScops;
 extern bool PollyProcessUnprofitable;
 extern bool PollyInvariantLoadHoisting;
 extern bool PollyAllowUnsignedOperations;
 extern bool PollyAllowFullFunction;
+extern bool PollyAllowErrorLoops;
+extern bool PollyAllowNonAffineLoops;
+extern SmallVector<std::string, 8> PollyIgnoredFunctions;
+extern SmallVector<std::string, 8> PollyOnlyFunctions;
+
+class GlobalScopInfo;
+extern GlobalScopInfo *GlobalScopInfoPtr;
 
 /// A function attribute which will cause Polly to skip the function
 extern StringRef PollySkipFnAttr;
@@ -154,6 +164,9 @@ public:
     AliasSetTracker AST; // The AliasSetTracker to hold the alias information.
     bool Verifying;      // If we are in the verification phase?
 
+    /// Set of error blocks in this context.
+    SmallPtrSet<llvm::BasicBlock *, 8> ErrorBlocks;
+
     /// Container to remember rejection reasons for this region.
     RejectLog Log;
 
@@ -170,6 +183,14 @@ public:
     SetVector<std::pair<const SCEVUnknown *, Loop *>> NonAffineAccesses;
     BaseToElSize ElementSize;
 
+    ParameterSetTy Params;
+
+    SmallVector<CallInst *, 4> Calls;
+    SmallVector<ReturnInst *, 4> Returns;
+
+    DenseMap<Value *, IPSCEV *> IPSCEVMap;
+    DenseMap<const SCEV *, IPSCEV *> IPSCEVSCEVMap;
+
     /// The region has at least one load instruction.
     bool hasLoads = false;
 
@@ -178,6 +199,11 @@ public:
 
     /// Flag to indicate the region has at least one unknown access.
     bool HasUnknownAccess = false;
+
+    /// Flag to indicate the region has at least one unreachable.
+    bool HasUnreachable;
+
+    int NumAffineLoops;
 
     /// The set of non-affine subregions in the region we analyze.
     RegionSet NonAffineSubRegionSet;
@@ -202,13 +228,18 @@ public:
           Verifying(DC.Verifying), Log(std::move(DC.Log)),
           Accesses(std::move(DC.Accesses)),
           NonAffineAccesses(std::move(DC.NonAffineAccesses)),
-          ElementSize(std::move(DC.ElementSize)), hasLoads(DC.hasLoads),
+          ElementSize(std::move(DC.ElementSize)), Params(std::move(DC.Params)),
+          Calls(std::move(DC.Calls)), Returns(std::move(DC.Returns)),
+          IPSCEVMap(std::move(DC.IPSCEVMap)), hasLoads(DC.hasLoads),
           hasStores(DC.hasStores), HasUnknownAccess(DC.HasUnknownAccess),
+          HasUnreachable(DC.HasUnreachable), NumAffineLoops(DC.NumAffineLoops),
           NonAffineSubRegionSet(std::move(DC.NonAffineSubRegionSet)),
           BoxedLoopsSet(std::move(DC.BoxedLoopsSet)),
           RequiredILS(std::move(DC.RequiredILS)) {
       AST.add(DC.AST);
     }
+
+    ~DetectionContext();
   };
 
   /// Helper data structure to collect statistics about loop counts.
@@ -230,7 +261,7 @@ private:
   //@}
 
   /// Map to remember detection contexts for all regions.
-  using DetectionContextMapTy = DenseMap<BBPair, DetectionContext>;
+  using DetectionContextMapTy = DenseMap<BBPair, DetectionContext *>;
   mutable DetectionContextMapTy DetectionContextMap;
 
   /// Remove cached results for @p R.
@@ -256,6 +287,9 @@ private:
   ///
   /// @returns True if the subregion can be over approximated, false otherwise.
   bool addOverApproximatedRegion(Region *AR, DetectionContext &Context) const;
+
+  const SCEV *isAffineInContext(Value *Val, DetectionContext &Context) const;
+  bool hasAffineReturns(DetectionContext &Context) const;
 
   /// Find for a given base pointer terms that hint towards dimension
   ///        sizes of a multi-dimensional array.
@@ -316,6 +350,13 @@ private:
   ///
   /// @param The region tree to scan for scops.
   void findScops(Region &R);
+
+  /// Check if all loops in the region are valid.
+  ///
+  /// @param Context The context of scop detection.
+  ///
+  /// @return True if all loops are valid, false otherwise.
+  bool allLoopsValid(DetectionContext &Context) const;
 
   /// Check if all basic block in the region are valid.
   ///
@@ -402,7 +443,7 @@ private:
   ///
   /// @return True if the value represented by Val is invariant in the region
   ///         identified by Reg.
-  bool isInvariant(Value &Val, const Region &Reg, DetectionContext &Ctx) const;
+  bool isInvariant(Value &Val, Region &Reg, DetectionContext &Ctx) const;
 
   /// Check if the memory access caused by @p Inst is valid.
   ///
@@ -472,7 +513,8 @@ private:
   /// @param S           The expression to be checked.
   /// @param Scope       The loop nest in which @p S is used.
   /// @param Context     The context of scop detection.
-  bool isAffine(const SCEV *S, Loop *Scope, DetectionContext &Context) const;
+  bool isAffine(const SCEV *S, Loop *Scope, DetectionContext &Context,
+                ParameterSetTy *Params = nullptr) const;
 
   /// Check if the control flow in a basic block is valid.
   ///
@@ -480,16 +522,15 @@ private:
   /// Terminator instruction we can handle or, if this is not the case,
   /// registers this basic block as the start of a non-affine region.
   ///
-  /// This function optionally allows unreachable statements.
-  ///
   /// @param BB               The BB to check the control flow.
   /// @param IsLoopBranch     Flag to indicate the branch is a loop exit/latch.
-  //  @param AllowUnreachable Allow unreachable statements.
   /// @param Context          The context of scop detection.
   ///
   /// @return True if the BB contains only valid control flow.
-  bool isValidCFG(BasicBlock &BB, bool IsLoopBranch, bool AllowUnreachable,
+  bool isValidCFG(BasicBlock &BB, bool IsLoopBranch,
                   DetectionContext &Context) const;
+
+  bool isOptimizableLoop(Loop *L, DetectionContext &Context) const;
 
   /// Is a loop valid with respect to a given region.
   ///
@@ -524,6 +565,8 @@ private:
   /// @return True if ISL can compute the trip count of the loop.
   bool canUseISLTripCount(Loop *L, DetectionContext &Context) const;
 
+  bool addErrorBlock(BasicBlock *BB, DetectionContext &Context) const;
+
   /// Print the locations of all detected scops.
   void printLocations(Function &F);
 
@@ -549,6 +592,7 @@ public:
   ScopDetection(Function &F, const DominatorTree &DT, ScalarEvolution &SE,
                 LoopInfo &LI, RegionInfo &RI, AliasAnalysis &AA,
                 OptimizationRemarkEmitter &ORE);
+  ~ScopDetection();
 
   /// Get the RegionInfo stored in this pass.
   ///
@@ -567,8 +611,11 @@ public:
   /// @return Return true if R is the maximum Region in a Scop, false otherwise.
   bool isMaxRegionInScop(const Region &R, bool Verify = true) const;
 
+  void updateDetectionContextRegion(const Region *R, BasicBlock *NewEntry, BasicBlock *NewExit) const;
+
   /// Return the detection context for @p R, nullptr if @p R was invalid.
-  DetectionContext *getDetectionContext(const Region *R) const;
+  DetectionContext *getDetectionContext(const Region *R,
+                                        bool Delete = false) const;
 
   /// Return the set of rejection causes for @p R.
   const RejectLog *lookupRejectionLog(const Region *R) const;
@@ -597,6 +644,11 @@ public:
   const_iterator begin() const { return ValidRegions.begin(); }
   const_iterator end() const { return ValidRegions.end(); }
   //@}
+
+  size_t size() const { return ValidRegions.size(); }
+
+  void annotateFunctionScop(Function &F, DetectionContext &Context,
+                            LoopStats &Stats) const;
 
   /// Emit rejection remarks for all rejected regions.
   ///

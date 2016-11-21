@@ -20,16 +20,10 @@
 
 #include "polly/ScopDetection.h"
 #include "polly/Support/SCEVAffinator.h"
-#include "polly/Support/ScopHelper.h"
-#include "llvm/ADT/ArrayRef.h"
-#include "llvm/ADT/DenseMap.h"
-#include "llvm/ADT/DenseSet.h"
+#include "polly/Support/SCEVValidator.h"
+
 #include "llvm/ADT/MapVector.h"
-#include "llvm/ADT/SetVector.h"
-#include "llvm/ADT/SmallVector.h"
-#include "llvm/ADT/StringMap.h"
-#include "llvm/ADT/StringRef.h"
-#include "llvm/ADT/iterator_range.h"
+#include "llvm/Analysis/CallGraph.h"
 #include "llvm/Analysis/RegionPass.h"
 #include "llvm/Analysis/ScalarEvolutionExpressions.h"
 #include "llvm/IR/DebugLoc.h"
@@ -78,6 +72,7 @@ class Value;
 
 void initializeScopInfoRegionPassPass(PassRegistry &);
 void initializeScopInfoWrapperPassPass(PassRegistry &);
+void initializeGlobalScopInfoPass(PassRegistry &);
 
 } // end namespace llvm
 
@@ -89,9 +84,12 @@ struct isl_union_map;
 
 namespace polly {
 
+struct IPSCEV;
 class MemoryAccess;
 class Scop;
 class ScopStmt;
+class ScopBuilder;
+class GlobalScopInfo;
 
 //===---------------------------------------------------------------------===//
 
@@ -99,6 +97,7 @@ extern bool UseInstructionNames;
 
 /// Enumeration of assumptions Polly can take.
 enum AssumptionKind {
+  CALLSITE,
   ALIASING,
   INBOUNDS,
   WRAPPING,
@@ -293,7 +292,8 @@ public:
   ///                     defined in SAI.
   ///  @param CheckConsistency Update sizes, even if new sizes are inconsistent
   ///                          with old sizes
-  bool updateSizes(ArrayRef<const SCEV *> Sizes, bool CheckConsistency = true);
+  bool updateSizes(ArrayRef<const SCEV *> Sizes, bool CheckConsistency = true,
+                   bool CheckOnly = false);
 
   /// Make the ScopArrayInfo model a Fortran array.
   /// It receives the Fortran array descriptor and stores this.
@@ -424,7 +424,9 @@ public:
   /// @param Array The array to compare against.
   ///
   /// @returns True, if the arrays are compatible, False otherwise.
-  bool isCompatibleWith(const ScopArrayInfo *Array) const;
+  bool isCompatibleWith(const ScopArrayInfo *Array, const DataLayout &DL) const;
+
+  void identifyBasePointerSAI(Scop &S);
 
 private:
   void addDerivedSAI(ScopArrayInfo *DerivedSAI) {
@@ -438,7 +440,7 @@ private:
   SmallSetVector<ScopArrayInfo *, 2> DerivedSAIs;
 
   /// The base pointer.
-  AssertingVH<Value> BasePtr;
+  Value* BasePtr;
 
   /// The canonical element type of this array.
   ///
@@ -585,7 +587,7 @@ private:
   /// MemoryKind::ExitPHI is the PHI node itself.
   /// The #BaseAddr of a memory access of kind MemoryKind::Value is the
   /// instruction defining the value.
-  AssertingVH<Value> BaseAddr;
+  Value* BaseAddr;
 
   /// Type a single array element wrt. this access.
   Type *ElementType;
@@ -627,7 +629,7 @@ private:
   ///  - For accesses of kind MemoryKind::PHI or MemoryKind::ExitPHI it is the
   ///    PHI node itself (for both, READ and WRITE accesses).
   ///
-  AssertingVH<Value> AccessValue;
+  Value* AccessValue;
 
   /// Are all the subscripts affine expression?
   bool IsAffine = true;
@@ -671,7 +673,7 @@ private:
   /// along with auxiliary fields with information such as dimensions.
   /// We hold a reference to the descriptor corresponding to a MemoryAccess
   /// into a Fortran array. FAD for "Fortran Array Descriptor"
-  AssertingVH<Value> FAD;
+  Value* FAD;
   // @}
 
   isl::basic_map createBasicAccessMap(ScopStmt *Statement);
@@ -825,6 +827,9 @@ public:
   bool isMemoryIntrinsic() const {
     return isa<MemIntrinsic>(getAccessInstruction());
   }
+
+  bool IsInlinedScopAccess;
+  bool isInlinedScopAccess() const { return IsInlinedScopAccess; }
 
   /// Check if a new access relation was imported or set by a pass.
   bool hasNewAccessRelation() const { return !NewAccessRelation.is_null(); }
@@ -1303,6 +1308,8 @@ private:
   /// The BasicBlock represented by this statement (in the affine case).
   BasicBlock *BB = nullptr;
 
+  SmallVector<BasicBlock *, 8> Blocks;
+
   /// The region represented by this statement (in the non-affine case).
   Region *R = nullptr;
 
@@ -1378,6 +1385,8 @@ public:
 
   /// Return true if this is a copy statement.
   bool isCopyStmt() const { return BB == nullptr && R == nullptr; }
+
+  bool isReturnStmt() const;
 
   /// Get the region represented by this ScopStmt (if any).
   ///
@@ -1476,6 +1485,10 @@ public:
       if (!Access->isArrayKind())
         continue;
 
+      if (ArrayAccess) {
+        ArrayAccess->dump();
+        Access->dump();
+      }
       assert(!ArrayAccess && "More then one array access for instruction");
 
       ArrayAccess = Access;
@@ -1651,6 +1664,8 @@ public:
   /// @see ScopBuilder::ensureValueRead(Value*,ScopStmt*)
   MemoryAccess *ensureValueRead(Value *V);
 
+  void simplifyDomain(isl::set Ctx);
+
 #if !defined(NDEBUG) || defined(LLVM_ENABLE_DUMP)
   /// Print the ScopStmt to stderr.
   void dump() const;
@@ -1659,6 +1674,15 @@ public:
 
 /// Print ScopStmt S to raw_ostream OS.
 raw_ostream &operator<<(raw_ostream &OS, const ScopStmt &S);
+
+struct ParameterPayload {
+  const SCEV *Parameter;
+  IPSCEV *IP;
+
+  ParameterPayload(const SCEV *Parameter, IPSCEV *IP)
+      : Parameter(Parameter), IP(IP) {}
+  ~ParameterPayload() { deleteIPSCEV(IP); }
+};
 
 /// Static Control Part
 ///
@@ -1678,6 +1702,8 @@ raw_ostream &operator<<(raw_ostream &OS, const ScopStmt &S);
 ///   This context contains information about the values the parameters
 ///   can take and relations between different parameters.
 class Scop {
+  Function &F;
+
 public:
   /// Type to represent a pair of minimal/maximal access to an array.
   using MinMaxAccessTy = std::pair<isl_pw_multi_aff *, isl_pw_multi_aff *>;
@@ -1739,6 +1765,8 @@ private:
   /// The statements in this Scop.
   StmtSet Stmts;
 
+  SetVector<Value *> UsedValues;
+
   /// Parameters of this Scop
   ParameterSetTy Parameters;
 
@@ -1777,7 +1805,7 @@ private:
   SCEVAffinator Affinator;
 
   using ArrayInfoMapTy =
-      std::map<std::pair<AssertingVH<const Value>, MemoryKind>,
+      std::map<std::pair<Value*, MemoryKind>,
                std::unique_ptr<ScopArrayInfo>>;
 
   using ArrayNameMapTy = StringMap<std::unique_ptr<ScopArrayInfo>>;
@@ -1934,8 +1962,9 @@ private:
   static int getNextID(std::string ParentFunc);
 
   /// Scop constructor; invoked from ScopBuilder::buildScop.
-  Scop(Region &R, ScalarEvolution &SE, LoopInfo &LI, DominatorTree &DT,
-       ScopDetection::DetectionContext &DC, OptimizationRemarkEmitter &ORE);
+  Scop(std::shared_ptr<isl_ctx> &IslCtx, Region &R, ScalarEvolution &SE,
+       LoopInfo &LI, DominatorTree &DT, ScopDetection::DetectionContext &DC,
+       OptimizationRemarkEmitter &ORE);
 
   //@}
 
@@ -2061,7 +2090,7 @@ private:
   isl::set addNonEmptyDomainConstraints(isl::set C) const;
 
   /// Return the access for the base ptr of @p MA if any.
-  MemoryAccess *lookupBasePtrAccess(MemoryAccess *MA);
+  MemoryAccess *lookupBasePtrAccess(MemoryAccess *MA, bool &Hoistable);
 
   /// Check if the base ptr of @p MA is in the SCoP but not hoistable.
   bool hasNonHoistableBasePtrInScop(MemoryAccess *MA, isl::union_map Writes);
@@ -2363,15 +2392,6 @@ private:
   isl::union_map
   getAccessesOfType(std::function<bool(MemoryAccess &)> Predicate);
 
-  /// @name Helper functions for printing the Scop.
-  ///
-  //@{
-  void printContext(raw_ostream &OS) const;
-  void printArrayInfo(raw_ostream &OS) const;
-  void printStatements(raw_ostream &OS, bool PrintInstructions) const;
-  void printAliasAssumptions(raw_ostream &OS) const;
-  //@}
-
 public:
   Scop(const Scop &) = delete;
   Scop &operator=(const Scop &) = delete;
@@ -2432,6 +2452,9 @@ public:
   /// @return The count of parameters used in this Scop.
   size_t getNumParams() const { return Parameters.size(); }
 
+  const ParameterSetTy &getParameters() const { return Parameters; }
+  const SetVector<Value *> &getUsedValues() const { return UsedValues; }
+
   /// Take a list of parameters and add the new ones to the scop.
   void addParams(const ParameterSetTy &NewParameters);
 
@@ -2450,6 +2473,17 @@ public:
   using const_array_iterator = ArrayInfoSetTy::const_iterator;
   using array_range = iterator_range<ArrayInfoSetTy::iterator>;
   using const_array_range = iterator_range<ArrayInfoSetTy::const_iterator>;
+
+  DenseMap<CallInst *, isl::multi_pw_aff> ArgumentMappings;
+  void getArgumentValueMapping(ScopStmt *Stmt, CallInst &CI, Scop &FS, Loop *L,
+                               DenseMap<Value *, const SCEV *> &VM);
+  void createArgumentMapping(ScopStmt &Stmt, CallInst &CI, Scop &FS,
+                                       LoopInfo &LI);
+  isl::multi_pw_aff getOrCreateArgumentMapping(ScopStmt &Stmt, CallInst &CI,
+                                               Scop &FS, LoopInfo &LI);
+  isl::multi_pw_aff getArgumentMapping(CallInst &CI);
+
+  const ArrayInfoSetTy &getScopArrayInfoSet() const { return ScopArrayInfoSet; }
 
   inline array_iterator array_begin() { return ScopArrayInfoSet.begin(); }
 
@@ -2476,7 +2510,7 @@ public:
   /// @param Parameter A SCEV that was recognized as a Parameter.
   ///
   /// @return The corresponding isl_id or NULL otherwise.
-  isl::id getIdForParam(const SCEV *Parameter) const;
+  isl::id getIdForParam(const SCEV *Parameter, bool Normalize = true) const;
 
   /// Get the maximum region of this static control part.
   ///
@@ -2485,7 +2519,7 @@ public:
   inline Region &getRegion() { return R; }
 
   /// Return the function this SCoP is in.
-  Function &getFunction() const { return *R.getEntry()->getParent(); }
+  Function &getFunction() const { return F; }
 
   /// Check if @p L is contained in the SCoP.
   bool contains(const Loop *L) const { return R.contains(L); }
@@ -2522,8 +2556,28 @@ public:
   /// @return The maximum depth of the loop.
   inline unsigned getMaxLoopDepth() const { return MaxLoopDepth; }
 
+  ScopDetection::DetectionContext &getDetectionContext() { return DC; }
+  const ScopDetection::DetectionContext &getDetectionContext() const {
+    return DC;
+  }
+
+  decltype(ScopDetection::DetectionContext::ErrorBlocks) &getErrorBlocks() {
+    return DC.ErrorBlocks;
+  }
+  const decltype(ScopDetection::DetectionContext::ErrorBlocks) &getErrorBlocks() const {
+    return DC.ErrorBlocks;
+  }
+
+  const SCEV *getSCEV(Value *V) const;
+  const SCEV *getSCEVAtScope(Value *V, Loop *Scope) const;
+
+  DenseMap<const SCEV *, SmallVector<std::pair<CallInst *, LoadInst *>, 8>> Ptr2CIMap;
+  void createLocalLoadsForCall(CallInst &CI, Scop &FS, LoopInfo &LI);
+  LoadInst *getOrCreateLoadOfPtr(const SCEV *Ptr, CallInst &CI, Type *Ty);
+
   /// Return the invariant equivalence class for @p Val if any.
   InvariantEquivClassTy *lookupInvariantEquivClass(Value *Val);
+  InvariantEquivClassTy *lookupInvariantEquivClass(const SCEV *Ptr, Type *Ty, Value *Val = nullptr);
 
   /// Return the set of invariant accesses.
   InvariantEquivClassesTy &getInvariantAccesses() {
@@ -2808,6 +2862,8 @@ public:
     return getRequiredInvariantLoads().count(LI);
   }
 
+  bool isErrorBlock(BasicBlock &BB) const { return DC.ErrorBlocks.count(&BB); }
+
   /// Return the set of boxed (thus overapproximated) loops.
   const BoxedLoopsSetTy &getBoxedLoops() const { return DC.BoxedLoopsSet; }
 
@@ -2872,26 +2928,47 @@ public:
   /// Align the parameters in the statement to the scop context
   void realignParams();
 
+  SmallPtrSet<CallInst *, 8> ForcedInlineCalls;
+  void createCallProfitableFunction(CallInst *CI , ScopStmt &Stmt);
+
   /// Return true if this SCoP can be profitably optimized.
   ///
   /// @param ScalarsAreUnprofitable Never consider statements with scalar writes
   ///                               as profitably optimizable.
   ///
   /// @return Whether this SCoP can be profitably optimized.
-  bool isProfitable(bool ScalarsAreUnprofitable) const;
+  bool isProfitable(bool ScalarsAreUnprofitable, bool RestrictToProfitable = false);
+
+  DenseMap<CallInst *, isl::pw_aff> CallProfitabilityFunctions;
+  isl::pw_aff getCallProfitabilityFunction(CallInst *CI) {
+    return CallProfitabilityFunctions.lookup(CI);
+  }
+
+  isl::pw_aff ProfitabilityFunction;
+  isl::pw_aff getProfitabilityFunction() { return ProfitabilityFunction; }
 
   /// Return true if the SCoP contained at least one error block.
-  bool hasErrorBlock() const { return HasErrorBlock; }
+  bool hasErrorBlock() const { return !DC.ErrorBlocks.empty() || HasErrorBlock; }
 
   /// Return true if the underlying region has a single exiting block.
   bool hasSingleExitEdge() const { return HasSingleExitEdge; }
+
+  /// @name Helper functions for printing the Scop.
+  ///
+  //@{
+  void printContext(raw_ostream &OS, bool PrintSCEVs = true) const;
+  void printArrayInfo(raw_ostream &OS, bool PrintSCEVs = true) const;
+  void printStatements(raw_ostream &OS, bool PrintInstructions) const;
+  void printAliasAssumptions(raw_ostream &OS) const;
+  //@}
 
   /// Print the static control part.
   ///
   /// @param OS The output stream the static control part is printed to.
   /// @param PrintInstructions Whether to print the statement's instructions as
   ///                          well.
-  void print(raw_ostream &OS, bool PrintInstructions) const;
+  void print(raw_ostream &OS, bool PrintInstructions,
+             bool PrintParameterSCEVs = true) const;
 
 #if !defined(NDEBUG) || defined(LLVM_ENABLE_DUMP)
   /// Print the ScopStmt to stderr.
@@ -2937,8 +3014,24 @@ public:
   /// @param BB The block for which the conditions should be returned.
   isl::set getDomainConditions(BasicBlock *BB) const;
 
+  /// Build the conditions sets for the terminator @p TI in the @p Domain.
+  ///
+  /// This will fill @p ConditionSets with the conditions under which control
+  /// will be moved from @p TI to its successors. Hence, @p ConditionSets will
+  /// have as many elements as @p TI has successors.
+  bool buildConditionSets(BasicBlock *BB, TerminatorInst *TI, Loop *L,
+                          __isl_keep isl_set *Domain,
+                          DenseMap<BasicBlock *, isl::set> &InvalidDomainMap,
+                          SmallVectorImpl<__isl_give isl_set *> &ConditionSets);
+
+  __isl_give isl_set *adjustDomainDimensions(__isl_take isl_set *Dom,
+                                             Loop *OldL, Loop *NewL);
+
+  bool isExecuted(const ScopStmt *Stmt) const;
+  bool isExecuted(BasicBlock *BB) const;
+
   /// Get a union set containing the iteration domains of all statements.
-  isl::union_set getDomains() const;
+  isl::union_set getDomains(bool OnlyEffectStmts = false) const;
 
   /// Get a union map of all may-writes performed in the SCoP.
   isl::union_map getMayWrites();
@@ -2947,7 +3040,7 @@ public:
   isl::union_map getMustWrites();
 
   /// Get a union map of all writes performed in the SCoP.
-  isl::union_map getWrites();
+  isl::union_map getWrites(bool OnlyArray = false);
 
   /// Get a union map of all reads performed in the SCoP.
   isl::union_map getReads();
@@ -2959,6 +3052,11 @@ public:
   ///
   /// @param Array The array to which the accesses should belong.
   isl::union_map getAccesses(ScopArrayInfo *Array);
+
+  void
+  getUsedAndWrittenArrays(SmallPtrSetImpl<const ScopArrayInfo *> &UsedArrays,
+                          SmallPtrSetImpl<const ScopArrayInfo *> &WrittenArrays,
+                          bool IncludeScalars);
 
   /// Get the schedule of all the statements in the SCoP.
   ///
@@ -3070,13 +3168,23 @@ raw_ostream &operator<<(raw_ostream &OS, const Scop &scop);
 /// The legacy pass manager's analysis pass to compute scop information
 ///        for a region.
 class ScopInfoRegionPass : public RegionPass {
+
+  /// Isl context.
+  ///
+  /// We need a shared_ptr with reference counter to delete the context when all
+  /// isl objects are deleted. We will distribute the shared_ptr to all objects
+  /// that use the context to create isl objects, and increase the reference
+  /// counter. By doing this, we guarantee that the context is deleted when we
+  /// delete the last object that creates isl objects with the context.
+  std::shared_ptr<isl_ctx> IslCtx;
+
   /// The Scop pointer which is used to construct a Scop.
   std::unique_ptr<Scop> S;
 
 public:
   static char ID; // Pass identification, replacement for typeid
 
-  ScopInfoRegionPass() : RegionPass(ID) {}
+  ScopInfoRegionPass();
   ~ScopInfoRegionPass() override = default;
 
   /// Build Scop object, the Polly IR of static control
@@ -3119,17 +3227,25 @@ private:
   AssumptionCache &AC;
   OptimizationRemarkEmitter &ORE;
 
+  /// Isl context.
+  ///
+  /// We need a shared_ptr with reference counter to delete the context when all
+  /// isl objects are deleted. We will distribute the shared_ptr to all objects
+  /// that use the context to create isl objects, and increase the reference
+  /// counter. By doing this, we guarantee that the context is deleted when we
+  /// delete the last object that creates isl objects with the context.
+  std::shared_ptr<isl_ctx> IslCtx;
+
 public:
-  ScopInfo(const DataLayout &DL, ScopDetection &SD, ScalarEvolution &SE,
-           LoopInfo &LI, AliasAnalysis &AA, DominatorTree &DT,
-           AssumptionCache &AC, OptimizationRemarkEmitter &ORE);
+  ScopInfo(std::shared_ptr<isl_ctx> &IslCtx, const DataLayout &DL,
+           ScopDetection &SD, ScalarEvolution &SE, LoopInfo &LI,
+           AliasAnalysis &AA, DominatorTree &DT, AssumptionCache &AC,
+           OptimizationRemarkEmitter &ORE);
 
   /// Get the Scop object for the given Region.
   ///
   /// @return If the given region is the maximal region within a scop, return
-  ///         the scop object. If the given region is a subregion, return a
-  ///         nullptr. Top level region containing the entry block of a function
-  ///         is not considered in the scop creation.
+  ///         the scop object.
   Scop *getScop(Region *R) const {
     auto MapIt = RegionToScopMap.find(R);
     if (MapIt != RegionToScopMap.end())
@@ -3146,6 +3262,9 @@ public:
   bool invalidate(Function &F, const PreservedAnalyses &PA,
                   FunctionAnalysisManager::Invalidator &Inv);
 
+  const ScopDetection *getSD() const { return &SD; }
+  size_t size() const { return RegionToScopMap.size(); }
+
   iterator begin() { return RegionToScopMap.begin(); }
   iterator end() { return RegionToScopMap.end(); }
   const_iterator begin() const { return RegionToScopMap.begin(); }
@@ -3158,6 +3277,17 @@ public:
 };
 
 struct ScopInfoAnalysis : public AnalysisInfoMixin<ScopInfoAnalysis> {
+  /// Isl context.
+  ///
+  /// We need a shared_ptr with reference counter to delete the context when all
+  /// isl objects are deleted. We will distribute the shared_ptr to all objects
+  /// that use the context to create isl objects, and increase the reference
+  /// counter. By doing this, we guarantee that the context is deleted when we
+  /// delete the last object that creates isl objects with the context.
+  std::shared_ptr<isl_ctx> IslCtx;
+
+  ScopInfoAnalysis();
+
   static AnalysisKey Key;
 
   using Result = ScopInfo;
@@ -3184,6 +3314,15 @@ struct ScopInfoPrinterPass : public PassInfoMixin<ScopInfoPrinterPass> {
 class ScopInfoWrapperPass : public FunctionPass {
   std::unique_ptr<ScopInfo> Result;
 
+  /// Isl context.
+  ///
+  /// We need a shared_ptr with reference counter to delete the context when all
+  /// isl objects are deleted. We will distribute the shared_ptr to all objects
+  /// that use the context to create isl objects, and increase the reference
+  /// counter. By doing this, we guarantee that the context is deleted when we
+  /// delete the last object that creates isl objects with the context.
+  std::shared_ptr<isl_ctx> IslCtx;
+
 public:
   ScopInfoWrapperPass() : FunctionPass(ID) {}
   ~ScopInfoWrapperPass() override = default;
@@ -3201,6 +3340,133 @@ public:
   void print(raw_ostream &O, const Module *M = nullptr) const override;
 
   void getAnalysisUsage(AnalysisUsage &AU) const override;
+};
+
+class GlobalScopInfo : public ModulePass {
+
+  /// Isl context.
+  ///
+  /// We need a shared_ptr with reference counter to delete the context when all
+  /// isl objects are deleted. We will distribute the shared_ptr to all objects
+  /// that use the context to create isl objects, and increase the reference
+  /// counter. By doing this, we guarantee that the context is deleted when we
+  /// delete the last object that creates isl objects with the context.
+  std::shared_ptr<isl_ctx> IslCtx;
+
+public:
+  using BBPair = std::pair<BasicBlock *, BasicBlock *>;
+  using RegionToScopMapTy = DenseMap<BBPair, std::unique_ptr<Scop>>;
+  using iterator = RegionToScopMapTy::iterator;
+  using const_iterator = RegionToScopMapTy::const_iterator;
+
+private:
+  /// A map of Region to its Scop object containing
+  /// Polly IR of static control part
+  RegionToScopMapTy RegionsToScopMap;
+
+  struct AnalysisSummary {
+    int TrivialSCCs = 0;
+    int NonTrivialSCCs = 0;
+
+    int TotalFunctions = 0;
+    int RepresentedFunctions = 0;
+    int PartiallyRepresentedFunctions = 0;
+
+    int TotalLoops = 0;
+    int RepresentedLoops = 0;
+    int ApproximatedLoops = 0;
+
+    int TotalBlocks = 0;
+    int RepresentedBlocks = 0;
+    int ApproximatedBlocks = 0;
+
+    int TotalInstructions = 0;
+    int RepresentedInstructions = 0;
+    int ApproximatedInstructions = 0;
+
+    int TotalMemoryInstructions = 0;
+    int RepresentedMemoryInstructions = 0;
+    int ApproximatedMemoryInstructions = 0;
+
+    int TotalCalls = 0;
+    int RepresentedCalls = 0;
+    int ApproximatedCalls = 0;
+
+    int NumMemoryAccesses = 0;
+    int NumInlinedCallAccesses = 0;
+    int NumMemoryIntrinsicAccesses = 0;
+
+    int NumScalarAccesses = 0;
+    int NumPHIAccesses = 0;
+
+    void dump(raw_ostream &OS);
+  } Summary;
+
+  void inlineScops();
+
+  struct InlineInfo {
+    CallInst *CI;
+    isl::set Ctx;
+  };
+  using InlineInfoVectorTy = SmallVector<InlineInfo, 8>;
+  isl::pw_aff getAffineLoops(Scop &CS, InlineInfoVectorTy &InlineInfos);
+
+  struct CallInfoTy {
+    CallInst *CI;
+    isl::pw_aff ProfitabilityFunction;
+  };
+  using CallInfoVectorTy = SmallVector<CallInfoTy, 8>;
+
+  void collectCallsToInline(Scop &S, CallInfoVectorTy &CallInfos, const isl::set &ProfitableCtx,
+                            SmallVectorImpl<CallInst *> &CallsToInline);
+
+  isl::pw_aff getTransitiveProfitability(Scop &CS, CallInfoVectorTy &CallInfos);
+
+  void analyzeScops(Module &M);
+
+  Scop *runOnFunction(Function *F);
+
+  using FunctionSet = SmallPtrSet<Function *, 8>;
+  FunctionSet ProcessedFunctions;
+
+  using SCCSet = FunctionSet;
+  DenseMap<Function *, SCCSet *> SCCMap;
+
+public:
+  static char ID; // Pass identification, replacement for typeid
+
+  GlobalScopInfo();
+  ~GlobalScopInfo();
+
+  std::shared_ptr<isl_ctx> &getIslCtx() { return IslCtx; }
+
+  /// Get the Scop object for the given Region
+  ///
+  /// @return If the given region is the maximal region within a scop, return
+  ///         the scop object.
+  Scop *getScop(Region *R) const {
+    auto MapIt = RegionsToScopMap.find({R->getEntry(), R->getExit()});
+    if (MapIt != RegionsToScopMap.end())
+      return MapIt->second.get();
+    return nullptr;
+  }
+
+  bool isInSCC(Function *CurF, Function *F) {
+    assert(SCCMap.count(CurF));
+    return SCCMap.lookup(CurF)->count(F);
+  }
+
+  Scop *getScop(Function *F);
+
+  /// Calculate all the polyhedral scops for a given module.
+  bool runOnModule(Module &M) override;
+
+  void releaseMemory() override {}
+
+  bool runOnSCC(ArrayRef<CallGraphNode *> SCC);
+
+  void getAnalysisUsage(AnalysisUsage &AU) const override;
+  void print(raw_ostream &O, const Module *M = nullptr) const override;
 };
 
 } // end namespace polly

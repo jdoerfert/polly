@@ -1,0 +1,30 @@
+digraph "Scop Graph for 'f' function" {
+	label="Scop Graph for 'f' function";
+
+	Node0x145ee50 [shape=record,label="{entry:\l  br label %entry.split\l}"];
+	Node0x145ee50 -> Node0x144df70;
+	Node0x144df70 [shape=record,label="{entry.split:                                      \l  %tmp = sext i32 %k to i64\l  %tmp2 = sext i32 %i to i64\l  br label %for.cond\l}"];
+	Node0x144df70 -> Node0x144cd10;
+	Node0x144cd10 [shape=record,label="{for.cond:                                         \l  %indvars.iv = phi i64 [ %indvars.iv.next, %for.body ], [ 0, %entry.split ]\l  %cmp = icmp slt i64 %indvars.iv, %tmp\l  br i1 %cmp, label %for.body, label %for.end\l}"];
+	Node0x144cd10 -> Node0x144ccd0;
+	Node0x144cd10 -> Node0x1415860;
+	Node0x144ccd0 [shape=record,label="{for.body:                                         \l  %tmp3 = add nsw i64 %indvars.iv, %tmp2\l  %arrayidx = getelementptr inbounds i32, i32* %A, i64 %tmp3\l  store i32 %i, i32* %arrayidx, align 4\l  %indvars.iv.next = add nuw nsw i64 %indvars.iv, 1\l  br label %for.cond\l}"];
+	Node0x144ccd0 -> Node0x144cd10[constraint=false];
+	Node0x1415860 [shape=record,label="{for.end:                                          \l  %call = call i32 @f2(i32* %A, i32 10, i32 %k)\l  ret i32 0\l}"];
+	colorscheme = "paired12"
+        subgraph cluster_0x144ae20 {
+          label = "";
+          style = solid;
+          color = 1
+          subgraph cluster_0x1449590 {
+            label = "Region can not profitably be optimized!";
+            style = solid;
+            color = 6
+            Node0x144cd10;
+            Node0x144ccd0;
+          }
+          Node0x145ee50;
+          Node0x144df70;
+          Node0x1415860;
+        }
+}

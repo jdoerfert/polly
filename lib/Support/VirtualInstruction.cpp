@@ -36,26 +36,23 @@ VirtualUse VirtualUse::create(Scop *S, ScopStmt *UserStmt, Loop *UserScope,
   assert(!isa<StoreInst>(Val) && "a StoreInst cannot be used");
 
   if (isa<BasicBlock>(Val))
-    return VirtualUse(UserStmt, Val, Block, nullptr, nullptr);
+    return VirtualUse(UserStmt, Val, Block, nullptr);
 
   if (isa<llvm::Constant>(Val) || isa<MetadataAsValue>(Val))
-    return VirtualUse(UserStmt, Val, Constant, nullptr, nullptr);
+    return VirtualUse(UserStmt, Val, Constant, nullptr);
 
   // Is the value synthesizable? If the user has been pruned
   // (UserStmt == nullptr), it is either not used anywhere or is synthesizable.
   // We assume synthesizable which practically should have the same effect.
   auto *SE = S->getSE();
-  if (SE->isSCEVable(Val->getType())) {
-    auto *ScevExpr = SE->getSCEVAtScope(Val, UserScope);
-    if (!UserStmt || canSynthesize(Val, *UserStmt->getParent(), SE, UserScope))
-      return VirtualUse(UserStmt, Val, Synthesizable, ScevExpr, nullptr);
-  }
+  if (!UserStmt || canSynthesize(Val, *S, UserScope))
+    return VirtualUse(UserStmt, Val, Synthesizable, nullptr);
 
   // FIXME: Inconsistency between lookupInvariantEquivClass and
   // getRequiredInvariantLoads. Querying one of them should be enough.
   auto &RIL = S->getRequiredInvariantLoads();
   if (S->lookupInvariantEquivClass(Val) || RIL.count(dyn_cast<LoadInst>(Val)))
-    return VirtualUse(UserStmt, Val, Hoisted, nullptr, nullptr);
+    return VirtualUse(UserStmt, Val, Hoisted, nullptr);
 
   // ReadOnly uses may have MemoryAccesses that we want to associate with the
   // use. This is why we look for a MemoryAccess here already.
@@ -69,23 +66,23 @@ VirtualUse VirtualUse::create(Scop *S, ScopStmt *UserStmt, Loop *UserScope,
   // (UserStmt == nullptr) and is not SCEVable, assume it is read-only as it is
   // neither an intra- nor an inter-use.
   if (!UserStmt || isa<Argument>(Val))
-    return VirtualUse(UserStmt, Val, ReadOnly, nullptr, InputMA);
+    return VirtualUse(UserStmt, Val, ReadOnly, InputMA);
 
   auto Inst = cast<Instruction>(Val);
   if (!S->contains(Inst))
-    return VirtualUse(UserStmt, Val, ReadOnly, nullptr, InputMA);
+    return VirtualUse(UserStmt, Val, ReadOnly, InputMA);
 
   // A use is inter-statement if either it is defined in another statement, or
   // there is a MemoryAccess that reads its value that has been written by
   // another statement.
   if (InputMA || (!Virtual && UserStmt != S->getStmtFor(Inst)))
-    return VirtualUse(UserStmt, Val, Inter, nullptr, InputMA);
+    return VirtualUse(UserStmt, Val, Inter, InputMA);
 
-  return VirtualUse(UserStmt, Val, Intra, nullptr, nullptr);
+  return VirtualUse(UserStmt, Val, Intra, nullptr);
 }
 
 void VirtualUse::print(raw_ostream &OS, bool Reproducible) const {
-  OS << "User: [" << User->getBaseName() << "] ";
+  OS << "User: [" << (User ? User->getBaseName() : "NONE") << "] ";
   switch (Kind) {
   case VirtualUse::Constant:
     OS << "Constant Op:";
@@ -116,10 +113,6 @@ void VirtualUse::print(raw_ostream &OS, bool Reproducible) const {
       OS << '"' << Val->getName() << '"';
     else
       Val->print(OS, true);
-  }
-  if (ScevExpr) {
-    OS << ' ';
-    ScevExpr->print(OS);
   }
   if (InputMA && !Reproducible)
     OS << ' ' << InputMA;
@@ -209,6 +202,11 @@ addInstructionRoots(ScopStmt *Stmt,
 static void addAccessRoots(ScopStmt *Stmt,
                            SmallVectorImpl<MemoryAccess *> &RootAccs,
                            bool Local) {
+  if (Stmt->isReturnStmt()) {
+    RootAccs.append(Stmt->begin(), Stmt->end());
+    return;
+  }
+
   for (auto *MA : *Stmt) {
     if (!MA->isWrite())
       continue;

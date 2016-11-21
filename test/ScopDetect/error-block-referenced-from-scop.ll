@@ -1,18 +1,20 @@
-; RUN: opt %loadPolly -polly-detect -analyze < %s \
-; RUN:     | FileCheck %s
+; RUN: opt %loadPolly -polly-detect -analyze < %s | FileCheck %s
+; RUN: opt %loadPolly -polly-codegen -S < %s | FileCheck %s --check-prefix=IR
 ;
-; CHECK-NOT: Valid Region for Scop:
+; CHECK: Valid Region for Scop:
+; IR: polly.start
 
 target datalayout = "e-m:e-i64:64-f80:128-n8:16:32:64-S128"
 target triple = "x86_64-unknown-linux-gnu"
 
 ; Function Attrs: nounwind uwtable
-define void @hoge() #0 {
+define void @hoge(i32* %A, i32 %i) #0 {
 bb:
   br label %bb1
 
 bb1:                                              ; preds = %bb
-  br i1 undef, label %bb2, label %bb7
+  %cmp = icmp sgt i32 %i, 42
+  br i1 %cmp, label %bb2, label %bb7
 
 bb2:                                              ; preds = %bb1
   %tmp = load i32, i32* undef, align 8, !tbaa !1
@@ -27,6 +29,7 @@ bb5:                                              ; preds = %bb2
   br label %bb8
 
 bb7:                                              ; preds = %bb1
+  store i32 0, i32* %A
   br label %bb8
 
 bb8:                                              ; preds = %bb7, %bb5, %bb4

@@ -77,8 +77,8 @@ public:
   ///                    with the new value it is mapped to.
   /// @param ExprBuilder An expression builder to generate new access functions.
   /// @param StartBlock  The first basic block after the RTC.
-  BlockGenerator(PollyIRBuilder &Builder, LoopInfo &LI, ScalarEvolution &SE,
-                 DominatorTree &DT, AllocaMapTy &ScalarMap,
+  BlockGenerator(Scop &S, PollyIRBuilder &Builder, LoopInfo &LI,
+                 ScalarEvolution &SE, DominatorTree &DT, AllocaMapTy &ScalarMap,
                  EscapeUsersAllocaMapTy &EscapeMap, ValueMapT &GlobalMap,
                  IslExprBuilder *ExprBuilder, BasicBlock *StartBlock);
 
@@ -141,7 +141,66 @@ public:
 
   BlockGenerator(const BlockGenerator &) = default;
 
+  PollyIRBuilder &getBuilder() { return Builder; }
+  IslExprBuilder &getExprBuilder() { return *ExprBuilder; }
+
+  Instruction *getInsertionPoint() const { return &*Builder.GetInsertPoint(); }
+
+  Value *synthesizeSCEV(ScopStmt *Stmt, const SCEV *Expr, Type *Ty,
+                        ValueMapT &BBMap, LoopToScevMapT &LTS, Loop *L);
+
+  /// Synthesize a new value
+  ///
+  /// Given an old value, we try to synthesize it in a new context from its
+  /// original SCEV expression. We start from the original SCEV expression,
+  /// then replace outdated parameter and loop references, and finally
+  /// expand it to code that computes this updated expression.
+  ///
+  /// @param Stmt      The statement to code generate
+  /// @param Old       The old Value
+  /// @param BBMap     A mapping from old values to their new values
+  ///                  (for values recalculated within this basic block)
+  /// @param LTS       A mapping from loops virtual canonical induction
+  ///                  variable to their new values
+  ///                  (for values recalculated in the new ScoP, but not
+  ///                   within this basic block)
+  /// @param L         The loop that surrounded the instruction that referenced
+  ///                  this value in the original code. This loop is used to
+  ///                  evaluate the scalar evolution at the right scope.
+  ///
+  /// @returns  o A newly synthesized value.
+  Value *synthesizeNewValue(ScopStmt *Stmt, Value *Old, ValueMapT &BBMap,
+                            LoopToScevMapT &LTS, Loop *L);
+
+  /// Get the new version of a value.
+  ///
+  /// Given an old value, we first check if a new version of this value is
+  /// available in the BBMap or GlobalMap. In case it is not and the value can
+  /// be recomputed using SCEV, we do so. If we can not recompute a value
+  /// using SCEV, but we understand that the value is constant within the scop,
+  /// we return the old value.  If the value can still not be derived, this
+  /// function will assert.
+  ///
+  /// @param Stmt      The statement to code generate.
+  /// @param Old       The old Value.
+  /// @param BBMap     A mapping from old values to their new values
+  ///                  (for values recalculated within this basic block).
+  /// @param LTS       A mapping from loops virtual canonical induction
+  ///                  variable to their new values
+  ///                  (for values recalculated in the new ScoP, but not
+  ///                   within this basic block).
+  /// @param L         The loop that surrounded the instruction that referenced
+  ///                  this value in the original code. This loop is used to
+  ///                  evaluate the scalar evolution at the right scope.
+  ///
+  /// @returns  o The old value, if it is still valid.
+  ///           o The new value, if available.
+  ///           o NULL, if no value is found.
+  Value *getNewValue(ScopStmt *Stmt, Value *Old, ValueMapT &BBMap,
+                     LoopToScevMapT &LTS, Loop *L);
+
 protected:
+  Scop &S;
   PollyIRBuilder &Builder;
   LoopInfo &LI;
   ScalarEvolution &SE;
@@ -417,59 +476,8 @@ protected:
   /// the original value in the non-optimized SCoP.
   void createScalarFinalization(Scop &S);
 
-  /// Try to synthesize a new value
-  ///
-  /// Given an old value, we try to synthesize it in a new context from its
-  /// original SCEV expression. We start from the original SCEV expression,
-  /// then replace outdated parameter and loop references, and finally
-  /// expand it to code that computes this updated expression.
-  ///
-  /// @param Stmt      The statement to code generate
-  /// @param Old       The old Value
-  /// @param BBMap     A mapping from old values to their new values
-  ///                  (for values recalculated within this basic block)
-  /// @param LTS       A mapping from loops virtual canonical induction
-  ///                  variable to their new values
-  ///                  (for values recalculated in the new ScoP, but not
-  ///                   within this basic block)
-  /// @param L         The loop that surrounded the instruction that referenced
-  ///                  this value in the original code. This loop is used to
-  ///                  evaluate the scalar evolution at the right scope.
-  ///
-  /// @returns  o A newly synthesized value.
-  ///           o NULL, if synthesizing the value failed.
-  Value *trySynthesizeNewValue(ScopStmt &Stmt, Value *Old, ValueMapT &BBMap,
-                               LoopToScevMapT &LTS, Loop *L) const;
-
-  /// Get the new version of a value.
-  ///
-  /// Given an old value, we first check if a new version of this value is
-  /// available in the BBMap or GlobalMap. In case it is not and the value can
-  /// be recomputed using SCEV, we do so. If we can not recompute a value
-  /// using SCEV, but we understand that the value is constant within the scop,
-  /// we return the old value.  If the value can still not be derived, this
-  /// function will assert.
-  ///
-  /// @param Stmt      The statement to code generate.
-  /// @param Old       The old Value.
-  /// @param BBMap     A mapping from old values to their new values
-  ///                  (for values recalculated within this basic block).
-  /// @param LTS       A mapping from loops virtual canonical induction
-  ///                  variable to their new values
-  ///                  (for values recalculated in the new ScoP, but not
-  ///                   within this basic block).
-  /// @param L         The loop that surrounded the instruction that referenced
-  ///                  this value in the original code. This loop is used to
-  ///                  evaluate the scalar evolution at the right scope.
-  ///
-  /// @returns  o The old value, if it is still valid.
-  ///           o The new value, if available.
-  ///           o NULL, if no value is found.
-  Value *getNewValue(ScopStmt &Stmt, Value *Old, ValueMapT &BBMap,
-                     LoopToScevMapT &LTS, Loop *L) const;
-
-  void copyInstScalar(ScopStmt &Stmt, Instruction *Inst, ValueMapT &BBMap,
-                      LoopToScevMapT &LTS);
+  Value *copyInstScalar(ScopStmt *Stmt, Instruction *Inst, ValueMapT &BBMap,
+                        LoopToScevMapT &LTS, Loop *Scope);
 
   /// Get the innermost loop that surrounds the statement @p Stmt.
   Loop *getLoopForStmt(const ScopStmt &Stmt) const;
@@ -542,7 +550,7 @@ protected:
   /// The implementation in the BlockGenerator is trivial, however it allows
   /// subclasses to handle PHIs different.
   virtual void copyPHIInstruction(ScopStmt &, PHINode *, ValueMapT &,
-                                  LoopToScevMapT &) {}
+                                  LoopToScevMapT &);
 
   /// Copy a single Instruction.
   ///

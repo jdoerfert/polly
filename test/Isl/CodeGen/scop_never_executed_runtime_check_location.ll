@@ -1,14 +1,11 @@
 ; RUN: opt %loadPolly -polly-codegen -S < %s | FileCheck %s
 
-; Verify that we generate the runtime check code after the conditional branch
-; in the SCoP region entering block (here %entry).
-;
-; CHECK:      entry:
-; CHECK-NEXT:   %0 = zext i32 %n to i64
-; CHECK-NEXT:   br i1 false
-;
 ; CHECK:       %[[T0:[._a-zA-Z0-9]]] = sext i32 %n to i64
 ; CHECK:       %[[T1:[._a-zA-Z0-9]]] = icmp sge i64 %[[T0]], 1
+;
+; CHECK:      entry.split:
+; CHECK-NEXT:   zext i32 %n to i64
+; CHECK-NEXT:   br i1 false
 
 target datalayout = "e-m:e-i64:64-f80:128-n8:16:32:64-S128"
 

@@ -26,15 +26,15 @@
 target datalayout = "e-m:e-i64:64-f80:128-n8:16:32:64-S128"
 
 ; Function Attrs: nounwind uwtable
-define void @sudecrypt(i8* %buff) #0 {
+define void @sudecrypt(i1 %i1, i1 %i2, i1 %i3, i8* %buff) #0 {
 entry:
-  br i1 undef, label %cleanup, label %if.end
+  br i1 %i1, label %cleanup, label %if.end
 
 if.end:                                           ; preds = %entry
-  br i1 undef, label %if.end.6, label %if.then.5
+  br i1 %i2, label %if.end.6, label %if.then.5
 
 if.then.5:                                        ; preds = %if.end
-  unreachable
+  ret void
 
 if.end.6:                                         ; preds = %if.end
   %add.ptr = getelementptr inbounds i8, i8* %buff, i64 62
@@ -53,13 +53,13 @@ if.then.13:                                       ; preds = %switch.early.test, 
 
 if.end.16:                                        ; preds = %if.then.13, %switch.early.test
   %key.0 = phi i32 [ undef, %if.then.13 ], [ 0, %switch.early.test ]
-  br i1 undef, label %if.end.34, label %if.then.19
+  br i1 %i3, label %if.end.34, label %if.then.19
 
 if.then.19:                                       ; preds = %if.end.16
-  unreachable
+  ret void
 
 if.end.34:                                        ; preds = %if.end.16
-  unreachable
+  ret void
 
 cleanup:                                          ; preds = %entry
   ret void

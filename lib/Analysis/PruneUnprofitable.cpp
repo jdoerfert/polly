@@ -80,7 +80,7 @@ public:
 
     ScopsProcessed++;
 
-    if (!S.isProfitable(true)) {
+    if (!S.isProfitable(true, true)) {
       DEBUG(dbgs() << "SCoP pruned because it probably cannot be optimized in "
                       "a significant way\n");
       S.invalidate(PROFITABLE, DebugLoc());

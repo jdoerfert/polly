@@ -18,6 +18,7 @@ entry:
   br label %for.body.393
 
 for.body.393:                                     ; preds = %if.end.549, %entry
+  call void @compute_colocated(%struct.colocated_params* %p)
   br i1 undef, label %if.then.397, label %if.else.643
 
 if.then.397:                                      ; preds = %for.body.393
@@ -70,5 +71,5 @@ if.end.549:                                       ; preds = %if.else.524, %if.th
   br label %for.body.393
 
 if.else.643:                                      ; preds = %for.body.393
-  unreachable
+  ret void
 }

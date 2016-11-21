@@ -4,7 +4,7 @@
 ; RUN: opt %loadPolly -polly-scops -analyze < %s \
 ; RUN:  | FileCheck %s -check-prefix=SCOPS
 
-; DETECT: Valid Region for Scop: if.end116 => for.inc216
+; DETECT: Valid Region for Scop: for.body73 => for.end218
 ; SCOPS-NOT: Statements
 
 ; Verify that we detect this scop, but that, due to an infeasible run-time
@@ -29,7 +29,7 @@ if.end64:                                         ; preds = %entry
 
 for.body73:                                       ; preds = %for.inc216, %if.end64
   %v.0101 = phi i32 [ 0, %for.inc216 ], [ 1, %if.end64 ]
-  br i1 undef, label %if.then93, label %if.else
+  br i1 undef, label %if.else, label %if.then93
 
 if.then93:                                        ; preds = %for.body73
   br label %for.inc216
@@ -64,7 +64,7 @@ for.inc216:                                       ; preds = %if.end193, %if.then
   br i1 undef, label %for.body73, label %for.end218
 
 for.end218:                                       ; preds = %for.inc216
-  unreachable
+  ret void
 }
 
 declare void @tinsert()

@@ -7,9 +7,9 @@
 target datalayout = "e-m:e-i64:64-f80:128-n8:16:32:64-S128"
 
 ; Function Attrs: nounwind uwtable
-define void @kernel_fdtd_apml(i32 %cxm, i32 %cym, [65 x [65 x double]]* %Bza, [65 x [65 x double]]* %Hz, double* %czp) #0 {
+define void @kernel_fdtd_apml(i1 %i1a, i1 %i1b, i32 %cxm, i32 %cym, [65 x [65 x double]]* %Bza, [65 x [65 x double]]* %Hz, double* %czp) #0 {
 entry:
-  br i1 false, label %for.cond4.preheader, label %for.end451
+  br i1 %i1a, label %for.cond4.preheader, label %for.end451
 
 for.cond4.preheader:                              ; preds = %for.inc449, %entry
   %iz.08 = phi i32 [ undef, %for.inc449 ], [ 0, %entry ]
@@ -49,7 +49,7 @@ for.end:                                          ; preds = %for.body9, %for.con
   br i1 %cmp5, label %for.cond7.preheader, label %for.inc449
 
 for.inc449:                                       ; preds = %for.end, %for.cond4.preheader
-  br i1 undef, label %for.cond4.preheader, label %for.end451
+  br i1 %i1b, label %for.cond4.preheader, label %for.end451
 
 for.end451:                                       ; preds = %for.inc449, %entry
   ret void

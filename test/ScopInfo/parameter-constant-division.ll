@@ -44,6 +44,7 @@ for.cond538.preheader.lr.ph:                      ; preds = %entry
 
 for.cond538.preheader:                            ; preds = %for.inc912, %for.cond538.preheader.lr.ph
   %tmp0 = phi %struct.picture* [ undef, %for.cond538.preheader.lr.ph ], [ %tmp11, %for.inc912 ]
+  call void @dpb_split_field(%struct.frame_store* %fs)
   br i1 undef, label %land.lhs.true563, label %for.inc912
 
 land.lhs.true563:                                 ; preds = %for.cond538.preheader

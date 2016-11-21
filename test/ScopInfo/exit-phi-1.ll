@@ -36,6 +36,7 @@ entry:
 
 for.cond.outer304:                                ; preds = %if.else113, %if.then111, %entry
   %up.3.ph = phi double [ 0.000000e+00, %entry ], [ undef, %if.else113 ], [ undef, %if.then111 ]
+  call void @_ZN6soplex14SPxAggregateSM9eliminateERKNS_7SVectorEd(i32** %A)
   br i1 undef, label %for.body, label %for.end
 
 for.body:                                         ; preds = %for.cond.outer304

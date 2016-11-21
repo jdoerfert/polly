@@ -16,10 +16,7 @@ if.end:                                           ; preds = %entry
 
 while.cond:                                       ; preds = %cond.true270, %if.then260, %if.end
   %p.0 = phi i8* [ null, %if.end ], [ %p.4, %if.then260 ], [ %p.4, %cond.true270 ]
-  br i1 undef, label %if.then260, label %while.body210
-
-while.body210:                                    ; preds = %while.cond
-  ret void
+  br label %if.then260
 
 if.then260:                                       ; preds = %while.cond
   %p.4 = getelementptr inbounds i8, i8* null, i64 1
@@ -30,5 +27,8 @@ if.then260:                                       ; preds = %while.cond
   br i1 %cmp268, label %cond.true270, label %while.cond
 
 cond.true270:                                     ; preds = %if.then260
-  br label %while.cond
+  br i1 undef, label %while.cond, label %end
+
+end:
+  ret void
 }

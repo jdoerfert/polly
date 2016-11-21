@@ -1,7 +1,7 @@
 ; RUN: opt %loadPolly -polly-detect -analyze < %s | FileCheck %s
 target datalayout = "e-m:e-i64:64-f80:128-n8:16:32:64-S128"
 
-; CHECK: Valid Region for Scop: bb14 => bb17
+; CHECK: Valid Region for Scop: bb14 => bb19
 
 ; Make sure we do not detect the larger region bb14->bb19 that contains
 ; a multi-dimensional memory access with a size of 'undef * undef'.
@@ -32,5 +32,5 @@ bb17:                                             ; preds = %bb14
   br label %bb19
 
 bb19:                                             ; preds = %bb17
-  unreachable
+  ret void
 }

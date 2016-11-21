@@ -31,7 +31,7 @@ if.then51:                                        ; preds = %for.inc56.5, %for.b
   br label %for.body61.preheader
 
 for.body61.preheader:                             ; preds = %for.inc56.5, %if.then51
-  %indvars.iv.next = add nuw nsw i64 %indvars.iv, 1
+  %indvars.iv.next = add nuw i64 %indvars.iv, 1
   %exitcond = icmp eq i64 %indvars.iv.next, 256
   br i1 %exitcond, label %for.end79, label %for.body24
 

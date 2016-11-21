@@ -1,6 +1,6 @@
 ; RUN: opt %loadPolly -polly-scops -polly-allow-nonaffine-branches \
 ; RUN:     -polly-invariant-load-hoisting=true \
-; RUN:     -polly-allow-nonaffine-loops=true \
+; RUN:     -polly-allow-nonaffine-loops=true -polly-allow-error-blocks=false \
 ; RUN:     -analyze < %s | FileCheck %s --check-prefix=INNERMOST
 ; RUN: opt %loadPolly -polly-scops -polly-allow-nonaffine \
 ; RUN:     -polly-invariant-load-hoisting=true \

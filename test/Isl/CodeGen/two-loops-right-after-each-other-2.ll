@@ -23,6 +23,7 @@ entry:
   br label %for.body
 
 for.body:                                         ; preds = %for.body, %entry
+  call void @intrapred_luma()
   br i1 undef, label %for.body, label %for.body.262
 
 for.body.262:                                     ; preds = %for.body
@@ -41,10 +42,14 @@ for.body.280:                                     ; preds = %for.body.280, %for.
 
 for.end.298:                                      ; preds = %for.body.280
   %2 = load %struct.ImageParameters*, %struct.ImageParameters** @img, align 8
+  br label %for.body.310.pre
+
+for.body.310.pre:
+  call void @intrapred_luma()
   br label %for.body.310
 
 for.body.310:                                     ; preds = %for.body.310, %for.end.298
-  %indvars.iv = phi i64 [ 0, %for.end.298 ], [ %indvars.iv.next, %for.body.310 ]
+  %indvars.iv = phi i64 [ 0, %for.body.310.pre ], [ %indvars.iv.next, %for.body.310 ]
   %InterScopSext = sext i16 %1 to i64
   %arrayidx312 = getelementptr inbounds [13 x i16], [13 x i16]* %PredPel, i64 0, i64 %InterScopSext
   %arrayidx313 = getelementptr inbounds i16, i16* %arrayidx312, i64 %indvars.iv

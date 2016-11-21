@@ -71,11 +71,24 @@ void ScopAnnotator::buildAliasScopes(Scop &S) {
   // The construction of alias scopes is quadratic in the number of arrays
   // involved. In case of too many arrays, skip the construction of alias
   // information to avoid quadratic increases in compile time and code size.
-  if (Arrays.size() > MaxArraysInAliasScops)
+  SmallPtrSet<const ScopArrayInfo *, 16> UsedArrays;
+  SmallPtrSet<const ScopArrayInfo *, 16> WrittenArrays;
+  S.getUsedAndWrittenArrays(UsedArrays, WrittenArrays, false);
+
+  bool AnnotateOnlyWrites = false;
+  unsigned NumUsedArrays = UsedArrays.size();
+  unsigned NumWrittenArrays = WrittenArrays.size();
+  if (NumWrittenArrays > MaxArraysInAliasScops)
     return;
+  if (NumUsedArrays > MaxArraysInAliasScops)
+    AnnotateOnlyWrites = true;
 
   std::string AliasScopeStr = "polly.alias.scope.";
   for (const ScopArrayInfo *Array : Arrays) {
+    if (AnnotateOnlyWrites && !WrittenArrays.count(Array))
+      continue;
+    if (!UsedArrays.count(Array))
+      continue;
     assert(Array->getBasePtr() && "Base pointer must be present");
     AliasScopeMap[Array->getBasePtr()] =
         getID(Ctx, AliasScopeDomain,
@@ -83,6 +96,10 @@ void ScopAnnotator::buildAliasScopes(Scop &S) {
   }
 
   for (const ScopArrayInfo *Array : Arrays) {
+    if (AnnotateOnlyWrites && !WrittenArrays.count(Array))
+      continue;
+    if (!UsedArrays.count(Array))
+      continue;
     MDNode *AliasScopeList = MDNode::get(Ctx, {});
     for (const auto &AliasScopePair : AliasScopeMap) {
       if (Array->getBasePtr() == AliasScopePair.first)

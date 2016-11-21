@@ -44,6 +44,7 @@ while.body.lr.ph:                                 ; preds = %while.cond.preheade
   br label %while.body
 
 while.body:                                       ; preds = %while.body, %while.body.lr.ph
+  call void @dummy()
   br label %while.body
 
 while.body.40:                                    ; preds = %while.body.40, %while.body.40.lr.ph
@@ -62,3 +63,5 @@ if.end.45:                                        ; preds = %while.cond.38.if.en
   %n2ptr.2 = phi i8* [ %add.ptr25, %entry ], [ %add.ptr25, %while.cond.preheader ], [ undef, %while.cond.38.if.end.45.loopexit9_crit_edge ], [ %add.ptr25, %while.cond.38.preheader ]
   ret void
 }
+
+declare void @dummy()

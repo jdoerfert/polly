@@ -1,3 +1,4 @@
+<<<<<<< HEAD
 ; XFAIL: *
 
 ; The test case stopped making sense after r310940 that added infinite loops to
@@ -7,6 +8,15 @@
 ; RUN: opt %loadPolly -pass-remarks-missed="polly-detect" -polly-allow-nonaffine-loops -analyze  -polly-detect < %s 2>&1 | FileCheck %s
 ; RUN: opt %loadPolly -pass-remarks-missed="polly-detect" -polly-allow-nonaffine-loops=false -analyze  -polly-detect < %s 2>&1 | FileCheck %s
 
+||||||| merged common ancestors
+; RUN: opt %loadPolly -pass-remarks-missed="polly-detect" -polly-allow-nonaffine-loops -analyze  -polly-detect < %s 2>&1 | FileCheck %s
+; RUN: opt %loadPolly -pass-remarks-missed="polly-detect" -polly-allow-nonaffine-loops=false -analyze  -polly-detect < %s 2>&1 | FileCheck %s
+
+=======
+; RUN: opt %loadPolly -mem2reg -pass-remarks-missed="polly-detect" -polly-allow-nonaffine-loops -analyze  -polly-detect < %s 2>&1 | FileCheck %s
+; RUN: opt %loadPolly -mem2reg -pass-remarks-missed="polly-detect" -polly-allow-nonaffine-loops=false -analyze  -polly-detect < %s 2>&1 | FileCheck %s
+; XFAIL: *
+>>>>>>> Allow "no-return" function calls.
 ; void func (int param0, int N, int *A)
 ; {
 ;   for (int i = 0; i < N; i++)
@@ -44,10 +54,6 @@ for.cond:                                         ; preds = %for.inc, %entry
 
 for.body:                                         ; preds = %for.cond
   %2 = load i32, i32* %param0.addr, align 4
-  %tobool = icmp ne i32 %2, 0
-  br i1 %tobool, label %if.then, label %if.else
-
-if.then:                                          ; preds = %for.body
   br label %while.body
 
 while.body:                                       ; preds = %if.then, %while.body

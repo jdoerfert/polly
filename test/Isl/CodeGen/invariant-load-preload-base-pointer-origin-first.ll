@@ -81,10 +81,10 @@ for.end.128:                                      ; preds = %for.inc.126, %for.c
   br i1 false, label %cond.false, label %cond.end
 
 cond.false:                                       ; preds = %for.end.128
-  unreachable
+  ret void
 
 cond.end:                                         ; preds = %for.end.128
-  unreachable
+  ret void
 
 for.end.161:                                      ; preds = %entry
   ret void

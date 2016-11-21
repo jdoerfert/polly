@@ -110,7 +110,7 @@ static cl::opt<int> MaxCoefficient(
 
 static cl::opt<std::string> FusionStrategy(
     "polly-opt-fusion", cl::desc("The fusion strategy to choose (min/max)"),
-    cl::Hidden, cl::init("min"), cl::ZeroOrMore, cl::cat(PollyCategory));
+    cl::Hidden, cl::init("max"), cl::ZeroOrMore, cl::cat(PollyCategory));
 
 static cl::opt<std::string>
     MaximizeBandDepth("polly-opt-maximize-bands",
@@ -386,16 +386,28 @@ isl::set getPartialTilePrefixes(isl::set ScheduleRange, int VectorWidth) {
 isl::schedule_node
 ScheduleTreeOptimizer::isolateFullPartialTiles(isl::schedule_node Node,
                                                int VectorWidth) {
+
+  isl::union_set UnionIsolateOption;
+  auto BuildIsolationDomain = [&](isl::map ScheduleRelation) -> isl::stat {
+    auto ScheduleRange = ScheduleRelation.range();
+    auto IsolateDomain = getPartialTilePrefixes(ScheduleRange, VectorWidth);
+    auto IsolateOption = getIsolateOptions(IsolateDomain, 1);
+
+    if (UnionIsolateOption)
+      UnionIsolateOption = UnionIsolateOption.unite(IsolateOption);
+    else
+      UnionIsolateOption = IsolateOption;
+
+    return isl::stat::ok;
+  };
+
   assert(isl_schedule_node_get_type(Node.get()) == isl_schedule_node_band);
   Node = Node.child(0).child(0);
   isl::union_map SchedRelUMap = Node.get_prefix_schedule_relation();
-  isl::map ScheduleRelation = isl::map::from_union_map(SchedRelUMap);
-  isl::set ScheduleRange = ScheduleRelation.range();
-  isl::set IsolateDomain = getPartialTilePrefixes(ScheduleRange, VectorWidth);
-  auto AtomicOption = getDimOptions(IsolateDomain.get_ctx(), "atomic");
-  isl::union_set IsolateOption = getIsolateOptions(IsolateDomain, 1);
+  SchedRelUMap.foreach_map(BuildIsolationDomain);
+  auto AtomicOption = getDimOptions(Node.get_ctx(), "atomic");
   Node = Node.parent().parent();
-  isl::union_set Options = IsolateOption.unite(AtomicOption);
+  isl::union_set Options = UnionIsolateOption.unite(AtomicOption);
   Node = Node.band_set_ast_build_options(Options);
   return Node;
 }
@@ -1329,6 +1341,13 @@ bool ScheduleTreeOptimizer::isMatrMultPattern(isl::schedule_node Node,
 __isl_give isl_schedule_node *
 ScheduleTreeOptimizer::optimizeBand(__isl_take isl_schedule_node *Node,
                                     void *User) {
+  //if (isl_schedule_node_get_type(Node) == isl_schedule_node_band) {
+    //auto Space = isl::manage(isl_schedule_node_band_get_space(Node));
+    //auto Dims = Space.dim(isl::dim::set);
+    //Node = isl_schedule_node_band_member_set_isolate_ast_loop_type(
+        //Node, Dims - 1, isl_ast_loop_separate);
+  //}
+
   if (!isTileableBandNode(isl::manage(isl_schedule_node_copy(Node))))
     return Node;
 
@@ -1589,7 +1608,19 @@ bool IslScheduleOptimizer::runOnScop(Scop &S) {
   isl_options_set_schedule_maximize_band_depth(Ctx, IslMaximizeBands);
   isl_options_set_schedule_max_constant_term(Ctx, MaxConstantTerm);
   isl_options_set_schedule_max_coefficient(Ctx, MaxCoefficient);
+  isl_options_set_schedule_whole_component(Ctx, 0);
   isl_options_set_tile_scale_tile_loops(Ctx, 0);
+
+  DEBUG({
+    errs() << "IslOuterCoincidence "
+           << isl_options_get_schedule_outer_coincidence(Ctx) << "\n";
+    errs() << "IslSerializeSCCs "
+           << isl_options_get_schedule_serialize_sccs(Ctx) << "\n";
+    errs() << "IslMaximizeBands "
+           << isl_options_get_schedule_maximize_band_depth(Ctx) << "\n";
+    errs() << "IslWholeComponent "
+           << isl_options_get_schedule_whole_component(Ctx) << "\n";
+  });
 
   auto OnErrorStatus = isl_options_get_on_error(Ctx);
   isl_options_set_on_error(Ctx, ISL_ON_ERROR_CONTINUE);

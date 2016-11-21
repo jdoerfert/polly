@@ -188,6 +188,12 @@ static cl::opt<bool> PollyOnlyPrinter(
     cl::value_desc("Run the Polly DOT printer at -O3 (no BB content"),
     cl::init(false), cl::cat(PollyCategory));
 
+static cl::opt<bool> PollyScopOnlyPrinter(
+    "polly-dot-scops-only",
+    cl::desc("Enable the Polly DOT printer in -O3 (no BB content)"), cl::Hidden,
+    cl::value_desc("Run the Polly DOT printer at -O3 (no BB content"),
+    cl::init(false), cl::cat(PollyCategory));
+
 static cl::opt<bool>
     CFGPrinter("polly-view-cfg",
                cl::desc("Show the Polly CFG right after code generation"),
@@ -198,10 +204,15 @@ static cl::opt<bool>
                          cl::desc("Enable polyhedral interface of Polly"),
                          cl::Hidden, cl::init(false), cl::cat(PollyCategory));
 
+static cl::opt<bool> EnableGlobalScopInfo(
+    "polly-interprocedural",
+    cl::desc("Enable interprocedural polyhedral optimization"), cl::Hidden,
+    cl::init(true), cl::cat(PollyCategory));
+
 static cl::opt<bool>
     EnableForwardOpTree("polly-enable-optree",
                         cl::desc("Enable operand tree forwarding"), cl::Hidden,
-                        cl::init(true), cl::cat(PollyCategory));
+                        cl::init(false), cl::cat(PollyCategory));
 
 static cl::opt<bool>
     DumpBefore("polly-dump-before",
@@ -228,12 +239,12 @@ static cl::list<std::string> DumpAfterFile(
 static cl::opt<bool>
     EnableDeLICM("polly-enable-delicm",
                  cl::desc("Eliminate scalar loop carried dependences"),
-                 cl::Hidden, cl::init(true), cl::cat(PollyCategory));
+                 cl::Hidden, cl::init(false), cl::cat(PollyCategory));
 
 static cl::opt<bool>
     EnableSimplify("polly-enable-simplify",
                    cl::desc("Simplify SCoP after optimizations"),
-                   cl::init(true), cl::cat(PollyCategory));
+                   cl::init(false), cl::cat(PollyCategory));
 
 static cl::opt<bool> EnablePruneUnprofitable(
     "polly-enable-prune-unprofitable",
@@ -252,7 +263,6 @@ void initializePollyPasses(PassRegistry &Registry) {
   LLVMInitializeNVPTXTargetMC();
   LLVMInitializeNVPTXAsmPrinter();
 #endif
-  initializeCodePreparationPass(Registry);
   initializeDeadCodeElimPass(Registry);
   initializeDependenceInfoPass(Registry);
   initializeDependenceInfoWrapperPassPass(Registry);
@@ -268,6 +278,7 @@ void initializePollyPasses(PassRegistry &Registry) {
   initializeScopInfoRegionPassPass(Registry);
   initializeScopInfoWrapperPassPass(Registry);
   initializeRewriteByrefParamsPass(Registry);
+  initializeGlobalScopInfoPass(Registry);
   initializeCodegenCleanupPass(Registry);
   initializeFlattenSchedulePass(Registry);
   initializeForwardOpTreePass(Registry);
@@ -275,6 +286,7 @@ void initializePollyPasses(PassRegistry &Registry) {
   initializeSimplifyPass(Registry);
   initializeDumpModulePass(Registry);
   initializePruneUnprofitablePass(Registry);
+  initializeScopOnlyPrinterPass(Registry);
 }
 
 /// Register Polly passes such that they form a polyhedral optimizer.
@@ -309,8 +321,12 @@ void registerPollyPasses(llvm::legacy::PassManagerBase &PM) {
   for (auto &Filename : DumpBeforeFile)
     PM.add(polly::createDumpModulePass(Filename, false));
 
-  PM.add(polly::createScopDetectionWrapperPassPass());
+  if (EnableGlobalScopInfo) {
+    PM.add(polly::createGlobalScopInfoPass());
+    //PM.add(createBarrierNoopPass());
+  }
 
+  PM.add(polly::createScopDetectionWrapperPassPass());
   if (PollyDetectOnly)
     return;
 
@@ -322,6 +338,11 @@ void registerPollyPasses(llvm::legacy::PassManagerBase &PM) {
     PM.add(polly::createDOTPrinterPass());
   if (PollyOnlyPrinter)
     PM.add(polly::createDOTOnlyPrinterPass());
+
+  if (PollyScopOnlyPrinter) {
+    PM.add(polly::createScopOnlyPrinterPass());
+    return;
+  }
 
   PM.add(polly::createScopInfoRegionPassPass());
   if (EnablePolyhedralInfo)

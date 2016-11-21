@@ -2,12 +2,15 @@
 ;
 ; Check that we do not build a SCoP and do not crash.
 ;
+;    Invalid Context:
+;        [Q] -> {  :  }
+;
 ; CHECK-NOT: Statements
 ;
 target datalayout = "e-m:e-i64:64-f80:128-n8:16:32:64-S128"
 
 ; Function Attrs: nounwind uwtable
-define void @int_upsample(i32* %A) {
+define void @int_upsample(i32* %A, i32 %Q) {
 entry:
   %0 = load i8, i8* undef, align 1
   %conv7 = zext i8 %0 to i32
@@ -18,9 +21,11 @@ while.body.preheader:                             ; preds = %entry
 
 while.body:                                       ; preds = %if.end, %while.body.preheader
   %outrow.036 = phi i32 [ %add23, %if.end ], [ 0, %while.body.preheader ]
-  br i1 true, label %if.end, label %while.body16
+  %cmp2 = icmp eq i32 %outrow.036, %Q
+  br i1 %cmp2, label %if.end, label %while.body16
 
 while.body16:                                     ; preds = %while.body16, %while.body
+  store i32 0, i32* %A
   br label %while.body16
 
 if.end:                                           ; preds = %while.body

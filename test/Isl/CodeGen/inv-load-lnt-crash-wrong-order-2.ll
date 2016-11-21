@@ -45,16 +45,19 @@ entry:
   br label %for.cond.preheader
 
 for.cond.preheader:                               ; preds = %for.cond.preheader, %entry
+  call void @build_eq()
   br i1 undef, label %for.cond.260.preheader, label %for.cond.preheader
 
 for.cond.260.preheader:                           ; preds = %for.cond.preheader
+  call void @build_eq()
   br i1 undef, label %for.cond.316.preheader, label %for.body.265
 
 for.cond.316.preheader:                           ; preds = %for.cond.260.preheader
+  call void @build_eq()
   br i1 undef, label %for.cond.400.preheader, label %for.body.321
 
 for.body.265:                                     ; preds = %for.cond.260.preheader
-  unreachable
+  ret void
 
 for.cond.400.preheader:                           ; preds = %for.inc.397, %for.cond.316.preheader
   ret void
@@ -62,13 +65,16 @@ for.cond.400.preheader:                           ; preds = %for.inc.397, %for.c
 for.body.321:                                     ; preds = %for.inc.397, %for.cond.316.preheader
   %1 = load %struct.State.28.61.94.259.589.622.688.721.754.886.985.1216.2436.2469.2634.2667.2766.2898.2997.3035*, %struct.State.28.61.94.259.589.622.688.721.754.886.985.1216.2436.2469.2634.2667.2766.2898.2997.3035** undef, align 8
   %eq329 = getelementptr inbounds %struct.EqState.41.74.107.272.602.635.701.734.767.899.998.1229.2449.2482.2647.2680.2779.2911.3010.3036, %struct.EqState.41.74.107.272.602.635.701.734.767.899.998.1229.2449.2482.2647.2680.2779.2911.3010.3036* %0, i64 0, i32 0
+  call void @build_eq()
   br i1 undef, label %for.inc.397, label %land.lhs.true.331
 
 land.lhs.true.331:                                ; preds = %for.body.321
+  call void @build_eq()
   br i1 undef, label %for.inc.397, label %if.then.334
 
 if.then.334:                                      ; preds = %land.lhs.true.331
   %2 = load %struct.Rule.33.66.99.264.594.627.693.726.759.891.990.1221.2441.2474.2639.2672.2771.2903.3002.3018*, %struct.Rule.33.66.99.264.594.627.693.726.759.891.990.1221.2441.2474.2639.2672.2771.2903.3002.3018** undef, align 8
+  call void @build_eq()
   br i1 undef, label %for.inc.397, label %land.lhs.true.369
 
 land.lhs.true.369:                                ; preds = %if.then.334
@@ -88,5 +94,6 @@ if.then.383:                                      ; preds = %land.lhs.true.369
   br label %for.inc.397
 
 for.inc.397:                                      ; preds = %if.then.383, %land.lhs.true.369, %if.then.334, %land.lhs.true.331, %for.body.321
+  call void @build_eq()
   br i1 undef, label %for.body.321, label %for.cond.400.preheader
 }

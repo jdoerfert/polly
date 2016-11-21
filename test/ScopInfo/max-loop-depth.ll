@@ -1,4 +1,4 @@
-; RUN: opt %loadPolly -polly-scops -analyze < %s | FileCheck %s
+; RUN: opt %loadPolly -polly-process-unprofitable=false -polly-scops -analyze < %s | FileCheck %s
 ;
 ;    void bar();
 ;    void foo(int *A, int *B, long int N, long int M) {

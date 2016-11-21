@@ -25,4 +25,4 @@ return:                                           ; preds = %bb
 
 
 ; RTA:   1 polly-detect     - Number of scops
-; NORTA: 1 polly-detect     - Number of rejected regions: Base address aliasing
+; NORTA: 2 polly-detect     - Number of rejected regions:

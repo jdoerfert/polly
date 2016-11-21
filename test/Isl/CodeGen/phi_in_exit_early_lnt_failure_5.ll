@@ -60,7 +60,7 @@ for.body.61.lr.ph:                                ; preds = %for.cond.58.prehead
   br label %for.body.61
 
 if.then.55:                                       ; preds = %if.end.47
-  unreachable
+  ret void
 
 for.body.61:                                      ; preds = %for.body.61, %for.body.61.lr.ph
   br i1 undef, label %for.body.61, label %for.cond.58.for.end.68_crit_edge

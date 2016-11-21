@@ -52,7 +52,7 @@ if.then.i45.i.i:                                  ; preds = %land.lhs.true23.i.i
   br label %fol_Atom.exit47.i.i
 
 fol_Atom.exit47.i.i:                              ; preds = %if.then.i45.i.i, %land.lhs.true23.i.i
-  unreachable
+  ret void
 
 for.inc.i.i:                                      ; preds = %cont_BackTrack.exit107.i.i
   br label %for.end.i.i

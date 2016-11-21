@@ -606,14 +606,13 @@ isl::map ZoneAlgorithm::makeValInst(Value *Val, ScopStmt *UserStmt, Loop *Scope,
   }
 
   case VirtualUse::Synthesizable: {
-    auto *ScevExpr = VUse.getScevExpr();
     auto UseDomainSpace = give(isl_set_get_space(DomainUse.keep()));
 
     // Construct the SCEV space.
     // TODO: Add only the induction variables referenced in SCEVAddRecExpr
     // expressions, not just all of them.
     auto ScevId = give(isl_id_alloc(UseDomainSpace.get_ctx().get(), nullptr,
-                                    const_cast<SCEV *>(ScevExpr)));
+                                    VUse.getValue()));
     auto ScevSpace =
         give(isl_space_drop_dims(UseDomainSpace.copy(), isl_dim_set, 0, 0));
     ScevSpace = give(

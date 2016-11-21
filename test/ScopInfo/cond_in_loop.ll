@@ -44,5 +44,14 @@ return:                                           ; preds = %bb3, %entry
   ret void
 }
 
+<<<<<<< HEAD
 ; CHECK-LABEL:      Function: f
 ; CHECK-NEXT:      Region: %bb---%return
+||||||| merged common ancestors
+; CHECK-LABEL: Printing analysis 'Polly - Create polyhedral description of Scops' for region: 'bb => return' in function 'f':
+; CHECK-NEXT:      Function: f
+; CHECK-NEXT:      Region: %bb---%return
+=======
+; CHECK:           Function: f
+; CHECK-NEXT:      Region: %entry---%return
+>>>>>>> Allow "no-return" function calls.

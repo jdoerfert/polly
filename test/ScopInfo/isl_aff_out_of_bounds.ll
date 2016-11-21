@@ -32,7 +32,7 @@ if.end:                                           ; preds = %if.end.single_exit
   %q.1.reload = load float, float* %q.1.reg2mem, align 4
   %conv31 = fpext float %q.1.reload to double
   %call32 = call double @frexp(double %conv31)
-  unreachable
+  ret void
 
 while.end:                                        ; preds = %entry
   ret void

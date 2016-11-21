@@ -12,10 +12,11 @@
 
 define void @rsdec_204(i8* %data_in) {
 entry:
+  call void @rsdec_204(i8* %data_in)
   br i1 undef, label %if.then, label %for.body
 
 if.then:                                          ; preds = %entry
-  unreachable
+  ret void
 
 for.body:                                         ; preds = %for.body, %entry
   %i.05 = phi i32 [ %inc, %for.body ], [ 0, %entry ]
@@ -29,6 +30,7 @@ for.body:                                         ; preds = %for.body, %entry
 
 for.body.6:                                       ; preds = %for.body.6, %for.body
   %i.14 = phi i32 [ undef, %for.body.6 ], [ 0, %for.body ]
+  call void @rsdec_204(i8* %data_in)
   br i1 undef, label %for.body.6, label %for.body.16
 
 for.body.16:                                      ; preds = %for.body.16, %for.body.6
@@ -38,5 +40,5 @@ for.body.29:                                      ; preds = %for.body.29, %for.b
   br i1 undef, label %for.body.29, label %for.end.38
 
 for.end.38:                                       ; preds = %for.body.29
-  unreachable
+  ret void
 }

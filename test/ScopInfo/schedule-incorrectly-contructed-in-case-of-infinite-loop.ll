@@ -14,7 +14,7 @@ bb6:                                              ; preds = %bb
   br label %bb8
 
 bb7:                                              ; preds = %bb23
-  unreachable
+  ret void
 
 bb8:                                              ; preds = %bb23, %bb6
   %tmp9 = getelementptr inbounds [11 x [101 x i32]], [11 x [101 x i32]]* %tmp5, i64 0, i64 0, i64 0
@@ -56,7 +56,7 @@ bb6:                                              ; preds = %bb
   br label %bb8
 
 bb7:                                              ; preds = %bb23
-  unreachable
+  ret void
 
 bb8:                                              ; preds = %bb23, %bb6
   %tmp9 = getelementptr inbounds [11 x [101 x i32]], [11 x [101 x i32]]* %tmp5, i64 0, i64 0, i64 0

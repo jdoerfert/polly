@@ -38,7 +38,7 @@ bb244.preheader:                                  ; preds = %bb241, %bb176
   br i1 undef, label %bb245, label %bb.nph416
 
 bb.nph416:                                        ; preds = %bb244.preheader
-  unreachable
+  ret void
 
 bb245:                                            ; preds = %bb244.preheader
   ret void

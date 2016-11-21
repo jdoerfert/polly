@@ -10,6 +10,7 @@
 //===----------------------------------------------------------------------===//
 
 #include "polly/CodeGen/IslExprBuilder.h"
+#include "polly/CodeGen/IslNodeBuilder.h"
 #include "polly/CodeGen/RuntimeDebugBuilder.h"
 #include "polly/Options.h"
 #include "polly/ScopInfo.h"
@@ -39,13 +40,14 @@ static cl::opt<OverflowTrackingChoice> OTMode(
                           "Always track the overflow bit.")),
     cl::Hidden, cl::init(OT_REQUEST), cl::ZeroOrMore, cl::cat(PollyCategory));
 
-IslExprBuilder::IslExprBuilder(Scop &S, PollyIRBuilder &Builder,
-                               IDToValueTy &IDToValue, ValueMapT &GlobalMap,
-                               const DataLayout &DL, ScalarEvolution &SE,
-                               DominatorTree &DT, LoopInfo &LI,
-                               BasicBlock *StartBlock)
-    : S(S), Builder(Builder), IDToValue(IDToValue), GlobalMap(GlobalMap),
-      DL(DL), SE(SE), DT(DT), LI(LI), StartBlock(StartBlock) {
+IslExprBuilder::IslExprBuilder(Scop &S, IslNodeBuilder &NodeBuilder,
+                               PollyIRBuilder &Builder, IDToValueTy &IDToValue,
+                               ValueMapT &GlobalMap, const DataLayout &DL,
+                               ScalarEvolution &SE, DominatorTree &DT,
+                               LoopInfo &LI, BasicBlock *StartBlock)
+    : S(S), NodeBuilder(NodeBuilder), Builder(Builder), IDToValue(IDToValue),
+      GlobalMap(GlobalMap), DL(DL), SE(SE), DT(DT), LI(LI),
+      StartBlock(StartBlock) {
   OverflowState = (OTMode == OT_ALWAYS) ? Builder.getFalse() : nullptr;
 }
 
@@ -315,13 +317,7 @@ Value *IslExprBuilder::createAccessAddress(isl_ast_expr *Expr) {
       break;
 
     const SCEV *DimSCEV = SAI->getDimensionSize(u);
-
-    llvm::ValueToValueMap Map(GlobalMap.begin(), GlobalMap.end());
-    DimSCEV = SCEVParameterRewriter::rewrite(DimSCEV, SE, Map);
-    Value *DimSize =
-        expandCodeFor(S, SE, DL, "polly", DimSCEV, DimSCEV->getType(),
-                      &*Builder.GetInsertPoint(), nullptr,
-                      StartBlock->getSinglePredecessor());
+    Value *DimSize = NodeBuilder.generateSCEV(DimSCEV);
 
     Type *Ty = getWidestType(DimSize->getType(), IndexOp->getType());
 
@@ -337,7 +333,7 @@ Value *IslExprBuilder::createAccessAddress(isl_ast_expr *Expr) {
   Access = Builder.CreateGEP(Base, IndexOp, "polly.access." + BaseName);
 
   if (PollyDebugPrinting)
-    RuntimeDebugBuilder::createCPUPrinter(Builder, "\n");
+    RuntimeDebugBuilder::createCPUPrinter(Builder, " = ", Access, "\n");
   isl_ast_expr_free(Expr);
   return Access;
 }
@@ -721,6 +717,10 @@ Value *IslExprBuilder::createId(__isl_take isl_ast_expr *Expr) {
 
   Id = isl_ast_expr_get_id(Expr);
 
+  if (!IDToValue.count(Id)) {
+    isl_ast_expr_dump(Expr);
+    isl_id_dump(Id);
+  }
   assert(IDToValue.count(Id) && "Identifier not found");
 
   V = IDToValue[Id];

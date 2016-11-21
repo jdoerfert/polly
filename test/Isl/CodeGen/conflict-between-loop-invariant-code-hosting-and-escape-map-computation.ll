@@ -46,5 +46,5 @@ bb19:                                             ; preds = %bb18, %bb13
   %tmp20 = phi i32 [ %tmp14, %bb13 ], [ %arg4, %bb18 ]
   %tmp21 = phi i32 [ %tmp17, %bb13 ], [ %arg4, %bb18 ]
   %tmp22 = phi i32 [ %tmp17b, %bb13 ], [ %arg4, %bb18 ]
-  unreachable
+  ret void
 }

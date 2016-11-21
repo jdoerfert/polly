@@ -62,29 +62,22 @@ void findLoops(const llvm::SCEV *Expr,
 void findValues(const llvm::SCEV *Expr, llvm::ScalarEvolution &SE,
                 llvm::SetVector<llvm::Value *> &Values);
 
-/// Returns true when the SCEV contains references to instructions within the
-/// region.
-///
-/// @param Expr The SCEV to analyze.
-/// @param R The region in which we look for dependences.
-/// @param Scope Location where the value is needed.
-/// @param AllowLoops Whether loop recurrences outside the loop that are in the
-///                   region count as dependence.
-bool hasScalarDepsInsideRegion(const llvm::SCEV *Expr, const llvm::Region *R,
-                               llvm::Loop *Scope, bool AllowLoops,
-                               const InvariantLoadsSetTy &ILS);
 bool isAffineExpr(const llvm::Region *R, llvm::Loop *Scope,
                   const llvm::SCEV *Expression, llvm::ScalarEvolution &SE,
-                  InvariantLoadsSetTy *ILS = nullptr);
+                  const llvm::DominatorTree &DT,
+                  const llvm::SmallPtrSetImpl<llvm::BasicBlock *> &ErrorBlocks,
+                  InvariantLoadsSetTy *ILS = nullptr,
+                  ParameterSetTy *Params = nullptr,
+                  bool AddNewILS = true);
 
 /// Check if @p V describes an affine constraint in @p R.
 bool isAffineConstraint(llvm::Value *V, const llvm::Region *R,
                         llvm::Loop *Scope, llvm::ScalarEvolution &SE,
+                        const llvm::DominatorTree &DT,
                         ParameterSetTy &Params, bool OrExpr = false);
 
-ParameterSetTy getParamsInAffineExpr(const llvm::Region *R, llvm::Loop *Scope,
-                                     const llvm::SCEV *Expression,
-                                     llvm::ScalarEvolution &SE);
+ParameterSetTy getParamsInAffineExpr(Scop &S, llvm::Loop *Scope,
+                                     const llvm::SCEV *Expression);
 
 /// Extract the constant factors from the multiplication @p M.
 ///
@@ -95,25 +88,42 @@ ParameterSetTy getParamsInAffineExpr(const llvm::Region *R, llvm::Loop *Scope,
 std::pair<const llvm::SCEVConstant *, const llvm::SCEV *>
 extractConstantFactor(const llvm::SCEV *M, llvm::ScalarEvolution &SE);
 
-/// Try to look through PHI nodes, where some incoming edges come from error
-/// blocks.
-///
-/// In case a PHI node follows an error block we can assume that the incoming
-/// value can only come from the node that is not an error block. As a result,
-/// conditions that seemed non-affine before are now in fact affine.
-const llvm::SCEV *tryForwardThroughPHI(const llvm::SCEV *Expr, llvm::Region &R,
-                                       llvm::ScalarEvolution &SE,
-                                       llvm::LoopInfo &LI,
-                                       const llvm::DominatorTree &DT);
+const llvm::SCEV *
+getSCEVAtScope(llvm::Value *V, llvm::Loop *Scope, const llvm::Region &R,
+               llvm::ScalarEvolution &SE, const llvm::DominatorTree &DT,
+               const llvm::SmallPtrSetImpl<llvm::BasicBlock *> &ErrorBlocks);
 
 /// Return a unique non-error block incoming value for @p PHI if available.
 ///
 /// @param R The region to run our code on.
 /// @param LI The loopinfo tree
 /// @param DT The dominator tree
-llvm::Value *getUniqueNonErrorValue(llvm::PHINode *PHI, llvm::Region *R,
-                                    llvm::LoopInfo &LI,
-                                    const llvm::DominatorTree &DT);
+llvm::Value *getUniqueNonErrorValue(
+    llvm::PHINode *PHI, const llvm::Region *R, llvm::ScalarEvolution &SE,
+    const llvm::DominatorTree &DT,
+    const llvm::SmallPtrSetImpl<llvm::BasicBlock *> &ErrorBlocks);
+
+struct SCEVInterval {
+  const llvm::SCEV *Min;
+  const llvm::SCEV *Max;
+  SCEVInterval() : Min(nullptr), Max(nullptr) {}
+  SCEVInterval(const llvm::SCEV *Min, const llvm::SCEV *Max)
+      : Min(Min), Max(Max) {}
+};
+
+SCEVInterval getInterval(const llvm::SCEV *Expr, llvm::ScalarEvolution &SE);
+
+// Inter procedural SCEVs... aka poor man's SCEVs.
+struct IPSCEV;
+void deleteIPSCEV(IPSCEV *IS);
+IPSCEV *createIPSCEV(const llvm::SCEV *S, llvm::ScalarEvolution &SE);
+const llvm::SCEV *
+getSCEVFromIPSCEV(IPSCEV *IS, llvm::ScalarEvolution &SE,
+        llvm::DenseMap<llvm::Value *, const llvm::SCEV *> *VM = nullptr);
+
+bool hasVariant(const llvm::SCEV *E, llvm::ScalarEvolution &SE,
+                const llvm::ValueToValueMap &VMap, const llvm::Region &R);
+
 } // namespace polly
 
 #endif

@@ -12,6 +12,8 @@
 ;
 target datalayout = "e-m:e-i64:64-f80:128-n8:16:32:64-S128"
 
+declare void @dummy()
+
 ; Function Attrs: nounwind uwtable
 define void @dradb4(i32 %ido, i32 %l1, float* %cc, float* %ch, float* %wa1, float* %wa3) #0 {
 entry:
@@ -22,6 +24,7 @@ if.end:                                           ; preds = %entry
   br i1 undef, label %L105, label %for.cond45.preheader
 
 for.cond45.preheader:                             ; preds = %if.end
+  call void @dummy()
   br i1 undef, label %for.body47, label %for.end198
 
 for.body47:                                       ; preds = %for.inc096, %for.cond45.preheader
@@ -68,6 +71,7 @@ for.body53:                                       ; preds = %for.body53, %for.bo
   br i1 %cmp52, label %for.body53, label %for.inc096
 
 for.inc096:                                       ; preds = %for.body53, %for.body47
+  call void @dummy()
   br i1 undef, label %for.body47, label %for.end198
 
 for.end198:                                       ; preds = %for.inc096, %for.cond45.preheader

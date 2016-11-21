@@ -29,14 +29,12 @@ for.cond60.if.end96.loopexit_crit_edge:           ; preds = %if.end92
   ret void
 }
 
-; CHECK:      Statements {
-; CHECK-NEXT:     Stmt_for_cond71_for_end85_crit_edge
+; CHECK:           Stmt_for_cond71_for_end85_crit_edge
 ; CHECK-NEXT:         Domain :=
-; CHECK-NEXT:             { Stmt_for_cond71_for_end85_crit_edge[] };
+; CHECK-NEXT:             { Stmt_for_cond71_for_end85_crit_edge[0] };
 ; CHECK-NEXT:         Schedule :=
-; CHECK-NEXT:             { Stmt_for_cond71_for_end85_crit_edge[] -> [] };
-; CHECK-NEXT:         ReadAccess :=    [Reduction Type: NONE] [Scalar: 1]
-; CHECK-NEXT:             { Stmt_for_cond71_for_end85_crit_edge[] -> MemRef_bestf_011[] };
+; CHECK-NEXT:             { Stmt_for_cond71_for_end85_crit_edge[i0] -> [0, 1] };
 ; CHECK-NEXT:         MustWriteAccess :=    [Reduction Type: NONE] [Scalar: 1]
-; CHECK-NEXT:             { Stmt_for_cond71_for_end85_crit_edge[] -> MemRef_this_0_bestf_0[] };
-; CHECK-NEXT: }
+; CHECK-NEXT:             { Stmt_for_cond71_for_end85_crit_edge[i0] -> MemRef_this_0_bestf_0[] };
+; CHECK-NEXT:         ReadAccess :=    [Reduction Type: NONE] [Scalar: 1]
+; CHECK-NEXT:             { Stmt_for_cond71_for_end85_crit_edge[i0] -> MemRef_bestf_011[] };

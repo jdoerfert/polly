@@ -41,6 +41,7 @@ public:
 
 namespace polly {
 class ScopArrayInfo;
+class IslNodeBuilder;
 
 /// LLVM-IR generator for isl_ast_expr[essions]
 ///
@@ -92,7 +93,7 @@ class ScopArrayInfo;
 class IslExprBuilder {
 public:
   /// A map from isl_ids to llvm::Values.
-  typedef llvm::MapVector<isl_id *, llvm::AssertingVH<llvm::Value>> IDToValueTy;
+  typedef llvm::MapVector<isl_id *, llvm::Value*> IDToValueTy;
 
   typedef llvm::MapVector<isl_id *, const ScopArrayInfo *> IDToScopArrayInfoTy;
 
@@ -130,7 +131,7 @@ public:
   /// @param DT          DominatorTree analysis for the current function.
   /// @param LI          LoopInfo analysis for the current function.
   /// @param StartBlock The first basic block after the RTC.
-  IslExprBuilder(Scop &S, PollyIRBuilder &Builder, IDToValueTy &IDToValue,
+  IslExprBuilder(Scop &S, IslNodeBuilder &NodeBuilder, PollyIRBuilder &Builder, IDToValueTy &IDToValue,
                  ValueMapT &GlobalMap, const llvm::DataLayout &DL,
                  llvm::ScalarEvolution &SE, llvm::DominatorTree &DT,
                  llvm::LoopInfo &LI, llvm::BasicBlock *StartBlock);
@@ -194,6 +195,8 @@ public:
 
 private:
   Scop &S;
+
+  IslNodeBuilder &NodeBuilder;
 
   /// Flag that will be set if an overflow occurred at runtime.
   ///

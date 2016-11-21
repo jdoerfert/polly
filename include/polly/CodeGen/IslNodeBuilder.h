@@ -49,6 +49,10 @@ class Value;
 
 } // namespace llvm
 
+struct isl_ast_node;
+struct isl_ast_build;
+struct isl_union_map;
+
 namespace polly {
 
 struct InvariantEquivClassTy;
@@ -56,19 +60,10 @@ class MemoryAccess;
 class Scop;
 class ScopStmt;
 
-} // namespace polly
-
-struct isl_ast_node;
-struct isl_ast_build;
-struct isl_union_map;
-
 struct SubtreeReferences {
-  LoopInfo &LI;
-  ScalarEvolution &SE;
   Scop &S;
   ValueMapT &GlobalMap;
   SetVector<Value *> &Values;
-  SetVector<const SCEV *> &SCEVs;
   BlockGenerator &BlockGen;
   // In case an (optional) parameter space location is provided, parameter space
   // information is collected as well.
@@ -100,9 +95,9 @@ public:
                  const DataLayout &DL, LoopInfo &LI, ScalarEvolution &SE,
                  DominatorTree &DT, Scop &S, BasicBlock *StartBlock)
       : S(S), Builder(Builder), Annotator(Annotator),
-        ExprBuilder(S, Builder, IDToValue, ValueMap, DL, SE, DT, LI,
+        ExprBuilder(S, *this, Builder, IDToValue, ValueMap, DL, SE, DT, LI,
                     StartBlock),
-        BlockGen(Builder, LI, SE, DT, ScalarMap, EscapeMap, ValueMap,
+        BlockGen(S, Builder, LI, SE, DT, ScalarMap, EscapeMap, ValueMap,
                  &ExprBuilder, StartBlock),
         RegionGen(BlockGen), DL(DL), LI(LI), SE(SE), DT(DT),
         StartBlock(StartBlock) {}
@@ -181,6 +176,8 @@ protected:
   /// The generator used to copy a non-affine region.
   RegionGenerator RegionGen;
 
+  LoopToScevMapT LTS;
+
   const DataLayout &DL;
   LoopInfo &LI;
   ScalarEvolution &SE;
@@ -208,6 +205,7 @@ protected:
   /// points to and the resulting value is returned.
   ///
   /// @param Expr The expression to code generate.
+  public:
   Value *generateSCEV(const SCEV *Expr);
 
   /// A set of Value -> Value remappings to apply when generating new code.
@@ -280,11 +278,8 @@ protected:
   /// @param For    The node defining the subtree.
   /// @param Values A vector that will be filled with the Values referenced in
   ///               this subtree.
-  /// @param Loops  A vector that will be filled with the Loops referenced in
-  ///               this subtree.
   void getReferencesInSubtree(__isl_keep isl_ast_node *For,
-                              SetVector<Value *> &Values,
-                              SetVector<const Loop *> &Loops);
+                              SetVector<Value *> &Values);
 
   /// Change the llvm::Value(s) used for code generation.
   ///
@@ -348,7 +343,8 @@ protected:
   /// to the required type.
   ///
   /// @returns False, iff a problem occurred and the load was not preloaded.
-  bool preloadInvariantEquivClass(InvariantEquivClassTy &IAClass);
+  bool preloadInvariantEquivClass(InvariantEquivClassTy &IAClass,
+                                  bool Outermost = true);
 
   void createForVector(__isl_take isl_ast_node *For, int VectorWidth);
   void createForSequential(__isl_take isl_ast_node *For, bool KnownParallel);
@@ -460,5 +456,7 @@ private:
   /// See [Code generation of induction variables of loops outside Scops]
   Value *materializeNonScopLoopInductionVariable(const Loop *L);
 };
+
+} // namespace polly
 
 #endif // POLLY_ISLNODEBUILDER_H

@@ -95,8 +95,15 @@ polly::executeScopConditionally(Scop &S, Value *RTC, DominatorTree &DT,
   //      /    \     //
 
   // Create a fork block.
-  BasicBlock *EnteringBB = S.getEnteringBlock();
-  BasicBlock *EntryBB = S.getEntry();
+  BasicBlock *EnteringBB;
+  BasicBlock *EntryBB;
+  if (containsEntry(R)) {
+    EnteringBB = S.getEntry();
+    EntryBB = EnteringBB->getSingleSuccessor();
+  } else {
+    EnteringBB = S.getEnteringBlock();
+    EntryBB = S.getEntry();
+  }
   assert(EnteringBB && "Must be a simple region");
   BasicBlock *SplitBlock =
       splitEdge(EnteringBB, EntryBB, ".split_new_and_old", &DT, &LI, &RI);
@@ -115,16 +122,19 @@ polly::executeScopConditionally(Scop &S, Value *RTC, DominatorTree &DT,
   RI.setRegionFor(SplitBlock, PrevRegion);
 
   // Create a join block
+  BasicBlock *MergeBlock = nullptr;
   BasicBlock *ExitingBB = S.getExitingBlock();
   BasicBlock *ExitBB = S.getExit();
-  assert(ExitingBB && "Must be a simple region");
-  BasicBlock *MergeBlock =
-      splitEdge(ExitingBB, ExitBB, ".merge_new_and_old", &DT, &LI, &RI);
-  MergeBlock->setName("polly.merge_new_and_old");
+  if (ExitBB) {
+    assert(ExitingBB && "Must be a simple region");
+    MergeBlock =
+        splitEdge(ExitingBB, ExitBB, ".merge_new_and_old", &DT, &LI, &RI);
+    MergeBlock->setName("polly.merge_new_and_old");
 
-  // Exclude the join block from the region.
-  R.replaceExitRecursive(MergeBlock);
-  RI.setRegionFor(MergeBlock, R.getParent());
+    // Exclude the join block from the region.
+    R.replaceExitRecursive(MergeBlock);
+    RI.setRegionFor(MergeBlock, R.getParent());
+  }
 
   //      \   /      //
   //    EnteringBB   //
@@ -145,19 +155,22 @@ polly::executeScopConditionally(Scop &S, Value *RTC, DominatorTree &DT,
   BasicBlock *StartBlock =
       BasicBlock::Create(F->getContext(), "polly.start", F);
   BasicBlock *ExitingBlock =
-      BasicBlock::Create(F->getContext(), "polly.exiting", F);
+      ExitBB ? BasicBlock::Create(F->getContext(), "polly.exiting", F)
+             : nullptr;
   SplitBlock->getTerminator()->eraseFromParent();
   Builder.SetInsertPoint(SplitBlock);
-  BranchInst *CondBr = Builder.CreateCondBr(RTC, StartBlock, S.getEntry());
-
+  BranchInst *CondBr = Builder.CreateCondBr(RTC, StartBlock, EntryBB);
   if (Loop *L = LI.getLoopFor(SplitBlock)) {
     L->addBasicBlockToLoop(StartBlock, LI);
-    L->addBasicBlockToLoop(ExitingBlock, LI);
+    if (ExitingBlock)
+      L->addBasicBlockToLoop(ExitingBlock, LI);
   }
   DT.addNewBlock(StartBlock, SplitBlock);
-  DT.addNewBlock(ExitingBlock, StartBlock);
+  if (ExitingBlock)
+    DT.addNewBlock(ExitingBlock, StartBlock);
   RI.setRegionFor(StartBlock, RI.getRegionFor(SplitBlock));
-  RI.setRegionFor(ExitingBlock, RI.getRegionFor(SplitBlock));
+  if (ExitingBlock)
+    RI.setRegionFor(ExitingBlock, RI.getRegionFor(SplitBlock));
 
   //      \   /                    //
   //    EnteringBB                 //
@@ -175,13 +188,17 @@ polly::executeScopConditionally(Scop &S, Value *RTC, DominatorTree &DT,
 
   // Connect start block to exiting block.
   Builder.SetInsertPoint(StartBlock);
-  Builder.CreateBr(ExitingBlock);
-  DT.changeImmediateDominator(ExitingBlock, StartBlock);
+  if (!ExitBB) {
+    Builder.CreateUnreachable();
+  } else {
+    Builder.CreateBr(ExitingBlock);
+    DT.changeImmediateDominator(ExitingBlock, StartBlock);
 
-  // Connect exiting block to join block.
-  Builder.SetInsertPoint(ExitingBlock);
-  Builder.CreateBr(MergeBlock);
-  DT.changeImmediateDominator(MergeBlock, SplitBlock);
+    // Connect exiting block to join block.
+    Builder.SetInsertPoint(ExitingBlock);
+    Builder.CreateBr(MergeBlock);
+    DT.changeImmediateDominator(MergeBlock, SplitBlock);
+  }
 
   //      \   /                    //
   //    EnteringBB                 //

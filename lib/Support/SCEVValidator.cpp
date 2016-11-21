@@ -51,7 +51,7 @@ public:
 
   /// Construct a result with a certain type and no parameters.
   ValidatorResult(SCEVType::TYPE Type) : Type(Type) {
-    assert(Type != SCEVType::PARAM && "Did you forget to pass the parameter");
+    //assert(Type != SCEVType::PARAM && "Did you forget to pass the parameter");
   }
 
   /// Construct a result with a certain type and a single parameter.
@@ -63,19 +63,19 @@ public:
   SCEVType::TYPE getType() { return Type; }
 
   /// Is the analyzed SCEV constant during the execution of the SCoP.
-  bool isConstant() { return Type == SCEVType::INT || Type == SCEVType::PARAM; }
+  bool isConstant() const { return Type == SCEVType::INT || Type == SCEVType::PARAM; }
 
   /// Is the analyzed SCEV valid.
-  bool isValid() { return Type != SCEVType::INVALID; }
+  bool isValid() const { return Type != SCEVType::INVALID; }
 
   /// Is the analyzed SCEV of Type IV.
-  bool isIV() { return Type == SCEVType::IV; }
+  bool isIV() const{ return Type == SCEVType::IV; }
 
   /// Is the analyzed SCEV of Type INT.
-  bool isINT() { return Type == SCEVType::INT; }
+  bool isINT()const  { return Type == SCEVType::INT; }
 
   /// Is the analyzed SCEV of Type PARAM.
-  bool isPARAM() { return Type == SCEVType::PARAM; }
+  bool isPARAM() const { return Type == SCEVType::PARAM; }
 
   /// Get the parameters of this validator result.
   const ParameterSetTy &getParameters() { return Parameters; }
@@ -135,12 +135,20 @@ private:
   const Region *R;
   Loop *Scope;
   ScalarEvolution &SE;
+  const DominatorTree &DT;
   InvariantLoadsSetTy *ILS;
+  const SmallPtrSetImpl<BasicBlock *> &ErrorBlocks;
+  SmallPtrSet<Instruction *, 8> SeenInstructions;
+
+  bool AddNewILS;
 
 public:
   SCEVValidator(const Region *R, Loop *Scope, ScalarEvolution &SE,
-                InvariantLoadsSetTy *ILS)
-      : R(R), Scope(Scope), SE(SE), ILS(ILS) {}
+                const DominatorTree &DT, InvariantLoadsSetTy *ILS,
+                const SmallPtrSetImpl<BasicBlock *> &ErrorBlocks,
+                bool AddNewILS)
+      : R(R), Scope(Scope), SE(SE), DT(DT), ILS(ILS), ErrorBlocks(ErrorBlocks),
+        AddNewILS(AddNewILS) {}
 
   class ValidatorResult visitConstant(const SCEVConstant *Constant) {
     return ValidatorResult(SCEVType::INT);
@@ -308,31 +316,78 @@ public:
   }
 
   ValidatorResult visitGenericInst(Instruction *I, const SCEV *S) {
-    if (R->contains(I)) {
-      DEBUG(dbgs() << "INVALID: UnknownExpr references an instruction "
-                      "within the region\n");
-      return ValidatorResult(SCEVType::INVALID);
-    }
-
-    return ValidatorResult(SCEVType::PARAM, S);
-  }
-
-  ValidatorResult visitCallInstruction(Instruction *I, const SCEV *S) {
-    assert(I->getOpcode() == Instruction::Call && "Call instruction expected");
-
-    if (R->contains(I)) {
-      auto Call = cast<CallInst>(I);
-
-      if (!isConstCall(Call))
-        return ValidatorResult(SCEVType::INVALID, S);
-    }
-    return ValidatorResult(SCEVType::PARAM, S);
-  }
-
-  ValidatorResult visitLoadInstruction(Instruction *I, const SCEV *S) {
-    if (R->contains(I) && ILS) {
-      ILS->insert(cast<LoadInst>(I));
+    if (!R->contains(I))
       return ValidatorResult(SCEVType::PARAM, S);
+    //if (!SeenInstructions.insert(I).second)
+      //return ValidatorResult(SCEVType::PARAM);
+
+    if (!I->mayReadOrWriteMemory() && !I->mayThrow() && !isa<PHINode>(I)) {
+      for (auto &Op : I->operands()) {
+        auto *OpI = dyn_cast<Instruction>(Op);
+        if (!OpI || !R->contains(OpI))
+          continue;
+        if (SE.isSCEVable(OpI->getType())) {
+          const ValidatorResult &OpRes =
+              visit(getSCEVAtScope(OpI, Scope, *R, SE, DT, ErrorBlocks));
+          if (OpRes.isPARAM())
+            continue;
+        }
+        DEBUG(dbgs() << "INVALID OP: " << *OpI << "\n");
+        return ValidatorResult(SCEVType::INVALID);
+        break;
+      }
+
+      return ValidatorResult(SCEVType::PARAM, S);
+    }
+
+    DEBUG(dbgs() << "INVALID: UnknownExpr references an instruction (" << *I
+                 << ") within the region\n");
+    return ValidatorResult(SCEVType::INVALID);
+  }
+
+  ValidatorResult visitCallInstruction(CallInst *I, const SCEV *S) {
+    auto *F = I->getCalledFunction();
+    //if (F && (F->getName().equals("malloc") || F->getName().equals("calloc") ||
+              //F->getName().equals("realloc")))
+      //return ValidatorResult(SCEVType::INT);
+    if (F && F->hasFnAttribute("polly.function.affine.returns") &&
+        GlobalScopInfoPtr) {
+      if (auto *FS = GlobalScopInfoPtr->getScop(F)) {
+        DEBUG(errs() << "Call SCEV: " << *S << " for " << *I << "\n");
+        auto &DC = FS->getDetectionContext();
+        SmallVector<ReturnInst *, 8> Returns;
+        for (auto *RI : DC.Returns)
+          if (!DC.ErrorBlocks.count(RI->getParent()))
+            Returns.push_back(RI);
+
+        ValidatorResult Res(SCEVType::INT);
+        for (ReturnInst *RI : Returns) {
+          auto *RVIPSCEV = DC.IPSCEVMap.lookup(RI);
+          assert(RVIPSCEV);
+          auto *RVSCEV = getSCEVFromIPSCEV(RVIPSCEV, SE);
+          DEBUG(errs() << "RVSCEV: " << *RVSCEV << "\n");
+          Res.merge(visit(RVSCEV));
+        }
+        return Res;
+      }
+    }
+
+    if (!R->contains(I))
+      return ValidatorResult(SCEVType::PARAM, S);
+    if (isConstCall(I))
+      return ValidatorResult(SCEVType::PARAM, S);
+
+    return visitGenericInst(I, S);
+  }
+
+  ValidatorResult visitLoadInstruction(LoadInst *I, const SCEV *S) {
+    if (R->contains(I) && ILS) {
+      if (AddNewILS) {
+        ILS->insert(I);
+        return ValidatorResult(SCEVType::PARAM, S);
+      }
+      if (ILS->count(I))
+        return ValidatorResult(SCEVType::PARAM, S);
     }
 
     return visitGenericInst(I, S);
@@ -402,25 +457,22 @@ public:
       return ValidatorResult(SCEVType::INVALID);
     }
 
-    if (isa<UndefValue>(V)) {
-      DEBUG(dbgs() << "INVALID: UnknownExpr references an undef value");
-      return ValidatorResult(SCEVType::INVALID);
-    }
+    if (isa<UndefValue>(V))
+      return ValidatorResult(SCEVType::INT);
 
     if (Instruction *I = dyn_cast<Instruction>(Expr->getValue())) {
       switch (I->getOpcode()) {
       case Instruction::IntToPtr:
-        return visit(SE.getSCEVAtScope(I->getOperand(0), Scope));
       case Instruction::PtrToInt:
-        return visit(SE.getSCEVAtScope(I->getOperand(0), Scope));
+        return visit(getSCEVAtScope(I->getOperand(0), Scope, *R, SE, DT, ErrorBlocks));
       case Instruction::Load:
-        return visitLoadInstruction(I, Expr);
+        return visitLoadInstruction(cast<LoadInst>(I), Expr);
       case Instruction::SDiv:
         return visitSDivInstruction(I, Expr);
       case Instruction::SRem:
         return visitSRemInstruction(I, Expr);
       case Instruction::Call:
-        return visitCallInstruction(I, Expr);
+        return visitCallInstruction(cast<CallInst>(I), Expr);
       default:
         return visitGenericInst(I, Expr);
       }
@@ -456,67 +508,6 @@ public:
 
   bool isDone() { return HasIVParams; }
   bool hasIVParams() { return HasIVParams; }
-};
-
-/// Check whether a SCEV refers to an SSA name defined inside a region.
-class SCEVInRegionDependences {
-  const Region *R;
-  Loop *Scope;
-  const InvariantLoadsSetTy &ILS;
-  bool AllowLoops;
-  bool HasInRegionDeps = false;
-
-public:
-  SCEVInRegionDependences(const Region *R, Loop *Scope, bool AllowLoops,
-                          const InvariantLoadsSetTy &ILS)
-      : R(R), Scope(Scope), ILS(ILS), AllowLoops(AllowLoops) {}
-
-  bool follow(const SCEV *S) {
-    if (auto Unknown = dyn_cast<SCEVUnknown>(S)) {
-      Instruction *Inst = dyn_cast<Instruction>(Unknown->getValue());
-
-      CallInst *Call = dyn_cast<CallInst>(Unknown->getValue());
-
-      if (Call && isConstCall(Call))
-        return false;
-
-      if (Inst) {
-        // When we invariant load hoist a load, we first make sure that there
-        // can be no dependences created by it in the Scop region. So, we should
-        // not consider scalar dependences to `LoadInst`s that are invariant
-        // load hoisted.
-        //
-        // If this check is not present, then we create data dependences which
-        // are strictly not necessary by tracking the invariant load as a
-        // scalar.
-        LoadInst *LI = dyn_cast<LoadInst>(Inst);
-        if (LI && ILS.count(LI) > 0)
-          return false;
-      }
-
-      // Return true when Inst is defined inside the region R.
-      if (!Inst || !R->contains(Inst))
-        return true;
-
-      HasInRegionDeps = true;
-      return false;
-    }
-
-    if (auto AddRec = dyn_cast<SCEVAddRecExpr>(S)) {
-      if (AllowLoops)
-        return true;
-
-      auto *L = AddRec->getLoop();
-      if (R->contains(L) && !L->contains(Scope)) {
-        HasInRegionDeps = true;
-        return false;
-      }
-    }
-
-    return true;
-  }
-  bool isDone() { return false; }
-  bool hasDependences() { return HasInRegionDeps; }
 };
 
 namespace polly {
@@ -590,21 +581,15 @@ bool hasIVParams(const SCEV *Expr) {
   return HasIVParams.hasIVParams();
 }
 
-bool hasScalarDepsInsideRegion(const SCEV *Expr, const Region *R,
-                               llvm::Loop *Scope, bool AllowLoops,
-                               const InvariantLoadsSetTy &ILS) {
-  SCEVInRegionDependences InRegionDeps(R, Scope, AllowLoops, ILS);
-  SCEVTraversal<SCEVInRegionDependences> ST(InRegionDeps);
-  ST.visitAll(Expr);
-  return InRegionDeps.hasDependences();
-}
-
-bool isAffineExpr(const Region *R, llvm::Loop *Scope, const SCEV *Expr,
-                  ScalarEvolution &SE, InvariantLoadsSetTy *ILS) {
+bool isAffineExpr(const Region *R, Loop *Scope, const SCEV *Expr,
+                  ScalarEvolution &SE, const DominatorTree &DT,
+                  const SmallPtrSetImpl<BasicBlock *> &ErrorBlocks,
+                  InvariantLoadsSetTy *ILS, ParameterSetTy *Params,
+                  bool AddNewILS) {
   if (isa<SCEVCouldNotCompute>(Expr))
     return false;
 
-  SCEVValidator Validator(R, Scope, SE, ILS);
+  SCEVValidator Validator(R, Scope, SE, DT, ILS, ErrorBlocks, AddNewILS);
   DEBUG({
     dbgs() << "\n";
     dbgs() << "Expr: " << *Expr << "\n";
@@ -614,9 +599,17 @@ bool isAffineExpr(const Region *R, llvm::Loop *Scope, const SCEV *Expr,
 
   ValidatorResult Result = Validator.visit(Expr);
 
+  if (Params) {
+    const auto &Parameters = Result.getParameters();
+    Params->insert(Parameters.begin(), Parameters.end());
+  }
+
   DEBUG({
-    if (Result.isValid())
+    if (Result.isValid()) {
       dbgs() << "VALID\n";
+      for (auto *P : Result.getParameters())
+        dbgs() << "   - " << *P << "\n";
+    }
     dbgs() << "\n";
   });
 
@@ -624,12 +617,14 @@ bool isAffineExpr(const Region *R, llvm::Loop *Scope, const SCEV *Expr,
 }
 
 static bool isAffineExpr(Value *V, const Region *R, Loop *Scope,
-                         ScalarEvolution &SE, ParameterSetTy &Params) {
+                         ScalarEvolution &SE, const DominatorTree &DT,
+                         ParameterSetTy &Params) {
   auto *E = SE.getSCEV(V);
   if (isa<SCEVCouldNotCompute>(E))
     return false;
 
-  SCEVValidator Validator(R, Scope, SE, nullptr);
+  SmallPtrSet<BasicBlock *, 2> ErrorBlocks;
+  SCEVValidator Validator(R, Scope, SE, DT, nullptr, ErrorBlocks, false);
   ValidatorResult Result = Validator.visit(E);
   if (!Result.isValid())
     return false;
@@ -641,18 +636,18 @@ static bool isAffineExpr(Value *V, const Region *R, Loop *Scope,
 }
 
 bool isAffineConstraint(Value *V, const Region *R, llvm::Loop *Scope,
-                        ScalarEvolution &SE, ParameterSetTy &Params,
+                        ScalarEvolution &SE, const DominatorTree &DT, ParameterSetTy &Params,
                         bool OrExpr) {
   if (auto *ICmp = dyn_cast<ICmpInst>(V)) {
-    return isAffineConstraint(ICmp->getOperand(0), R, Scope, SE, Params,
+    return isAffineConstraint(ICmp->getOperand(0), R, Scope, SE, DT, Params,
                               true) &&
-           isAffineConstraint(ICmp->getOperand(1), R, Scope, SE, Params, true);
+           isAffineConstraint(ICmp->getOperand(1), R, Scope, SE, DT, Params, true);
   } else if (auto *BinOp = dyn_cast<BinaryOperator>(V)) {
     auto Opcode = BinOp->getOpcode();
     if (Opcode == Instruction::And || Opcode == Instruction::Or)
-      return isAffineConstraint(BinOp->getOperand(0), R, Scope, SE, Params,
+      return isAffineConstraint(BinOp->getOperand(0), R, Scope, SE,DT,  Params,
                                 false) &&
-             isAffineConstraint(BinOp->getOperand(1), R, Scope, SE, Params,
+             isAffineConstraint(BinOp->getOperand(1), R, Scope, SE,DT,  Params,
                                 false);
     /* Fall through */
   }
@@ -660,17 +655,21 @@ bool isAffineConstraint(Value *V, const Region *R, llvm::Loop *Scope,
   if (!OrExpr)
     return false;
 
-  return isAffineExpr(V, R, Scope, SE, Params);
+  return isAffineExpr(V, R, Scope, SE, DT, Params);
 }
 
-ParameterSetTy getParamsInAffineExpr(const Region *R, Loop *Scope,
-                                     const SCEV *Expr, ScalarEvolution &SE) {
-  if (isa<SCEVCouldNotCompute>(Expr))
-    return ParameterSetTy();
+ParameterSetTy
+getParamsInAffineExpr(Scop &S, Loop *Scope, const SCEV *Expr) {
+  assert(!isa<SCEVCouldNotCompute>(Expr));
 
-  InvariantLoadsSetTy ILS;
-  SCEVValidator Validator(R, Scope, SE, &ILS);
+  InvariantLoadsSetTy &ILS =
+      const_cast<InvariantLoadsSetTy &>(S.getRequiredInvariantLoads());
+  SCEVValidator Validator(&S.getRegion(), Scope, *S.getSE(), *S.getDT(), &ILS,
+                          S.getErrorBlocks(), false);
+
   ValidatorResult Result = Validator.visit(Expr);
+  if (!Result.isValid())
+    errs() << "S: " << *Expr << " in " << Scope << "\n";
   assert(Result.isValid() && "Requested parameters for an invalid SCEV!");
 
   return Result.getParameters();
@@ -736,44 +735,620 @@ extractConstantFactor(const SCEV *S, ScalarEvolution &SE) {
   return std::make_pair(ConstPart, SE.getMulExpr(LeftOvers));
 }
 
-const SCEV *tryForwardThroughPHI(const SCEV *Expr, Region &R,
-                                 ScalarEvolution &SE, LoopInfo &LI,
-                                 const DominatorTree &DT) {
-  if (auto *Unknown = dyn_cast<SCEVUnknown>(Expr)) {
-    Value *V = Unknown->getValue();
-    auto *PHI = dyn_cast<PHINode>(V);
-    if (!PHI)
+static const SCEV *
+tryForwardThroughPHI(const SCEV *Expr, const Region &R, ScalarEvolution &SE,
+                     const SmallPtrSetImpl<llvm::BasicBlock *> &ErrorBlocks,
+                     SmallPtrSetImpl<const PHINode *> &PHIs,
+                     const DominatorTree &DT, SetVector<const Loop *> &Loops,
+                     SetVector<Value *> &Values);
+
+struct SCEVPHIRewriter : public SCEVRewriteVisitor<SCEVPHIRewriter> {
+  static const SCEV *rewrite(const SCEV *Expr, ScalarEvolution &SE,
+                             const DominatorTree &DT, const Region &R,
+                             Loop *Scope,
+                             const SmallPtrSetImpl<BasicBlock *> &ErrorBlocks,
+                             SmallPtrSetImpl<const PHINode *> &PHIs) {
+    SCEVPHIRewriter Rewriter(Expr, SE, R, Scope, ErrorBlocks, PHIs, DT);
+    return Rewriter.visit(Expr);
+  }
+
+  const SCEV *visitUnknown(const SCEVUnknown *Expr) {
+    if (!isa<PHINode>(Expr->getValue()))
       return Expr;
 
-    Value *Final = nullptr;
+    const SCEV *NewExpr =
+        tryForwardThroughPHI(Expr, R, SE, ErrorBlocks, PHIs, DT, Loops, Values);
+    if (NewExpr != Expr) {
+      //errs() << "Expr old: " << *Expr << " new: " << *NewExpr << "\n";
+      return SCEVPHIRewriter::rewrite(NewExpr, SE, DT, R, Scope, ErrorBlocks, PHIs);
+    }
+    return Expr;
+  }
 
-    for (unsigned i = 0; i < PHI->getNumIncomingValues(); i++) {
-      BasicBlock *Incoming = PHI->getIncomingBlock(i);
-      if (isErrorBlock(*Incoming, R, LI, DT) && R.contains(Incoming))
-        continue;
-      if (Final)
-        return Expr;
-      Final = PHI->getIncomingValue(i);
+private:
+  SCEVPHIRewriter(const SCEV *Expr, ScalarEvolution &SE, const Region &R, Loop *Scope,
+                  const SmallPtrSetImpl<BasicBlock *> &ErrorBlocks,
+                  SmallPtrSetImpl<const PHINode *> &PHIs, const DominatorTree &DT)
+      : SCEVRewriteVisitor(SE), R(R), Scope(Scope), ErrorBlocks(ErrorBlocks),
+        PHIs(PHIs), DT(DT) {
+      findValues(Expr, SE, Values);
+      findLoops(Expr, Loops);
     }
 
-    if (Final)
-      return SE.getSCEV(Final);
+  const Region &R;
+  Loop *Scope;
+  const SmallPtrSetImpl<BasicBlock *> &ErrorBlocks;
+  SmallPtrSetImpl<const PHINode *> &PHIs;
+  const DominatorTree &DT;
+  SetVector<const Loop *> Loops;
+  SetVector<Value *> Values;
+};
+
+static bool getOperands(const PHINode *PHI, const Region &R,
+                        const SCEV *&UniqueOp,
+                        SmallPtrSetImpl<LoadInst *> &Loads,
+                        SmallPtrSetImpl<const PHINode *> &PHIs,
+                        const SmallPtrSetImpl<llvm::BasicBlock *> &ErrorBlocks,
+                        ScalarEvolution &SE, const DominatorTree &DT) {
+  assert(SE.isSCEVable(PHI->getType()));
+  if (!PHIs.insert(PHI).second)
+    return true;
+
+  Loop *Scope = nullptr;
+  for (unsigned i = 0; i < PHI->getNumIncomingValues(); i++) {
+    BasicBlock *InBB = PHI->getIncomingBlock(i);
+    if (ErrorBlocks.count(InBB) && R.contains(InBB))
+      continue;
+
+    Value *InV = PHI->getIncomingValue(i);
+    if (auto *LoadI = dyn_cast<LoadInst>(InV)) {
+      Loads.insert(LoadI);
+      const SCEV *PtrS = SE.getSCEVAtScope(LoadI->getPointerOperand(), Scope);
+      PtrS = SCEVPHIRewriter::rewrite(PtrS, SE, DT, R, Scope, ErrorBlocks, PHIs);
+      if (UniqueOp && UniqueOp != PtrS)
+        return false;
+      UniqueOp = PtrS;
+      continue;
+    } else {
+      const SCEV *OpS = SE.getSCEVAtScope(InV, Scope);
+      OpS = SCEVPHIRewriter::rewrite(OpS, SE, DT, R, Scope, ErrorBlocks, PHIs);
+      if (UniqueOp && UniqueOp != OpS)
+        return false;
+      UniqueOp = OpS;
+      continue;
+    }
+    return false;
   }
+
+  return true;
+}
+
+static const SCEV *
+tryForwardThroughPHI(const SCEV *Expr, const Region &R, ScalarEvolution &SE,
+                     const SmallPtrSetImpl<llvm::BasicBlock *> &ErrorBlocks,
+                     SmallPtrSetImpl<const PHINode *> &PHIs,
+                     const DominatorTree &DT, SetVector<const Loop *> &Loops,
+                     SetVector<Value *> &Values) {
+  auto *Unknown = dyn_cast<SCEVUnknown>(Expr);
+  assert(Unknown);
+  auto *PHI = dyn_cast<PHINode>(Unknown->getValue());
+  assert(PHI);
+
+  DEBUG(errs() << "CHeck: " << *Expr << " : " << *PHI << "\n");
+  SmallPtrSet<LoadInst *, 4> Loads;
+  const SCEV * UniqueOp = nullptr;
+  if (!getOperands(PHI, R, UniqueOp, Loads, PHIs, ErrorBlocks, SE, DT))
+    return Expr;
+  if (!UniqueOp)
+    return Expr;
+
+  SetVector<Value *> NewValues;
+  SetVector<const Loop *> NewLoops;
+  auto ValidNewValuesAndLoops = [&]() {
+    for (auto *NV : NewValues)
+      if (auto *NI = dyn_cast<Instruction>(NV))
+        if (std::any_of(Loops.begin(), Loops.end(), [&](const Loop *L) {
+              return !DT.dominates(L->getHeader(), NI->getParent()) &&
+                     !DT.dominates(NI->getParent(), L->getHeader());
+            }))
+          return false;
+    for (auto *NL : NewLoops)
+      if (std::any_of(Values.begin(), Values.end(), [&](Value *V) {
+            auto *I = dyn_cast<Instruction>(V);
+            return I && !DT.dominates(NL->getHeader(), I->getParent()) &&
+                   !DT.dominates(I->getParent(), NL->getHeader());
+          }))
+        return false;
+    return true;
+  };
+
+  DEBUG(errs() << "CHeck: " << *Expr << " done: " << *UniqueOp << "\n");
+  if (Loads.empty()) {
+    findValues(UniqueOp, SE, NewValues);
+    findLoops(UniqueOp, NewLoops);
+
+    if (!ValidNewValuesAndLoops())
+      return Expr;
+
+    Loops.set_union(NewLoops);
+    Values.set_union(NewValues);
+    return UniqueOp;
+  }
+
+  for (LoadInst *Load : Loads) {
+    if (!R.contains(Load))
+      continue;
+    NewValues.insert(Load);
+    if (ValidNewValuesAndLoops())
+      return SE.getSCEV(Load);
+    NewValues.clear();
+  }
+
   return Expr;
 }
 
-Value *getUniqueNonErrorValue(PHINode *PHI, Region *R, LoopInfo &LI,
-                              const DominatorTree &DT) {
+const SCEV *getSCEVAtScope(Value *V, Loop *Scope, const Region &R,
+                           ScalarEvolution &SE, const DominatorTree &DT,
+                           const SmallPtrSetImpl<BasicBlock *> &ErrorBlocks) {
+  //errs() << "Got : " << *V << "\n";
+  SmallPtrSet<const PHINode *, 4> PHIs;
+  const SCEV *Expr = SE.getSCEVAtScope(V, Scope);
+  return SCEVPHIRewriter::rewrite(Expr, SE, DT, R, Scope, ErrorBlocks, PHIs);
+}
+
+Value *
+getUniqueNonErrorValue(PHINode *PHI, const Region *R, ScalarEvolution &SE,
+                       const DominatorTree &DT,
+                       const SmallPtrSetImpl<llvm::BasicBlock *> &ErrorBlocks) {
+  if (SE.isSCEVable(PHI->getType())) {
+    SmallPtrSet<LoadInst *, 4> Loads;
+    SmallPtrSet<const PHINode *, 4> PHIs;
+    const SCEV *UniqueOp = nullptr;
+    if (getOperands(PHI, *R, UniqueOp, Loads, PHIs, ErrorBlocks, SE, DT))
+      if (UniqueOp && isa<SCEVUnknown>(UniqueOp))
+        return cast<SCEVUnknown>(UniqueOp)->getValue();
+  }
+
   Value *V = nullptr;
   for (unsigned i = 0; i < PHI->getNumIncomingValues(); i++) {
     BasicBlock *BB = PHI->getIncomingBlock(i);
-    if (!isErrorBlock(*BB, *R, LI, DT)) {
-      if (V)
-        return nullptr;
-      V = PHI->getIncomingValue(i);
-    }
+    if (ErrorBlocks.count(BB))
+      continue;
+    if (V && V != PHI->getIncomingValue(i))
+      return nullptr;
+    V = PHI->getIncomingValue(i);
   }
 
   return V;
 }
+
+/// @brief
+struct SCEVIntervalAnalysis
+    : public SCEVVisitor<SCEVIntervalAnalysis, SCEVInterval> {
+private:
+  ScalarEvolution &SE;
+
+public:
+  SCEVIntervalAnalysis(ScalarEvolution &SE) : SE(SE) {}
+
+  SCEVInterval visitConstant(const SCEVConstant *Constant) {
+    return SCEVInterval(Constant, Constant);
+  }
+
+  SCEVInterval visitTruncateExpr(const SCEVTruncateExpr *Expr) {
+    return SCEVInterval();
+  }
+
+  SCEVInterval visitZeroExtendExpr(const SCEVZeroExtendExpr *Expr) {
+    return SCEVInterval();
+  }
+
+  SCEVInterval visitSignExtendExpr(const SCEVSignExtendExpr *Expr) {
+    SCEVInterval SI = visit(Expr->getOperand());
+    return SCEVInterval(SE.getSignExtendExpr(SI.Min, Expr->getType()),
+                        SE.getSignExtendExpr(SI.Max, Expr->getType()));
+  }
+
+  SCEVInterval visitAddExpr(const SCEVAddExpr *Expr) {
+    return SCEVInterval();
+    // SCEVInterval Return = visit(Expr->getOperand(0));
+    // if (!Return.Min || !Return.Max)
+    // return SCEVInterval();
+
+    // for (int i = 1, e = Expr->getNumOperands(); i < e; ++i) {
+    // SCEVInterval Op = visit(Expr->getOperand(i));
+    // if (!Op.Min || !Op.Max)
+    // return SCEVInterval();
+
+    // Return.Min = SE.getSMinExpr(Return.Min, Op.Min);
+    //}
+    // return Return;
+  }
+
+  SCEVInterval visitMulExpr(const SCEVMulExpr *Expr) { return SCEVInterval(); }
+
+  SCEVInterval visitUDivExpr(const SCEVUDivExpr *Expr) {
+    return SCEVInterval();
+  }
+
+  SCEVInterval visitAddRecExpr(const SCEVAddRecExpr *Expr) {
+    auto *StartSCEV = Expr->getStart();
+    auto *StepSCEV = Expr->getStepRecurrence(SE);
+    auto *TripCountSCEV = SE.getMaxBackedgeTakenCount(Expr->getLoop());
+
+    if (isa<SCEVCouldNotCompute>(TripCountSCEV)) {
+      /* No Op */
+    } else if (Expr->getType() == TripCountSCEV->getType()) {
+      /* No Op */
+    } else if (TripCountSCEV->getType()->getScalarSizeInBits() >
+               Expr->getType()->getScalarSizeInBits()) {
+      auto *Ty = TripCountSCEV->getType();
+      StartSCEV = SE.getSignExtendExpr(StartSCEV, Ty);
+      StepSCEV = SE.getSignExtendExpr(StepSCEV, Ty);
+    } else {
+      TripCountSCEV = SE.getSignExtendExpr(TripCountSCEV, Expr->getType());
+    }
+
+    SCEVInterval Start = visit(StartSCEV);
+    SCEVInterval Step = visit(StepSCEV);
+    bool IsKnowPos = SE.isKnownPositive(StepSCEV);
+    bool IsKnowNeg = !IsKnowPos && SE.isKnownNegative(StepSCEV);
+    if (!IsKnowPos && !IsKnowNeg)
+      return SCEVInterval();
+
+    auto *Min = IsKnowPos ? Start.Min : nullptr;
+    auto *Max = IsKnowNeg ? Start.Max : nullptr;
+    if (isa<SCEVCouldNotCompute>(TripCountSCEV))
+      return SCEVInterval(Min, nullptr);
+
+    SCEVInterval TripCount = visit(TripCountSCEV);
+    if (!TripCount.Max || !Step.Max)
+      return SCEVInterval(Min, Max);
+
+    auto *MaxOffset = SE.getMulExpr(TripCount.Max, Step.Max);
+    if ((IsKnowPos && !Start.Max) || (!IsKnowPos && !Start.Min))
+      return SCEVInterval(Min, Max);
+
+    if (IsKnowPos)
+      Max = SE.getAddExpr(Start.Max, MaxOffset);
+    else
+      Min = SE.getAddExpr(Start.Min, MaxOffset);
+
+    return SCEVInterval(Min, Max);
+  }
+
+  SCEVInterval visitSMaxExpr(const SCEVSMaxExpr *Expr) {
+    SCEVInterval Return = visit(Expr->getOperand(0));
+    if (!Return.Min || !Return.Max)
+      return SCEVInterval();
+
+    for (int i = 1, e = Expr->getNumOperands(); i < e; ++i) {
+      SCEVInterval Op = visit(Expr->getOperand(i));
+      if (!Op.Min || !Op.Max)
+        return SCEVInterval();
+
+      Return.Min = SE.getSMaxExpr(Return.Min, Op.Min);
+      Return.Max = SE.getSMaxExpr(Return.Max, Op.Max);
+    }
+
+    return Return;
+  }
+
+  SCEVInterval visitUMaxExpr(const SCEVUMaxExpr *Expr) {
+    return SCEVInterval();
+  }
+
+  SCEVInterval visitUnknown(const SCEVUnknown *Expr) {
+    return SCEVInterval(Expr, Expr);
+  }
+};
+
+SCEVInterval getInterval(const SCEV *Expr, ScalarEvolution &SE) {
+  SCEVIntervalAnalysis SIA(SE);
+  return SIA.visit(Expr);
+}
+
+// Inter procedural SCEVs... aka poor man's SCEVs.
+enum IPSCEVKind {
+  INVALID,
+  CONSTANT,
+  TRUNCATE,
+  ZEROEXTEND,
+  SIGNEXTEND,
+  ADD,
+  MUL,
+  UDIV,
+  ASHR,
+  SDIV,
+  SREM,
+  ADDREC,
+  SMAX,
+  UMAX,
+  INT2PTR,
+  PTR2INT,
+  UNKNOWN
+};
+
+struct IPSCEV {
+
+  SmallVector<IPSCEV *, 2> Operands;
+  IPSCEVKind Kind;
+  Value *V;
+  Type *T;
+  const Loop *L;
+  SCEV::NoWrapFlags NWF;
+
+  IPSCEV(IPSCEVKind Kind, Value *V = nullptr)
+      : Kind(Kind), V(V), T(nullptr), L(nullptr) {}
+  IPSCEV(IPSCEVKind Kind, Type *T, Value *V = nullptr)
+      : Kind(Kind), V(V), T(T), L(nullptr) {}
+  IPSCEV(IPSCEVKind Kind, IPSCEV *IS, Type *T)
+      : Kind(Kind), V(nullptr), T(T), L(nullptr) {
+    addOperand(IS);
+  }
+  IPSCEV(IPSCEVKind Kind, SCEV::NoWrapFlags NWF, const Loop *L = nullptr)
+      : Kind(Kind), V(nullptr), T(nullptr), L(L), NWF(NWF) {}
+
+  ~IPSCEV() { DeleteContainerPointers(Operands); }
+
+  void addOperand(IPSCEV *IS) { Operands.push_back(IS); }
+};
+
+class IPSCEVSCEVRewriter : public SCEVRewriteVisitor<IPSCEVSCEVRewriter> {
+public:
+  static const SCEV *rewrite(const SCEV *Scev, ScalarEvolution &SE,
+                             DenseMap<Value *, const SCEV *> &VM) {
+    IPSCEVSCEVRewriter Rewriter(SE, VM);
+    return Rewriter.visit(Scev);
+  }
+
+  IPSCEVSCEVRewriter(ScalarEvolution &SE, DenseMap<Value *, const SCEV *> &VM)
+      : SCEVRewriteVisitor(SE), SE(SE), VM(VM) {}
+
+  const SCEV *visitUnknown(const SCEVUnknown *Expr) {
+    auto *V = Expr->getValue();
+    auto *NewExpr = VM.lookup(V);
+    if (NewExpr)
+      return IPSCEVSCEVRewriter::rewrite(NewExpr, SE, VM);
+    return Expr;
+  }
+
+private:
+  ScalarEvolution &SE;
+  DenseMap<Value *, const SCEV *> &VM;
+};
+
+struct SCEVToIPSCEV : public SCEVVisitor<SCEVToIPSCEV, IPSCEV *> {
+  ScalarEvolution &SE;
+  SCEVToIPSCEV(ScalarEvolution &SE) : SE(SE) {}
+
+  IPSCEV *visitConstant(const SCEVConstant *Constant) {
+    return new IPSCEV(IPSCEVKind::CONSTANT, Constant->getValue());
+  }
+
+  IPSCEV *visitTruncateExpr(const SCEVTruncateExpr *Expr) {
+    return new IPSCEV(IPSCEVKind::TRUNCATE, visit(Expr->getOperand()),
+                      Expr->getType());
+  }
+
+  IPSCEV *visitZeroExtendExpr(const SCEVZeroExtendExpr *Expr) {
+    return new IPSCEV(IPSCEVKind::ZEROEXTEND, visit(Expr->getOperand()),
+                      Expr->getType());
+  }
+
+  IPSCEV *visitSignExtendExpr(const SCEVSignExtendExpr *Expr) {
+    return new IPSCEV(IPSCEVKind::SIGNEXTEND, visit(Expr->getOperand()),
+                      Expr->getType());
+  }
+
+  IPSCEV *visitAddExpr(const SCEVAddExpr *Expr) {
+    auto *IS = new IPSCEV(IPSCEVKind::ADD, Expr->getNoWrapFlags());
+    for (int i = 0, e = Expr->getNumOperands(); i < e; i++)
+      IS->addOperand(visit(Expr->getOperand(i)));
+    return IS;
+  }
+
+  IPSCEV *visitMulExpr(const SCEVMulExpr *Expr) {
+    auto *IS = new IPSCEV(IPSCEVKind::MUL, Expr->getNoWrapFlags());
+    for (int i = 0, e = Expr->getNumOperands(); i < e; i++)
+      IS->addOperand(visit(Expr->getOperand(i)));
+    return IS;
+  }
+
+  IPSCEV *visitUDivExpr(const SCEVUDivExpr *Expr) {
+    auto *IS = new IPSCEV(IPSCEVKind::UDIV);
+    IS->addOperand(visit(Expr->getLHS()));
+    IS->addOperand(visit(Expr->getRHS()));
+    return IS;
+  }
+
+  IPSCEV *visitAddRecExpr(const SCEVAddRecExpr *Expr) {
+    //errs() << "EXpr: " << *Expr << "\n";
+    //llvm_unreachable("Cannot create IPSCEV for add rec SCEV");
+    //return nullptr;
+    auto *IS =
+        new IPSCEV(IPSCEVKind::ADDREC, Expr->getNoWrapFlags(), Expr->getLoop());
+    IS->addOperand(visit(Expr->getStart()));
+    IS->addOperand(visit(Expr->getStepRecurrence(SE)));
+    return IS;
+  }
+
+  IPSCEV *visitSMaxExpr(const SCEVSMaxExpr *Expr) {
+    auto *IS = new IPSCEV(IPSCEVKind::SMAX);
+    for (int i = 0, e = Expr->getNumOperands(); i < e; i++)
+      IS->addOperand(visit(Expr->getOperand(i)));
+    return IS;
+  }
+
+  IPSCEV *visitUMaxExpr(const SCEVUMaxExpr *Expr) {
+    auto *IS = new IPSCEV(IPSCEVKind::SMAX);
+    for (int i = 0, e = Expr->getNumOperands(); i < e; i++)
+      IS->addOperand(visit(Expr->getOperand(i)));
+    return IS;
+  }
+
+  IPSCEV *visitUnknown(const SCEVUnknown *Expr) {
+    auto *V = Expr->getValue();
+    assert(V);
+    if (isa<Argument>(V) || isa<GlobalValue>(V) || isa<UndefValue>(V) ||
+        isa<Constant>(V))
+      return new IPSCEV(IPSCEVKind::UNKNOWN, V);
+    if (auto *I = dyn_cast<Instruction>(V)) {
+      IPSCEVKind Kind;
+      Value *V = nullptr;
+      const SCEV *LHS = nullptr, *RHS = nullptr;
+      switch (I->getOpcode()) {
+      /* Fall through */
+      case Instruction::IntToPtr:
+        V = I;
+        Kind = IPSCEVKind::INT2PTR;
+        LHS = SE.getSCEV(I->getOperand(0));
+        break;
+      case Instruction::PtrToInt:
+        V = I;
+        Kind = IPSCEVKind::PTR2INT;
+        LHS = SE.getSCEV(I->getOperand(0));
+        break;
+      case Instruction::Load:
+        return new IPSCEV(IPSCEVKind::UNKNOWN, I);
+      case Instruction::AShr:
+        Kind = IPSCEVKind::ASHR;
+        V = I;
+        LHS = SE.getSCEV(I->getOperand(0));
+        RHS = SE.getSCEV(I->getOperand(1));
+        break;
+      case Instruction::SDiv:
+        Kind = IPSCEVKind::SDIV;
+        V = I;
+        LHS = SE.getSCEV(I->getOperand(0));
+        RHS = SE.getSCEV(I->getOperand(1));
+        break;
+      case Instruction::SRem:
+        V = I;
+        Kind = IPSCEVKind::SREM;
+        LHS = SE.getSCEV(I->getOperand(0));
+        RHS = SE.getSCEV(I->getOperand(1));
+        break;
+      default:
+        return new IPSCEV(IPSCEVKind::UNKNOWN, I);
+        // errs() << "Unknown scev " << *Expr << " : " << *I << "\n";
+        // llvm_unreachable("Unknown scevunknown!");
+      }
+
+      auto *IS = new IPSCEV(Kind, Expr->getType(), V);
+      assert(LHS);
+      IS->addOperand(visit(LHS));
+      if (RHS)
+        IS->addOperand(visit(RHS));
+      return IS;
+    }
+    errs() << *Expr << " : " << *V << "\n";
+    llvm_unreachable("Unknown SCEVUnknown [2]!");
+  }
+};
+
+IPSCEV *createIPSCEV(const SCEV *S, ScalarEvolution &SE) {
+  SCEVToIPSCEV S2IS(SE);
+  return S2IS.visit(S);
+}
+
+static const SCEV *getSCEVHelper(IPSCEV *IS, ScalarEvolution &SE) {
+  SmallVector<const SCEV *, 2> Operands;
+  std::for_each(IS->Operands.begin(), IS->Operands.end(),
+                [&](IPSCEV *IS) { Operands.push_back(getSCEVFromIPSCEV(IS, SE)); });
+  switch (IS->Kind) {
+  case INVALID:
+    llvm_unreachable("INVALID IPSCEV Kind!\n");
+  case CONSTANT:
+    assert(Operands.size() == 0);
+    return SE.getConstant(cast<ConstantInt>(IS->V));
+  case TRUNCATE:
+    assert(Operands.size() == 1);
+    return SE.getTruncateExpr(Operands[0], IS->T);
+  case ZEROEXTEND:
+    assert(Operands.size() == 1);
+    return SE.getZeroExtendExpr(Operands[0], IS->T);
+  case SIGNEXTEND:
+    assert(Operands.size() == 1);
+    return SE.getSignExtendExpr(Operands[0], IS->T);
+  case ADD:
+    assert(Operands.size() > 1);
+    return SE.getAddExpr(Operands, IS->NWF);
+  case MUL:
+    assert(Operands.size() > 1);
+    return SE.getMulExpr(Operands, IS->NWF);
+  case UDIV:
+    assert(Operands.size() == 2);
+    return SE.getUDivExpr(Operands[0], Operands[1]);
+  case ASHR:
+    assert(Operands.size() == 2);
+    return SE.getUnknown(IS->V);
+  case SDIV:
+    // TODO this is too conservative
+    assert(Operands.size() == 2);
+    return SE.getUnknown(IS->V);
+  case SREM:
+    assert(Operands.size() == 2);
+    return SE.getUnknown(IS->V);
+  case ADDREC:
+    assert(Operands.size() == 2);
+    return SE.getAddRecExpr(Operands, IS->L, IS->NWF);
+  case SMAX:
+    assert(Operands.size() > 1);
+    return SE.getSMaxExpr(Operands);
+  case UMAX:
+    assert(Operands.size() > 1);
+    return SE.getUMaxExpr(Operands);
+  case INT2PTR:
+    return SE.getUnknown(IS->V);
+  case PTR2INT:
+    return SE.getUnknown(IS->V);
+  case UNKNOWN:
+    assert(IS->V);
+    return SE.getUnknown(IS->V);
+  }
+  llvm_unreachable("Unknown IPSCEV kind\n");
+}
+
+const SCEV *getSCEVFromIPSCEV(IPSCEV *IS, ScalarEvolution &SE,
+                    DenseMap<Value *, const SCEV *> *VM) {
+  auto *S = getSCEVHelper(IS, SE);
+  if (VM)
+    S = IPSCEVSCEVRewriter::rewrite(S, SE, *VM);
+  return S;
+}
+
+void deleteIPSCEV(IPSCEV *IS) { delete IS; }
+
+/// Check whether we should remap a SCEV expression.
+struct SCEVFindInsideScop : public SCEVTraversal<SCEVFindInsideScop> {
+  const ValueToValueMap &VMap;
+  bool FoundInside = false;
+  const Region &R;
+
+public:
+  SCEVFindInsideScop(const ValueToValueMap &VMap, ScalarEvolution &SE,
+                     const Region &R)
+      : SCEVTraversal(*this), VMap(VMap), R(R) {}
+
+  bool follow(const SCEV *E) {
+    if (auto *AddRec = dyn_cast<SCEVAddRecExpr>(E)) {
+      FoundInside |= R.contains(AddRec->getLoop());
+    } else if (auto *Unknown = dyn_cast<SCEVUnknown>(E)) {
+      if (Instruction *I = dyn_cast<Instruction>(Unknown->getValue()))
+        FoundInside |= R.contains(I) && !VMap.count(I);
+    }
+    return !FoundInside;
+  }
+
+  bool isDone() { return FoundInside; }
+};
+
+bool hasVariant(const SCEV *E, ScalarEvolution &SE, const ValueToValueMap &VMap,
+                const Region &R) {
+  SCEVFindInsideScop SFIS(VMap, SE, R);
+  SFIS.visitAll(E);
+  return SFIS.FoundInside;
+}
+
 } // namespace polly

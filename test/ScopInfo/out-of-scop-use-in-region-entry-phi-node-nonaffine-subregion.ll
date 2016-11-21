@@ -7,7 +7,7 @@
 ; CHECK:         %loop_carried.ph = phi float [ %newval.merge, %backedge ], [ undef, %entry ]
 ;
 ; CHECK-LABEL: polly.merge_new_and_old:
-; CHECK:         %newval.merge = phi float [ %newval.final_reload, %polly.exiting ], [ %newval, %subregion_exit.region_exiting ]
+; CHECK:         %newval.merge = phi float [ %newval.final_reload, %polly.exiting ], [ %newval, %backedge.region_exiting ]
 ;
 ; CHECK-LABEL: polly.start:
 ; CHECK:         store float %loop_carried.ph, float* %loop_carried.phiops
@@ -19,7 +19,7 @@
 ; CHECK:         %polly.loop_carried = phi float [ %loop_carried.phiops.reload, %polly.stmt.subregion_entry.entry ]
 ; CHECK:         %p_newval = fadd float %polly.loop_carried, 1.000000e+00
 ;
-; CHECK-LABEL: polly.stmt.polly.merge_new_and_old.exit:
+; CHECK-LABEL: polly.exiting:
 ; CHECK:         %newval.final_reload = load float, float* %newval.s2a
 
 define void @func() {
@@ -46,6 +46,7 @@ if_else:
   br label %backedge
 
 backedge:
+  call void @func()
   %indvar_next = add nuw nsw i32 %indvar, 1
   br i1 false, label %subregion_entry, label %exit
 

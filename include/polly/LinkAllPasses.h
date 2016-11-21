@@ -36,6 +36,7 @@ llvm::Pass *createScopInlinerPass();
 llvm::Pass *createDeadCodeElimPass();
 llvm::Pass *createDependenceInfoPass();
 llvm::Pass *createDependenceInfoWrapperPassPass();
+llvm::Pass *createScopOnlyPrinterPass();
 llvm::Pass *createDOTOnlyPrinterPass();
 llvm::Pass *createDOTOnlyViewerPass();
 llvm::Pass *createDOTPrinterPass();
@@ -49,6 +50,7 @@ llvm::Pass *createScopInfoRegionPassPass();
 llvm::Pass *createScopInfoWrapperPassPass();
 llvm::Pass *createRewriteByrefParamsPass();
 llvm::Pass *createIslAstInfoWrapperPassPass();
+llvm::Pass *createGlobalScopInfoPass();
 llvm::Pass *createCodeGenerationPass();
 #ifdef GPU_CODEGEN
 llvm::Pass *createPPCGCodeGenerationPass(GPUArch Arch = GPUArch::NVPTX64,
@@ -79,6 +81,7 @@ struct PollyForcePassLinking {
     polly::createCodePreparationPass();
     polly::createDeadCodeElimPass();
     polly::createDependenceInfoPass();
+    polly::createScopOnlyPrinterPass();
     polly::createDOTOnlyPrinterPass();
     polly::createDOTOnlyViewerPass();
     polly::createDOTPrinterPass();
@@ -87,6 +90,7 @@ struct PollyForcePassLinking {
     polly::createJSONImporterPass();
     polly::createScopDetectionWrapperPassPass();
     polly::createScopInfoRegionPassPass();
+    polly::createGlobalScopInfoPass();
     polly::createPollyCanonicalizePass();
     polly::createPolyhedralInfoPass();
     polly::createIslAstInfoWrapperPassPass();
@@ -108,6 +112,7 @@ struct PollyForcePassLinking {
 
 namespace llvm {
 class PassRegistry;
+void initializeScopOnlyPrinterPass(llvm::PassRegistry &);
 void initializeCodePreparationPass(llvm::PassRegistry &);
 void initializeScopInlinerPass(llvm::PassRegistry &);
 void initializeDeadCodeElimPass(llvm::PassRegistry &);

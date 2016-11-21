@@ -247,17 +247,19 @@ Function *PerfMonitor::insertInitFunction(Function *FinalReporting) {
   Builder.CreateStore(True, AlreadyInitializedPtr);
 
   // Register the final reporting function with atexit().
-  Value *FinalReportingPtr =
-      Builder.CreatePointerCast(FinalReporting, Builder.getInt8PtrTy());
   Function *AtExitFn = getAtExit();
+  Value *FinalReportingPtr =
+      AtExitFn->getFunctionType()->getParamType(0) == FinalReporting->getType()
+          ? FinalReporting
+          : Builder.CreatePointerCast(FinalReporting, Builder.getInt8PtrTy());
   Builder.CreateCall(AtExitFn, {FinalReportingPtr});
 
   if (Supported) {
     // Read the currently cycle counter and store the result for later.
     Function *RDTSCPFn = getRDTSCP();
-    Value *CurrentCycles = Builder.CreateCall(
-        RDTSCPFn,
-        Builder.CreatePointerCast(RDTSCPWriteLocation, Builder.getInt8PtrTy()));
+    auto *Arg =
+        Builder.CreatePointerCast(RDTSCPWriteLocation, Builder.getInt8PtrTy());
+    Value *CurrentCycles = Builder.CreateCall(RDTSCPFn, {Arg});
     Builder.CreateStore(CurrentCycles, CyclesTotalStartPtr, true);
   }
   Builder.CreateRetVoid();
