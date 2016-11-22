@@ -1217,11 +1217,17 @@ bool ScopDetection::allBlocksValid(Region &SR,
     };
 
     // Check if all predecessors are error blocks.
-    if (std::all_of(pred_begin(BB), pred_end(BB), IsErrorOrSelf))
+    if (std::all_of(pred_begin(BB), pred_end(BB), IsErrorOrSelf)) {
+      DEBUG(errs() << "BB: " << BB->getName()
+                   << " is only reachable via error blocks!");
       Context.ErrorBlocks.insert(BB);
+    }
 
     for (auto &I : *BB)
-      if (!isValidInstruction(I, Context) && !KeepGoing) {
+      if (!isa<TerminatorInst>(&I) && !isValidInstruction(I, Context)) {
+        DEBUG(errs() << "BB: " << BB->getName()
+                     << " contains an invalid instruction:\n"
+                     << I << "\n");
         Context.ErrorBlocks.insert(BB);
         break;
       }
@@ -1232,8 +1238,11 @@ bool ScopDetection::allBlocksValid(Region &SR,
   };
 
   auto *ExitBB = CurRegion.getExit();
-  if (std::all_of(pred_begin(ExitBB), pred_end(ExitBB), IsOutsideOrErroBlock))
+  if (std::all_of(pred_begin(ExitBB), pred_end(ExitBB), IsOutsideOrErroBlock)) {
+    DEBUG(errs() << "Exit block (" << ExitBB->getName()
+                 << ") is only reached via error blocks!\n");
     return false;
+  }
 
   if (!hasAffineMemoryAccesses(Context))
     return false;
