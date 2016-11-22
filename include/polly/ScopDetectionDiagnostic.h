@@ -72,12 +72,9 @@ enum RejectReasonKind {
 
   // Non-Affinity
   rrkAffFunc,
-  rrkUndefCond,
   rrkInvalidCond,
-  rrkUndefOperand,
   rrkNonAffBranch,
   rrkNoBasePtr,
-  rrkUndefBasePtr,
   rrkVariantBasePtr,
   rrkNonAffineAccess,
   rrkDifferentElementSize,
@@ -258,29 +255,6 @@ public:
 };
 
 //===----------------------------------------------------------------------===//
-/// Captures a condition that is based on an 'undef' value.
-class ReportUndefCond : public ReportAffFunc {
-  //===--------------------------------------------------------------------===//
-
-  // The BasicBlock we found the broken condition in.
-  BasicBlock *BB;
-
-public:
-  ReportUndefCond(const Instruction *Inst, BasicBlock *BB)
-      : ReportAffFunc(rrkUndefCond, Inst), BB(BB) {}
-
-  /// @name LLVM-RTTI interface
-  //@{
-  static bool classof(const RejectReason *RR);
-  //@}
-
-  /// @name RejectReason interface
-  //@{
-  virtual std::string getMessage() const override;
-  //@}
-};
-
-//===----------------------------------------------------------------------===//
 /// Captures an invalid condition
 ///
 /// Conditions have to be either constants or icmp instructions.
@@ -293,29 +267,6 @@ class ReportInvalidCond : public ReportAffFunc {
 public:
   ReportInvalidCond(const Instruction *Inst, BasicBlock *BB)
       : ReportAffFunc(rrkInvalidCond, Inst), BB(BB) {}
-
-  /// @name LLVM-RTTI interface
-  //@{
-  static bool classof(const RejectReason *RR);
-  //@}
-
-  /// @name RejectReason interface
-  //@{
-  virtual std::string getMessage() const override;
-  //@}
-};
-
-//===----------------------------------------------------------------------===//
-/// Captures an undefined operand.
-class ReportUndefOperand : public ReportAffFunc {
-  //===--------------------------------------------------------------------===//
-
-  // The BasicBlock we found the undefined operand in.
-  BasicBlock *BB;
-
-public:
-  ReportUndefOperand(BasicBlock *BB, const Instruction *Inst)
-      : ReportAffFunc(rrkUndefOperand, Inst), BB(BB) {}
 
   /// @name LLVM-RTTI interface
   //@{
@@ -368,25 +319,6 @@ class ReportNoBasePtr : public ReportAffFunc {
 public:
   ReportNoBasePtr(const Instruction *Inst)
       : ReportAffFunc(rrkNoBasePtr, Inst) {}
-
-  /// @name LLVM-RTTI interface
-  //@{
-  static bool classof(const RejectReason *RR);
-  //@}
-
-  /// @name RejectReason interface
-  //@{
-  virtual std::string getMessage() const override;
-  //@}
-};
-
-//===----------------------------------------------------------------------===//
-/// Captures an undefined base pointer.
-class ReportUndefBasePtr : public ReportAffFunc {
-  //===--------------------------------------------------------------------===//
-public:
-  ReportUndefBasePtr(const Instruction *Inst)
-      : ReportAffFunc(rrkUndefBasePtr, Inst) {}
 
   /// @name LLVM-RTTI interface
   //@{

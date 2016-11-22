@@ -383,11 +383,6 @@ bool ScopDetection::isValidBranch(BasicBlock &BB, BranchInst *BI,
 
   ICmpInst *ICmp = cast<ICmpInst>(Condition);
 
-  // Are both operands of the ICmp affine?
-  if (isa<UndefValue>(ICmp->getOperand(0)) ||
-      isa<UndefValue>(ICmp->getOperand(1)))
-    return invalid<ReportUndefOperand>(Context, /*Assert=*/true, &BB, ICmp);
-
   Loop *L = LI->getLoopFor(&BB);
   const SCEV *LHS = SE->getSCEVAtScope(ICmp->getOperand(0), L);
   const SCEV *RHS = SE->getSCEVAtScope(ICmp->getOperand(1), L);
@@ -420,10 +415,6 @@ bool ScopDetection::isValidCFG(BasicBlock &BB, bool IsLoopBranch,
 
   if (!Condition)
     return invalid<ReportInvalidTerminator>(Context, /*Assert=*/true, &BB);
-
-  // UndefValue is not allowed as condition.
-  if (isa<UndefValue>(Condition))
-    return invalid<ReportUndefCond>(Context, /*Assert=*/true, TI, &BB);
 
   if (BranchInst *BI = dyn_cast<BranchInst>(TI))
     return isValidBranch(BB, BI, Condition, IsLoopBranch, Context);
@@ -803,9 +794,6 @@ bool ScopDetection::isValidAccess(Instruction *Inst, const SCEV *AF,
     return invalid<ReportNoBasePtr>(Context, /*Assert=*/true, Inst);
 
   auto *BV = BP->getValue();
-  if (isa<UndefValue>(BV))
-    return invalid<ReportUndefBasePtr>(Context, /*Assert=*/true, Inst);
-
   // FIXME: Think about allowing IntToPtrInst
   if (IntToPtrInst *Inst = dyn_cast<IntToPtrInst>(BV))
     return invalid<ReportIntToPtr>(Context, /*Assert=*/true, Inst);

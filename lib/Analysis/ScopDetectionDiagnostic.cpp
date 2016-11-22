@@ -188,17 +188,6 @@ bool ReportAffFunc::classof(const RejectReason *RR) {
 }
 
 //===----------------------------------------------------------------------===//
-// ReportUndefCond.
-
-std::string ReportUndefCond::getMessage() const {
-  return ("Condition based on 'undef' value in BB: " + BB->getName()).str();
-}
-
-bool ReportUndefCond::classof(const RejectReason *RR) {
-  return RR->getKind() == rrkUndefCond;
-}
-
-//===----------------------------------------------------------------------===//
 // ReportInvalidCond.
 
 std::string ReportInvalidCond::getMessage() const {
@@ -208,17 +197,6 @@ std::string ReportInvalidCond::getMessage() const {
 
 bool ReportInvalidCond::classof(const RejectReason *RR) {
   return RR->getKind() == rrkInvalidCond;
-}
-
-//===----------------------------------------------------------------------===//
-// ReportUndefOperand.
-
-std::string ReportUndefOperand::getMessage() const {
-  return ("undef operand in branch at BB: " + BB->getName()).str();
-}
-
-bool ReportUndefOperand::classof(const RejectReason *RR) {
-  return RR->getKind() == rrkUndefOperand;
 }
 
 //===----------------------------------------------------------------------===//
@@ -240,17 +218,6 @@ std::string ReportNoBasePtr::getMessage() const { return "No base pointer"; }
 
 bool ReportNoBasePtr::classof(const RejectReason *RR) {
   return RR->getKind() == rrkNoBasePtr;
-}
-
-//===----------------------------------------------------------------------===//
-// ReportUndefBasePtr.
-
-std::string ReportUndefBasePtr::getMessage() const {
-  return "Undefined base pointer";
-}
-
-bool ReportUndefBasePtr::classof(const RejectReason *RR) {
-  return RR->getKind() == rrkUndefBasePtr;
 }
 
 //===----------------------------------------------------------------------===//
