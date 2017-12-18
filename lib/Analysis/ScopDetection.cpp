@@ -195,7 +195,7 @@ static cl::opt<bool>
 static cl::opt<bool>
     AllowModrefCall("polly-allow-modref-calls",
                     cl::desc("Allow functions with known modref behavior"),
-                    cl::Hidden, cl::init(false), cl::ZeroOrMore,
+                    cl::Hidden, cl::init(true), cl::ZeroOrMore,
                     cl::cat(PollyCategory));
 
 static cl::opt<bool> AllowNonAffineSubRegions(

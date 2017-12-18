@@ -77,6 +77,9 @@ class ScopBuilder {
   /// Set of instructions that might read any memory location.
   SmallVector<std::pair<ScopStmt *, Instruction *>, 16> GlobalReads;
 
+  /// Collection of memory intrinsics with an affine length and "null" pointers.
+  SmallVector<std::pair<ScopStmt *, MemIntrinsic *>, 4> AffineNullMemIntrinsics;
+
   /// Set of all accessed array base pointers.
   SmallSetVector<Value *, 16> ArrayBasePointers;
 
