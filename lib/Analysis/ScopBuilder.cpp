@@ -511,13 +511,11 @@ bool ScopBuilder::buildAccessMemIntrinsic(MemAccInst Inst, ScopStmt *Stmt) {
 
   auto *DestAccFunc = SE.getSCEVAtScope(DestPtrVal, L);
   assert(DestAccFunc);
-  // Ignore accesses to "NULL".
-  // TODO: We could use this to optimize the region further, e.g., intersect
-  //       the context with
-  //          isl_set_complement(isl_set_params(getDomain()))
-  //       as we know it would be undefined to execute this instruction anyway.
-  if (DestAccFunc->isZero())
+  if (DestAccFunc->isZero()) {
+    if (LengthVal)
+      AffineNullMemIntrinsics.push_back({Stmt, MemIntr});
     return true;
+  }
 
   auto *DestPtrSCEV = dyn_cast<SCEVUnknown>(SE.getPointerBase(DestAccFunc));
   assert(DestPtrSCEV);
@@ -536,10 +534,11 @@ bool ScopBuilder::buildAccessMemIntrinsic(MemAccInst Inst, ScopStmt *Stmt) {
 
   auto *SrcAccFunc = SE.getSCEVAtScope(SrcPtrVal, L);
   assert(SrcAccFunc);
-  // Ignore accesses to "NULL".
-  // TODO: See above TODO
-  if (SrcAccFunc->isZero())
+  if (SrcAccFunc->isZero()) {
+    if (LengthVal)
+      AffineNullMemIntrinsics.push_back({Stmt, MemIntr});
     return true;
+  }
 
   auto *SrcPtrSCEV = dyn_cast<SCEVUnknown>(SE.getPointerBase(SrcAccFunc));
   assert(SrcPtrSCEV);
@@ -1507,6 +1506,8 @@ void ScopBuilder::buildScop(Region &R, AssumptionCache &AC,
 
   scop->realignParams();
   scop->addUserContext();
+
+  scop->addSemanticKnowledge(LI, AffineNullMemIntrinsics);
 
   // After the context was fully constructed, thus all our knowledge about
   // the parameters is in there, we add all recorded assumptions to the

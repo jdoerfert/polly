@@ -2139,6 +2139,25 @@ void Scop::addUserAssumptions(
   }
 }
 
+void Scop::addSemanticKnowledge(LoopInfo &LI,
+    SmallVectorImpl<std::pair<ScopStmt *, MemIntrinsic *>>
+        &AffineNullMemIntrinsics) {
+
+  for (auto &AffineNullMemIntrinsic : AffineNullMemIntrinsics) {
+    ScopStmt *Stmt = AffineNullMemIntrinsic.first;
+    MemIntrinsic *MemIntr = AffineNullMemIntrinsic.second;
+    auto *L = LI.getLoopFor(MemIntr->getParent());
+    auto *LengthVal = SE->getSCEVAtScope(MemIntr->getLength(), L);
+    PWACtx LengthPWACtx = getPwAff(LengthVal, Stmt->getEntryBlock());
+    isl::set LengthZeroDom = isl::manage(LengthPWACtx.first).zero_set();
+    isl::set StmtDom = Stmt->getDomain();
+    StmtDom = StmtDom.reset_tuple_id().subtract(Stmt->getInvalidDomain());
+    LengthZeroDom = LengthZeroDom.intersect(StmtDom.reset_tuple_id());
+    LengthZeroDom = LengthZeroDom.subtract(isl::manage(LengthPWACtx.second));
+    Context = Context.intersect(LengthZeroDom.params());
+  }
+}
+
 void Scop::addUserContext() {
   if (UserContextStr.empty())
     return;

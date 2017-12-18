@@ -2168,6 +2168,12 @@ private:
   void addUserAssumptions(AssumptionCache &AC, DominatorTree &DT, LoopInfo &LI,
                           DenseMap<BasicBlock *, isl::set> &InvalidDomainMap);
 
+  /// Add parameter constraints based on the program semantics to the context.
+  void
+  addSemanticKnowledge(LoopInfo &LI,
+                       SmallVectorImpl<std::pair<ScopStmt *, MemIntrinsic *>>
+                           &AffineNullMemIntrinsics);
+
   /// Add user provided parameter constraints to context (command line).
   void addUserContext();
 
