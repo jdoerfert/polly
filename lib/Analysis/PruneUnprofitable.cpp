@@ -78,14 +78,29 @@ public:
       return false;
     }
 
-    ScopsProcessed++;
+  auto ScopStats = S.getStatistics();
+  DEBUG_WITH_TYPE("profitability_metric_evaluation", {
+    bool VanillaProfitable = S.isProfitable(false);
+    bool AdvancedProfitable = S.isProfitableAdvanced(false);
+    dbgs() << "PME: PRUNE START: " << S.getName()
+           << " [#AL: " << ScopStats.NumAffineLoops
+           << "][#BL: " << ScopStats.NumBoxedLoops
+           << "][VP: " << VanillaProfitable << "][AP: " << AdvancedProfitable
+           << "]\n";
+  });
+  ScopsProcessed++;
 
-    if (!S.isProfitable(true)) {
-      DEBUG(dbgs() << "SCoP pruned because it probably cannot be optimized in "
-                      "a significant way\n");
-      S.invalidate(PROFITABLE, DebugLoc());
-      updateStatistics(S, true);
+  if (!S.isProfitable(true)) {
+    DEBUG(dbgs() << "SCoP pruned because it probably cannot be optimized in "
+                    "a significant way\n");
+    DEBUG_WITH_TYPE("profitability_metric_evaluation",
+                    dbgs() << "PME: PRUNE UNPROFITABLE: " << S.getName()
+                           << "\n");
+    S.invalidate(PROFITABLE, DebugLoc());
+    updateStatistics(S, true);
     } else {
+      DEBUG_WITH_TYPE("profitability_metric_evaluation",
+                      dbgs() << "PME: PRUNE PROFITABLE: " << S.getName() << "\n");
       updateStatistics(S, false);
     }
 

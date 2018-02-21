@@ -1881,6 +1881,9 @@ private:
   /// in a schedule tree is given in the isl manual.
   isl::schedule Schedule = nullptr;
 
+  /// The old/original schedule in case a new one was applied.
+  isl::schedule OriginalSchedule = nullptr;
+
   /// The set of minimal/maximal accesses for each alias group.
   ///
   /// When building runtime alias checks we look at all memory instructions and
@@ -2875,6 +2878,14 @@ public:
   /// @return Whether this SCoP can be profitably optimized.
   bool isProfitable(bool ScalarsAreUnprofitable) const;
 
+  /// Profitability check as described in the PhD thesis by Johannes Doerfert.
+  ///
+  /// @param ScalarsAreUnprofitable Never consider statements with scalar writes
+  ///                               as profitably optimizable.
+  ///
+  /// @return Whether this SCoP can be profitably optimized.
+  bool isProfitableAdvanced(bool ScalarsAreUnprofitable = false) const;
+
   /// Return true if the SCoP contained at least one error block.
   bool hasErrorBlock() const { return HasErrorBlock; }
 
@@ -2963,6 +2974,16 @@ public:
 
   /// Get a schedule tree describing the schedule of all statements.
   isl::schedule getScheduleTree() const;
+
+  /// Get the original schedule of all the statements in the SCoP.
+  ///
+  /// @return The original schedule of all the statements in the SCoP, if the
+  /// schedule of the Scop does not contain extension nodes, and nullptr,
+  /// otherwise.
+  isl::union_map getOriginalSchedule() const;
+
+  /// Get the original schedule tree describing the schedule of all statements.
+  isl::schedule getOriginalScheduleTree() const;
 
   /// Update the current schedule
   ///

@@ -237,7 +237,7 @@ bool polly::PollyInvariantLoadHoisting;
 static cl::opt<bool, true> XPollyInvariantLoadHoisting(
     "polly-invariant-load-hoisting", cl::desc("Hoist invariant loads."),
     cl::location(PollyInvariantLoadHoisting), cl::Hidden, cl::ZeroOrMore,
-    cl::init(false), cl::cat(PollyCategory));
+    cl::init(true), cl::cat(PollyCategory));
 
 /// The minimal trip count under which loops are considered unprofitable.
 static const unsigned MIN_LOOP_TRIP_COUNT = 8;
@@ -597,6 +597,10 @@ bool ScopDetection::isValidBranch(BasicBlock &BB, BranchInst *BI,
 
   if (auto Load = dyn_cast<LoadInst>(Condition))
     if (!IsLoopBranch && Context.CurRegion.contains(Load)) {
+      if (!PollyInvariantLoadHoisting)
+        return invalid<ReportNonAffBranch>(Context, /*Assert=*/true, &BB,
+                                           SE.getSCEV(Load), SE.getSCEV(Load),
+                                           Load);
       Context.RequiredILS.insert(Load);
       return true;
     }
@@ -930,9 +934,10 @@ bool ScopDetection::hasValidArraySizes(DetectionContext &Context,
     if (auto *Unknown = dyn_cast<SCEVUnknown>(DelinearizedSize)) {
       auto *V = dyn_cast<Value>(Unknown->getValue());
       if (auto *Load = dyn_cast<LoadInst>(V)) {
-        if (Context.CurRegion.contains(Load) &&
-            isHoistableLoad(Load, CurRegion, LI, SE, DT))
+        if (Context.CurRegion.contains(Load) && PollyInvariantLoadHoisting &&
+            isHoistableLoad(Load, CurRegion, LI, SE, DT)) {
           Context.RequiredILS.insert(Load);
+        }
         continue;
       }
     }
@@ -1145,7 +1150,8 @@ bool ScopDetection::isValidAccess(Instruction *Inst, const SCEV *AF,
         Instruction *Inst = dyn_cast<Instruction>(Ptr.getValue());
         if (Inst && Context.CurRegion.contains(Inst)) {
           auto *Load = dyn_cast<LoadInst>(Inst);
-          if (Load && isHoistableLoad(Load, Context.CurRegion, LI, SE, DT)) {
+          if (Load && PollyInvariantLoadHoisting &&
+              isHoistableLoad(Load, Context.CurRegion, LI, SE, DT)) {
             Context.RequiredILS.insert(Load);
             continue;
           }

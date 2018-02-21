@@ -75,6 +75,11 @@ static cl::opt<bool, true>
                     cl::location(polly::PerfMonitoring), cl::init(false),
                     cl::ZeroOrMore, cl::cat(PollyCategory));
 
+STATISTIC(ProfitVanillaButNotAdvanced, "Number of profitable Scops vanilla but not advanced (codegen)");
+STATISTIC(ProfitVanillaAndAdvanced, "Number of profitable Scops vanilla and advanced (codegen)");
+STATISTIC(ProfitNotVanillaAndNotAdvanced, "Number of profitable Scops not vanilla and not advanced (codegen)");
+STATISTIC(ProfitNotVanillaButAdvanced, "Number of profitable Scops not vanilla but advanced (codegen)");
+
 STATISTIC(ScopsProcessed, "Number of SCoP processed");
 STATISTIC(CodegenedScops, "Number of successfully generated SCoPs");
 STATISTIC(CodegenedAffineLoops,
@@ -206,9 +211,29 @@ static bool CodeGen(Scop &S, IslAstInfo &AI, LoopInfo &LI, DominatorTree &DT,
   if (!AstRoot)
     return false;
 
+  auto ScopStats = S.getStatistics();
+  DEBUG_WITH_TYPE("profitability_metric_evaluation", {
+    bool ProfitVanilla = S.isProfitable(false);
+    bool ProfitAdvanced = S.isProfitableAdvanced(false);
+    if (ProfitVanilla) {
+      if (ProfitAdvanced)
+        ProfitVanillaAndAdvanced++;
+      else
+        ProfitVanillaButNotAdvanced++;
+    } else {
+      if (ProfitAdvanced)
+        ProfitNotVanillaButAdvanced++;
+      else
+        ProfitNotVanillaAndNotAdvanced++;
+    }
+    dbgs() << "PME: CODEGEN: " << S.getName()
+           << " [#AL: " << ScopStats.NumAffineLoops
+           << "][#BL: " << ScopStats.NumBoxedLoops << "][VP: " << ProfitVanilla
+           << "][AP: " << ProfitAdvanced << "]\n";
+  });
+
   // Collect statistics. Do it before we modify the IR to avoid having it any
   // influence on the result.
-  auto ScopStats = S.getStatistics();
   ScopsProcessed++;
 
   auto &DL = S.getFunction().getParent()->getDataLayout();

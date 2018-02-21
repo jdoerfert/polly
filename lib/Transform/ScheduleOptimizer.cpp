@@ -129,10 +129,12 @@ static cl::opt<int> PrevectorWidth(
         "The number of loop iterations to strip-mine for pre-vectorization"),
     cl::Hidden, cl::init(4), cl::ZeroOrMore, cl::cat(PollyCategory));
 
-static cl::opt<bool> FirstLevelTiling("polly-tiling",
-                                      cl::desc("Enable loop tiling"),
-                                      cl::init(true), cl::ZeroOrMore,
-                                      cl::cat(PollyCategory));
+bool polly::PollyTiling = true;
+static cl::opt<bool, true> FirstLevelTiling("polly-tiling",
+                                            cl::desc("Enable loop tiling"),
+                                            cl::location(PollyTiling),
+                                            cl::init(true), cl::ZeroOrMore,
+                                            cl::cat(PollyCategory));
 
 static cl::opt<int> LatencyVectorFma(
     "polly-target-latency-vector-fma",
@@ -275,6 +277,21 @@ static cl::opt<bool> OptimizedScops(
 STATISTIC(ScopsProcessed, "Number of scops processed");
 STATISTIC(ScopsRescheduled, "Number of scops rescheduled");
 STATISTIC(ScopsOptimized, "Number of scops optimized");
+
+STATISTIC(AdvancedProfitableScopsProcessed,
+          "Number of (advanced) profitable scops processed");
+STATISTIC(AdvancedProfitableScopsOptimized,
+          "Number of (advanced) profitable scops optimized");
+STATISTIC(AdvancedProfitableScopsRescheduled,
+          "Number of (advanced) profitable scops rescheduled");
+STATISTIC(AdvancedProfitableScopsChanged,
+          "Number of (advanced) profitable scops changed");
+STATISTIC(AdvancedProfitableScopsEqual,
+          "Number of (advanced) profitable scops equal");
+STATISTIC(ScopsChanged,
+          "Number of scops changed");
+STATISTIC(ScopsEqual,
+          "Number of scops equal");
 
 STATISTIC(NumAffineLoopsOptimized, "Number of affine loops optimized");
 STATISTIC(NumBoxedLoopsOptimized, "Number of boxed loops optimized");
@@ -1518,7 +1535,24 @@ bool IslScheduleOptimizer::runOnScop(Scop &S) {
   if (!Domain)
     return false;
 
+  bool VanillaProfitable = false;
+  bool AdvancedProfitable = false;
+
+  auto ScopStats = S.getStatistics();
+  DEBUG_WITH_TYPE("profitability_metric_evaluation", {
+    VanillaProfitable = S.isProfitable(false);
+    AdvancedProfitable = S.isProfitableAdvanced(false);
+    dbgs() << "PME: SCHEDULE START: " << S.getName()
+           << " [#AL: " << ScopStats.NumAffineLoops
+           << "][#BL: " << ScopStats.NumBoxedLoops
+           << "][VP: " << VanillaProfitable << "][AP: " << AdvancedProfitable
+           << "]\n";
+  });
+
   ScopsProcessed++;
+  if (AdvancedProfitable)
+    AdvancedProfitableScopsProcessed++;
+
   walkScheduleTreeForStatistics(S.getScheduleTree(), 0);
 
   isl::union_map Validity = give(D.getDependences(ValidityKinds));
@@ -1605,10 +1639,15 @@ bool IslScheduleOptimizer::runOnScop(Scop &S) {
 
   // In cases the scheduler is not able to optimize the code, we just do not
   // touch the schedule.
-  if (!Schedule)
+  if (!Schedule) {
+    DEBUG_WITH_TYPE("profitability_metric_evaluation",
+                    dbgs() << "PME: SCHEDULE FAILED: " << S.getName() << "\n";);
     return false;
+  }
 
   ScopsRescheduled++;
+  if (AdvancedProfitable)
+    AdvancedProfitableScopsRescheduled++;
 
   DEBUG({
     auto *P = isl_printer_to_str(Ctx);
@@ -1626,11 +1665,26 @@ bool IslScheduleOptimizer::runOnScop(Scop &S) {
   auto NewSchedule = ScheduleTreeOptimizer::optimizeSchedule(Schedule, &OAI);
   walkScheduleTreeForStatistics(NewSchedule, 2);
 
-  if (!ScheduleTreeOptimizer::isProfitableSchedule(S, NewSchedule))
-    return false;
+  if (!ScheduleTreeOptimizer::isProfitableSchedule(S, NewSchedule)) {
+    DEBUG_WITH_TYPE("profitability_metric_evaluation",
+                    dbgs() << "PME: SCHEDULE EQUAL: " << S.getName() << "\n";);
+    if (AdvancedProfitable)
+      AdvancedProfitableScopsEqual++;
+    else
+      ScopsEqual++;
 
-  auto ScopStats = S.getStatistics();
-  ScopsOptimized++;
+    return false;
+  }
+  DEBUG_WITH_TYPE("profitability_metric_evaluation",
+                  dbgs() << "PME: SCHEDULE DIFFERENT: " << S.getName() << "\n";);
+
+  if (AdvancedProfitable) {
+    AdvancedProfitableScopsOptimized++;
+    AdvancedProfitableScopsChanged++;
+  } else {
+    ScopsOptimized++;
+    ScopsChanged++;
+  }
   NumAffineLoopsOptimized += ScopStats.NumAffineLoops;
   NumBoxedLoopsOptimized += ScopStats.NumBoxedLoops;
 

@@ -42,6 +42,8 @@ struct MacroKernelParamsTy {
 
 namespace polly {
 
+extern bool PollyTiling;
+
 struct Dependences;
 class MemoryAccess;
 class Scop;

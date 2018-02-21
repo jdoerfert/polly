@@ -67,6 +67,11 @@ using namespace polly;
 
 #define DEBUG_TYPE "polly-scops"
 
+STATISTIC(ProfitVanillaButNotAdvanced, "Number of profitable Scops vanilla but not advanced (early)");
+STATISTIC(ProfitVanillaAndAdvanced, "Number of profitable Scops vanilla and advanced (early)");
+STATISTIC(ProfitNotVanillaAndNotAdvanced, "Number of profitable Scops not vanilla and not advanced (early)");
+STATISTIC(ProfitNotVanillaButAdvanced, "Number of profitable Scops not vanilla but advanced (early)");
+
 STATISTIC(ScopFound, "Number of valid Scops");
 STATISTIC(RichScopFound, "Number of Scops containing a loop");
 STATISTIC(InfeasibleScops,
@@ -1492,6 +1497,27 @@ void ScopBuilder::buildScop(Region &R, AssumptionCache &AC,
     DEBUG(dbgs() << "Bailing-out because of unfeasible context (early)\n");
     return;
   }
+
+  DEBUG_WITH_TYPE("profitability_metric_evaluation", {
+    bool ProfitVanilla = scop->isProfitable(UnprofitableScalarAccs);
+    bool ProfitAdvanced = scop->isProfitableAdvanced(UnprofitableScalarAccs);
+    if (ProfitVanilla) {
+      if (ProfitAdvanced)
+        ProfitVanillaAndAdvanced++;
+      else
+        ProfitVanillaButNotAdvanced++;
+    } else {
+      if (ProfitAdvanced)
+        ProfitNotVanillaButAdvanced++;
+      else
+        ProfitNotVanillaAndNotAdvanced++;
+    }
+    auto ScopStats = scop->getStatistics();
+    dbgs() << "PME: SCOP START: " << scop->getName()
+           << " [#AL: " << ScopStats.NumAffineLoops
+           << "][#BL: " << ScopStats.NumBoxedLoops << "][VP: " << ProfitVanilla
+           << "][AP: " << ProfitAdvanced << "]\n";
+  });
 
   // Check early for profitability. Afterwards it cannot change anymore,
   // only the runtime context could become infeasible.

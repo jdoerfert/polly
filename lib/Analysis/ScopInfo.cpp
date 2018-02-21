@@ -22,6 +22,7 @@
 #include "polly/Options.h"
 #include "polly/ScopBuilder.h"
 #include "polly/ScopDetection.h"
+#include "polly/ScheduleOptimizer.h"
 #include "polly/Support/GICHelper.h"
 #include "polly/Support/ISLOStream.h"
 #include "polly/Support/SCEVAffinator.h"
@@ -107,6 +108,8 @@ using namespace llvm;
 using namespace polly;
 
 #define DEBUG_TYPE "polly-scops"
+
+STATISTIC(PartiallyProfitable, "Number of partially profitable SCoPs.");
 
 STATISTIC(AssumptionsAliasing, "Number of aliasing assumptions taken.");
 STATISTIC(AssumptionsInbounds, "Number of inbounds assumptions taken.");
@@ -242,6 +245,10 @@ static cl::opt<bool, true> XUseInstructionNames(
 
 static cl::opt<bool> PollyPrintInstructions(
     "polly-print-instructions", cl::desc("Output instructions per ScopStmt"),
+    cl::Hidden, cl::Optional, cl::init(false), cl::cat(PollyCategory));
+
+static cl::opt<bool> PollyAdvancedProfitable(
+    "polly-advanced-profitable", cl::desc("Use advanced profitable heuristic"),
     cl::Hidden, cl::Optional, cl::init(false), cl::cat(PollyCategory));
 
 //===----------------------------------------------------------------------===//
@@ -687,7 +694,8 @@ isl::id MemoryAccess::getLatestArrayId() const {
 }
 
 isl::map MemoryAccess::getAddressFunction() const {
-  return getAccessRelation().lexmin();
+  return (hasNewAccessRelation() ? getNewAccessRelation() : getAccessRelation())
+      .lexmin();
 }
 
 isl::pw_multi_aff
@@ -4134,6 +4142,8 @@ isl::set Scop::getAssumedContext() const {
 }
 
 bool Scop::isProfitable(bool ScalarsAreUnprofitable) const {
+  if (PollyAdvancedProfitable)
+    return isProfitableAdvanced(ScalarsAreUnprofitable);
   if (PollyProcessUnprofitable)
     return true;
 
@@ -4159,6 +4169,100 @@ bool Scop::isProfitable(bool ScalarsAreUnprofitable) const {
   }
 
   return OptimizableStmtsOrLoops > 1;
+}
+
+bool Scop::isProfitableAdvanced(bool ScalarsAreUnprofitable) const {
+  if (isEmpty())
+    return false;
+
+  isl::pw_aff ProfitabilityFunction = isl::pw_aff(
+      isl::set::empty(getParamSpace()), isl::val::zero(getIslCtx()));
+
+  isl::pw_aff ReqDims(isl::set::universe(getParamSpace()),
+                      isl::val::int_from_ui(getIslCtx(), 2));
+
+  DenseMap<Loop *, unsigned> OptLoops;
+  for (const ScopStmt &Stmt : *this) {
+    unsigned NumDims = Stmt.getNumIterators();
+
+    SmallPtrSet<Loop *, 4> PTLoops;
+    for (unsigned Dim = 0; Dim < NumDims; Dim++)
+      PTLoops.insert(Stmt.getLoopForDimension(Dim));
+
+    bool CanTile = PollyTiling && NumDims > 1;
+    if (!CanTile) {
+      for (MemoryAccess *MA : Stmt) {
+        if (!ScalarsAreUnprofitable && !MA->isLatestArrayKind())
+          continue;
+        if (MA->isWrite()) {
+          isl::map AccessFunc = MA->getAccessRelation();
+          for (unsigned Dim = 0; Dim < NumDims; Dim++)
+            if (!AccessFunc.involves_dims(isl::dim::in, Dim, 1))
+              PTLoops.erase(Stmt.getLoopForDimension(Dim));
+        } else {
+          if (MA->isLatestArrayKind())
+            continue;
+          Instruction *BaseInst =
+              dyn_cast<Instruction>(MA->getOriginalBaseAddr());
+          if (!BaseInst || !contains(BaseInst))
+            continue;
+          for (unsigned Dim = 0; Dim < NumDims; Dim++) {
+            if (!Stmt.getLoopForDimension(Dim)->contains(BaseInst))
+              continue;
+            PTLoops.erase(Stmt.getLoopForDimension(Dim));
+          }
+        }
+      }
+    }
+
+    if (PTLoops.empty())
+      continue;
+
+    for (Loop *L : PTLoops) {
+      unsigned &V = OptLoops[L];
+      isl::set Dom = getDomainConditions(L->getHeader()).params();
+      ProfitabilityFunction = ProfitabilityFunction.union_add(isl::pw_aff(
+          Dom, isl::val::int_from_ui(getIslCtx(), V)));
+      V++;
+    }
+
+    isl::set Dom = Stmt.getDomain().params();
+    ProfitabilityFunction = ProfitabilityFunction.union_add(isl::pw_aff(
+        Dom, isl::val::int_from_ui(getIslCtx(), PTLoops.size())));
+    ProfitabilityFunction = ProfitabilityFunction.coalesce();
+
+    isl::set GESet = ProfitabilityFunction.ge_set(ReqDims).coalesce();
+    bool Profitable = !GESet.is_empty();
+    if (Profitable)
+      break;
+  }
+
+  ProfitabilityFunction =
+      ProfitabilityFunction.intersect_params(getAssumedContext());
+
+  DEBUG({
+    printStatements(dbgs(), false);
+    dbgs() << "- Profitability function: " << ProfitabilityFunction.get()
+           << "\n";
+  });
+
+  isl::set GESet = ProfitabilityFunction.ge_set(ReqDims).coalesce();
+  bool Profitable = !GESet.is_empty();
+  if (!Profitable)
+    return false;
+
+  if (!GESet.complement().is_empty())
+    PartiallyProfitable++;
+
+  if (!PollyAdvancedProfitable && !isProfitable(ScalarsAreUnprofitable)) {
+    dbgs() << "PME: AST SCHEDULE ERROR not PROFITABLE BUT ADVANCED PROFITABLE!\n";
+    dump();
+    ProfitabilityFunction.dump();
+    ReqDims.dump();
+    GESet.dump();
+  }
+
+  return true;
 }
 
 bool Scop::hasFeasibleRuntimeContext() const {
@@ -4567,6 +4671,15 @@ isl::schedule Scop::getScheduleTree() const {
   return Schedule.intersect_domain(getDomains());
 }
 
+isl::union_map Scop::getOriginalSchedule() const {
+  auto Tree = getOriginalScheduleTree();
+  return Tree.get_map();
+}
+
+isl::schedule Scop::getOriginalScheduleTree() const {
+  return OriginalSchedule.intersect_domain(getDomains());
+}
+
 void Scop::setSchedule(isl::union_map NewSchedule) {
   auto S = isl::schedule::from_domain(getDomains());
   Schedule = S.insert_partial_schedule(
@@ -4574,6 +4687,7 @@ void Scop::setSchedule(isl::union_map NewSchedule) {
 }
 
 void Scop::setScheduleTree(isl::schedule NewSchedule) {
+  OriginalSchedule = Schedule;
   Schedule = NewSchedule;
 }
 

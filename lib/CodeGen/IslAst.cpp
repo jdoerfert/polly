@@ -106,6 +106,31 @@ STATISTIC(NumReductionParallel, "Number of reduction-parallel for-loops");
 STATISTIC(NumExecutedInParallel, "Number of for-loops executed in parallel");
 STATISTIC(NumIfConditions, "Number of if-conditions");
 
+STATISTIC(OriginalASTEqualsNormalProfit,
+          "Original AST equals optimized AST (normal profitable)");
+STATISTIC(OriginalASTEqualsAdvancedProfit,
+          "Original AST equals optimized AST (advanced profitable)");
+STATISTIC(OriginalASTDiffersNormalProfit,
+          "Original AST differs from optimized AST (normal profitable)");
+STATISTIC(OriginalASTDiffersAdvancedProfit,
+          "Original AST differs from optimized AST (advanced profitable)");
+
+STATISTIC(OriginalScopsProcessed, "Original: Number of SCoPs processed");
+STATISTIC(OriginalScopsSkipped,
+          "Original: Number of SCoPs skipped (same as scheduled!)");
+
+STATISTIC(OriginalNumForLoops, "Original: Number of for-loops");
+STATISTIC(OriginalNumParallel, "Original: Number of parallel for-loops");
+STATISTIC(OriginalNumInnermostParallel,
+          "Original: Number of innermost parallel for-loops");
+STATISTIC(OriginalNumOutermostParallel,
+          "Original: Number of outermost parallel for-loops");
+STATISTIC(OriginalNumReductionParallel,
+          "Original: Number of reduction-parallel for-loops");
+STATISTIC(OriginalNumExecutedInParallel,
+          "Original: Number of for-loops executed in parallel");
+STATISTIC(OriginalNumIfConditions, "Original: Number of if-conditions");
+
 namespace polly {
 
 /// Temporary information used when building the ast.
@@ -198,6 +223,63 @@ static isl_printer *cbPrintFor(__isl_take isl_printer *Printer,
 
   isl_pw_aff_free(DD);
   return isl_ast_node_for_print(Node, Printer, Options);
+}
+
+static __isl_give isl_printer *cbPrintUser(__isl_take isl_printer *P,
+                                           __isl_take isl_ast_print_options *O,
+                                           __isl_keep isl_ast_node *Node,
+                                           void *User) {
+  isl::ast_node AstNode = isl::manage(isl_ast_node_copy(Node));
+  isl::ast_expr NodeExpr = AstNode.user_get_expr();
+  isl::ast_expr CallExpr = NodeExpr.get_op_arg(0);
+  isl::id CallExprId = CallExpr.get_id();
+  ScopStmt *AccessStmt = (ScopStmt *)CallExprId.get_user();
+
+  P = isl_printer_start_line(P);
+  P = isl_printer_print_str(P, AccessStmt->getBaseName());
+  P = isl_printer_print_str(P, "(");
+  P = isl_printer_end_line(P);
+  P = isl_printer_indent(P, 2);
+
+  for (MemoryAccess *MemAcc : *AccessStmt) {
+    P = isl_printer_start_line(P);
+
+    if (MemAcc->isRead())
+      P = isl_printer_print_str(P, "/* read  */ &");
+    else
+      P = isl_printer_print_str(P, "/* write */  ");
+
+    isl::ast_build Build =
+        isl::manage(isl_ast_build_copy(IslAstInfo::getBuild(Node)));
+    if (MemAcc->isAffine()) {
+      isl_pw_multi_aff *PwmaPtr =
+          MemAcc->applyScheduleToAccessRelation(Build.get_schedule()).release();
+      if (isl_pw_multi_aff_dim(PwmaPtr, isl_dim_in) &&
+          isl_pw_multi_aff_dim(PwmaPtr, isl_dim_out)) {
+        isl::pw_multi_aff Pwma = isl::manage(PwmaPtr);
+        isl::ast_expr AccessExpr = Build.access_from(Pwma);
+        P = isl_printer_print_ast_expr(P, AccessExpr.get());
+      } else {
+        P = isl_printer_print_str(
+            P, MemAcc->getLatestScopArrayInfo()->getName().c_str());
+        P = isl_printer_print_str(P, "[?]");
+        isl_pw_multi_aff_free(PwmaPtr);
+      }
+    } else {
+      P = isl_printer_print_str(
+          P, MemAcc->getLatestScopArrayInfo()->getName().c_str());
+      P = isl_printer_print_str(P, "[*]");
+    }
+    P = isl_printer_end_line(P);
+  }
+
+  P = isl_printer_indent(P, -2);
+  P = isl_printer_start_line(P);
+  P = isl_printer_print_str(P, ");");
+  P = isl_printer_end_line(P);
+
+  isl_ast_print_options_free(O);
+  return P;
 }
 
 /// Check if the current scheduling dimension is parallel.
@@ -474,29 +556,282 @@ static bool benefitsFromPolly(Scop &Scop, bool PerformParallelTest) {
   return true;
 }
 
+/// Compare two expressions @p Expr0 and @p Expr1.
+static bool equalExpressions(__isl_take isl_ast_expr *Expr0,
+                             __isl_take isl_ast_expr *Expr1,
+                             std::map<isl_id *, isl_id *> &IdMap) {
+  assert(Expr0 && Expr1);
+  if (isl_ast_expr_get_type(Expr0) != isl_ast_expr_get_type(Expr1)) {
+    isl_ast_expr_free(Expr0);
+    isl_ast_expr_free(Expr1);
+    return false;
+  }
+  bool Eq = true;
+  switch (isl_ast_expr_get_type(Expr0)) {
+  case isl_ast_expr_error:
+    break;
+  case isl_ast_expr_op: {
+    if (isl_ast_expr_get_op_type(Expr0) != isl_ast_expr_get_op_type(Expr1)) {
+      Eq = false;
+      break;
+    }
+    int NumArgs = isl_ast_expr_get_op_n_arg(Expr0);
+    if (NumArgs != isl_ast_expr_get_op_n_arg(Expr1)) {
+      Eq = false;
+      break;
+    }
+    for (int u = 0; Eq && u < NumArgs; u++)
+      Eq = equalExpressions(isl_ast_expr_get_op_arg(Expr0, u),
+                            isl_ast_expr_get_op_arg(Expr1, u), IdMap);
+    break;
+  }
+  case isl_ast_expr_id: {
+    isl_id *Id0 = isl_ast_expr_get_id(Expr0);
+    isl_id *Id1 = isl_ast_expr_get_id(Expr1);
+    Eq = (Id0 == Id1 || Id0 == IdMap[Id1]);
+    isl_id_free(Id0);
+    isl_id_free(Id1);
+    break;
+  }
+  case isl_ast_expr_int: {
+    isl_val *V0 = isl_ast_expr_get_val(Expr0);
+    isl_val *V1 = isl_ast_expr_get_val(Expr1);
+    Eq = isl_val_eq(V0, V1) == isl_bool_true;
+    isl_val_free(V0);
+    isl_val_free(V1);
+    break;
+  }
+  }
+  isl_ast_expr_free(Expr0);
+  isl_ast_expr_free(Expr1);
+  return Eq;
+}
+
+static void collectLoops(__isl_take isl_ast_node *Ast0,
+                         SmallVectorImpl<isl_ast_node *> &Loops) {
+  switch (isl_ast_node_get_type(Ast0)) {
+  case isl_ast_node_error:
+    break;
+  case isl_ast_node_mark:
+    break;
+  case isl_ast_node_for:
+    Loops.push_back(isl_ast_node_copy(Ast0));
+    collectLoops(isl_ast_node_for_get_body(Ast0), Loops);
+    break;
+  case isl_ast_node_if: {
+    collectLoops(isl_ast_node_if_get_then(Ast0), Loops);
+    if (isl_ast_node_if_has_else(Ast0))
+      collectLoops(isl_ast_node_if_get_else(Ast0), Loops);
+    break;
+  }
+  case isl_ast_node_user: {
+    break;
+  }
+  case isl_ast_node_block: {
+    isl_ast_node_list *Children0 = isl_ast_node_block_get_children(Ast0);
+    int NumChildren0 = isl_ast_node_list_n_ast_node(Children0);
+    for (int u = 0; u < NumChildren0; u++)
+      collectLoops(isl_ast_node_list_get_ast_node(Children0, u), Loops);
+    isl_ast_node_list_free(Children0);
+    break;
+  }
+  }
+  isl_ast_node_free(Ast0);
+}
+
+/// Compare two ASTs @p Ast0 and @p Ast1.
+static bool equalASTs(__isl_take isl_ast_node *Ast0,
+                        __isl_take isl_ast_node *Ast1,
+                        std::map<isl_id *, isl_id *> &IdMap) {
+  if (Ast0 == Ast1)
+    return true;
+  if ((!Ast0 && Ast1) || (Ast0 && !Ast1)) {
+    isl_ast_node_free(Ast0);
+    isl_ast_node_free(Ast1);
+    return false;
+  }
+
+  while (isl_ast_node_get_type(Ast0) == isl_ast_node_mark) {
+    isl_ast_node *Tmp = isl_ast_node_mark_get_node(Ast0);
+    isl_ast_node_free(Ast0);
+    Ast0 = Tmp;
+  }
+  while (isl_ast_node_get_type(Ast1) == isl_ast_node_mark) {
+    isl_ast_node *Tmp = isl_ast_node_mark_get_node(Ast1);
+    isl_ast_node_free(Ast1);
+    Ast1 = Tmp;
+  }
+
+  if (isl_ast_node_get_type(Ast0) != isl_ast_node_get_type(Ast1)) {
+    isl_ast_node_free(Ast0);
+    isl_ast_node_free(Ast1);
+    return false;
+  }
+
+  bool Eq = true;
+  switch (isl_ast_node_get_type(Ast0)) {
+  case isl_ast_node_error:
+    Eq = false;
+    break;
+  case isl_ast_node_mark:
+    Eq = false;
+    break;
+  case isl_ast_node_for: {
+    isl_ast_expr *Iterator0 = isl_ast_node_for_get_iterator(Ast0);
+    isl_ast_expr *Iterator1 = isl_ast_node_for_get_iterator(Ast1);
+    isl_id *IteratorId0 = isl_ast_expr_get_id(Iterator0);
+    isl_id *IteratorId1 = isl_ast_expr_get_id(Iterator1);
+    isl_ast_expr_free(Iterator0);
+    isl_ast_expr_free(Iterator1);
+    IdMap[IteratorId1] = IteratorId0;
+    isl_id_free(IteratorId0);
+    isl_id_free(IteratorId1);
+    isl_ast_expr *Init0 = isl_ast_node_for_get_init(Ast0);
+    isl_ast_expr *Init1 = isl_ast_node_for_get_init(Ast1);
+    if (!equalExpressions(Init0, Init1, IdMap)) {
+      Eq = false;
+      break;
+    }
+    isl_ast_expr *Inc0 = isl_ast_node_for_get_inc(Ast0);
+    isl_ast_expr *Inc1 = isl_ast_node_for_get_inc(Ast1);
+    if (!equalExpressions(Inc0, Inc1, IdMap)) {
+      Eq = false;
+      break;
+    }
+    isl_ast_node *Body0 = isl_ast_node_for_get_body(Ast0);
+    isl_ast_node *Body1 = isl_ast_node_for_get_body(Ast1);
+    Eq = equalASTs(Body0, Body1, IdMap);
+    break;
+  }
+  case isl_ast_node_if: {
+    if (isl_ast_node_if_has_else(Ast0) != isl_ast_node_if_has_else(Ast1)) {
+      Eq = false;
+      break;
+    }
+    isl_ast_expr *Cond0 = isl_ast_node_if_get_cond(Ast0);
+    isl_ast_expr *Cond1 = isl_ast_node_if_get_cond(Ast1);
+    if (!equalExpressions(Cond0, Cond1, IdMap)) {
+      Eq = false;
+      break;
+    }
+    isl_ast_node *Then0 = isl_ast_node_if_get_then(Ast0);
+    isl_ast_node *Then1 = isl_ast_node_if_get_then(Ast1);
+    if (!equalASTs(Then0, Then1, IdMap)) {
+      Eq = false;
+      break;
+    }
+    if (!isl_ast_node_if_has_else(Ast0))
+      break;
+    isl_ast_node *Else0 = isl_ast_node_if_get_else(Ast0);
+    isl_ast_node *Else1 = isl_ast_node_if_get_else(Ast1);
+    Eq = equalASTs(Else0, Else1, IdMap);
+    break;
+  }
+  case isl_ast_node_user: {
+    isl_ast_expr *User0 = isl_ast_node_user_get_expr(Ast0);
+    isl_ast_expr *User1 = isl_ast_node_user_get_expr(Ast1);
+    Eq = equalExpressions(User0, User1, IdMap);
+    break;
+  }
+  case isl_ast_node_block: {
+    isl_ast_node_list *Children0 = isl_ast_node_block_get_children(Ast0);
+    isl_ast_node_list *Children1 = isl_ast_node_block_get_children(Ast1);
+    int NumChildren0 = isl_ast_node_list_n_ast_node(Children0);
+    int NumChildren1 = isl_ast_node_list_n_ast_node(Children1);
+    if (NumChildren0 != NumChildren1)
+      Eq = false;
+
+    for (int u = 0; Eq && u < NumChildren0; u++) {
+      if (equalASTs(isl_ast_node_list_get_ast_node(Children0, u),
+                    isl_ast_node_list_get_ast_node(Children1, u), IdMap))
+        continue;
+      Eq = false;
+      break;
+    }
+    isl_ast_node_list_free(Children0);
+    isl_ast_node_list_free(Children1);
+    break;
+  }
+  }
+
+  isl_ast_node_free(Ast0);
+  isl_ast_node_free(Ast1);
+  return Eq;
+}
+
+/// Compare two ASTs @p Ast0 and @p Ast1.
+static bool similarASTs(__isl_take isl_ast_node *Ast0,
+                        __isl_take isl_ast_node *Ast1) {
+  SmallVector<isl_ast_node *, 8> Loops0, Loops1;
+  auto freeNodes = [&](SmallVector<isl_ast_node *, 8> &Loops) {
+    for (auto *Node : Loops)
+      isl_ast_node_free(Node);
+  };
+
+  collectLoops(Ast0, Loops0);
+  collectLoops(Ast1, Loops1);
+  if (Loops0.size() != Loops1.size()) {
+    freeNodes(Loops0);
+    freeNodes(Loops1);
+    return false;
+  }
+
+  SmallVector<bool, 8> Used;
+  Used.resize(Loops0.size());
+  for (unsigned u0 = 0; u0 < Loops0.size(); u0++) {
+    isl_ast_node *Loop0 = Loops0[u0];
+    unsigned match = -1;
+    for (unsigned u1 = 0; u1 < Loops0.size(); u1++) {
+      if (Used[u1])
+        continue;
+      isl_ast_node *Loop1 = Loops1[u1];
+      std::map<isl_id *, isl_id *> IdMap;
+      if (!equalASTs(isl_ast_node_copy(Loop0), isl_ast_node_copy(Loop1), IdMap))
+        continue;
+
+      match = u1;
+      break;
+    }
+
+    if (match == -1) {
+      freeNodes(Loops0);
+      freeNodes(Loops1);
+      return false;
+    }
+
+    Used[match] = true;
+  }
+
+  freeNodes(Loops0);
+  freeNodes(Loops1);
+  return true;
+}
+
 /// Collect statistics for the syntax tree rooted at @p Ast.
-static void walkAstForStatistics(__isl_keep isl_ast_node *Ast) {
+static void walkAstForStatistics(__isl_keep isl_ast_node *Ast, bool Original) {
   assert(Ast);
   isl_ast_node_foreach_descendant_top_down(
       Ast,
       [](__isl_keep isl_ast_node *Node, void *User) -> isl_bool {
+        bool Original = *static_cast<bool *>(User);
         switch (isl_ast_node_get_type(Node)) {
         case isl_ast_node_for:
-          NumForLoops++;
+          Original ? OriginalNumForLoops++ : NumForLoops++;
           if (IslAstInfo::isParallel(Node))
-            NumParallel++;
+            Original ? OriginalNumParallel++ : NumParallel++;
           if (IslAstInfo::isInnermostParallel(Node))
-            NumInnermostParallel++;
+            Original ? OriginalNumInnermostParallel++ : NumInnermostParallel++;
           if (IslAstInfo::isOutermostParallel(Node))
-            NumOutermostParallel++;
+            Original ? OriginalNumOutermostParallel++ : NumOutermostParallel++;
           if (IslAstInfo::isReductionParallel(Node))
-            NumReductionParallel++;
+            Original ? OriginalNumReductionParallel++ : NumReductionParallel++;
           if (IslAstInfo::isExecutedInParallel(Node))
-            NumExecutedInParallel++;
+            Original ? OriginalNumExecutedInParallel++
+                     : NumExecutedInParallel++;
           break;
 
         case isl_ast_node_if:
-          NumIfConditions++;
+          Original ? OriginalNumIfConditions : NumIfConditions++;
           break;
 
         default:
@@ -506,7 +841,7 @@ static void walkAstForStatistics(__isl_keep isl_ast_node *Ast) {
         // Continue traversing subtrees.
         return isl_bool_true;
       },
-      nullptr);
+      &Original);
 }
 
 IslAst::IslAst(Scop &Scop) : S(Scop), Ctx(Scop.getSharedIslCtx()) {}
@@ -533,11 +868,30 @@ void IslAst::init(const Dependences &D) {
   PerformParallelTest =
       PerformParallelTest && !S.containsExtensionNode(ScheduleTree);
 
-  // Skip AST and code generation if there was no benefit achieved.
-  if (!benefitsFromPolly(S, PerformParallelTest))
-    return;
+  bool VanillaProfitable = false;
+  bool AdvancedProfitable = false;
 
   auto ScopStats = S.getStatistics();
+  DEBUG_WITH_TYPE("profitability_metric_evaluation",
+                  VanillaProfitable = S.isProfitable(false);
+                  AdvancedProfitable = S.isProfitableAdvanced(false);
+                  dbgs() << "PME: AST START: " << S.getName()
+                         << " [#AL: " << ScopStats.NumAffineLoops
+                         << "][#BL: " << ScopStats.NumBoxedLoops
+                         << "][VP: " << VanillaProfitable
+                         << "][AP: " << AdvancedProfitable << "]\n";);
+
+  // Skip AST and code generation if there was no benefit achieved.
+  if (!benefitsFromPolly(S, PerformParallelTest)) {
+    DEBUG_WITH_TYPE("profitability_metric_evaluation", {
+      dbgs() << "PME: AST NOT BENEFICIAL: " << S.getName() << "\n";
+      AdvancedProfitable ? OriginalASTEqualsAdvancedProfit++
+                         : OriginalASTEqualsNormalProfit++;
+      OriginalScopsSkipped++;
+    });
+    return;
+  }
+
   ScopsBeneficial++;
   BeneficialAffineLoops += ScopStats.NumAffineLoops;
   BeneficialBoxedLoops += ScopStats.NumBoxedLoops;
@@ -575,7 +929,84 @@ void IslAst::init(const Dependences &D) {
   RunCondition = buildRunCondition(S, Build);
 
   Root = isl_ast_build_node_from_schedule(Build, S.getScheduleTree().release());
-  walkAstForStatistics(Root);
+  walkAstForStatistics(Root, false);
+
+  DEBUG_WITH_TYPE("profitability_metric_evaluation", {
+    isl::schedule OriginalSchedule = S.getOriginalScheduleTree();
+    if (OriginalSchedule) {
+      OriginalScopsProcessed++;
+      isl_ast_node *OriginalRoot =
+          isl_ast_build_node_from_schedule(Build, OriginalSchedule.release());
+      walkAstForStatistics(OriginalRoot, true);
+
+      bool SimilarASTs =
+          similarASTs(isl_ast_node_copy(Root), isl_ast_node_copy(OriginalRoot));
+
+      if (!SimilarASTs) {
+        dbgs() << "PME: Original AST:\n";
+        isl_printer *P = isl_printer_to_str(S.getIslCtx().get());
+        P = isl_printer_set_output_format(P, ISL_FORMAT_C);
+        P = isl_printer_indent(P, 4);
+        isl_ast_print_options *Options =
+            isl_ast_print_options_alloc(S.getIslCtx().get());
+        Options =
+            isl_ast_print_options_set_print_user(Options, cbPrintUser, nullptr);
+        Options =
+            isl_ast_print_options_set_print_for(Options, cbPrintFor, nullptr);
+        P = isl_ast_node_print(OriginalRoot, P, Options);
+        char *AstStr = isl_printer_get_str(P);
+        char *C = AstStr;
+        dbgs() << "PME: ";
+        while (*C != '\0') {
+          dbgs() << *C;
+          if (*C == '\n')
+            dbgs() << "PME: ";
+          C++;
+        }
+        dbgs() << "\n";
+        free(AstStr);
+        isl_printer_free(P);
+        dbgs() << "PME: Transformed AST:\n";
+        P = isl_printer_to_str(S.getIslCtx().get());
+        P = isl_printer_set_output_format(P, ISL_FORMAT_C);
+        P = isl_printer_indent(P, 4);
+        Options = isl_ast_print_options_alloc(S.getIslCtx().get());
+        Options =
+            isl_ast_print_options_set_print_user(Options, cbPrintUser, nullptr);
+        Options =
+            isl_ast_print_options_set_print_for(Options, cbPrintFor, nullptr);
+        P = isl_ast_node_print(Root, P, Options);
+        AstStr = isl_printer_get_str(P);
+        C = AstStr;
+        dbgs() << "PME: ";
+        while (*C != '\0') {
+          dbgs() << *C;
+          if (*C == '\n')
+            dbgs() << "PME: ";
+          C++;
+        }
+        dbgs() << "\n";
+        free(AstStr);
+        isl_printer_free(P);
+      }
+      isl_ast_node_free(OriginalRoot);
+
+      if (SimilarASTs) {
+        dbgs() << "PME: AST EQUAL: " << S.getName() << "\n";
+        AdvancedProfitable ? OriginalASTEqualsAdvancedProfit++
+                           : OriginalASTEqualsNormalProfit++;
+      } else {
+        dbgs() << "PME: AST DIFFERENT: " << S.getName() << "\n";
+        AdvancedProfitable ? OriginalASTDiffersAdvancedProfit++
+                           : OriginalASTDiffersNormalProfit++;
+      }
+    } else {
+      dbgs() << "PME: AST NOT BUILD: " << S.getName() << "\n";
+      OriginalScopsSkipped++;
+      AdvancedProfitable ? OriginalASTEqualsAdvancedProfit++
+                         : OriginalASTEqualsNormalProfit++;
+    }
+  });
 
   isl_ast_build_free(Build);
 }
@@ -677,55 +1108,6 @@ IslAstInfo IslAstAnalysis::run(Scop &S, ScopAnalysisManager &SAM,
                                ScopStandardAnalysisResults &SAR) {
   return {S, SAM.getResult<DependenceAnalysis>(S, SAR).getDependences(
                  Dependences::AL_Statement)};
-}
-
-static __isl_give isl_printer *cbPrintUser(__isl_take isl_printer *P,
-                                           __isl_take isl_ast_print_options *O,
-                                           __isl_keep isl_ast_node *Node,
-                                           void *User) {
-  isl::ast_node AstNode = isl::manage(isl_ast_node_copy(Node));
-  isl::ast_expr NodeExpr = AstNode.user_get_expr();
-  isl::ast_expr CallExpr = NodeExpr.get_op_arg(0);
-  isl::id CallExprId = CallExpr.get_id();
-  ScopStmt *AccessStmt = (ScopStmt *)CallExprId.get_user();
-
-  P = isl_printer_start_line(P);
-  P = isl_printer_print_str(P, AccessStmt->getBaseName());
-  P = isl_printer_print_str(P, "(");
-  P = isl_printer_end_line(P);
-  P = isl_printer_indent(P, 2);
-
-  for (MemoryAccess *MemAcc : *AccessStmt) {
-    P = isl_printer_start_line(P);
-
-    if (MemAcc->isRead())
-      P = isl_printer_print_str(P, "/* read  */ &");
-    else
-      P = isl_printer_print_str(P, "/* write */  ");
-
-    isl::ast_build Build =
-        isl::manage(isl_ast_build_copy(IslAstInfo::getBuild(Node)));
-    if (MemAcc->isAffine()) {
-      isl_pw_multi_aff *PwmaPtr =
-          MemAcc->applyScheduleToAccessRelation(Build.get_schedule()).release();
-      isl::pw_multi_aff Pwma = isl::manage(PwmaPtr);
-      isl::ast_expr AccessExpr = Build.access_from(Pwma);
-      P = isl_printer_print_ast_expr(P, AccessExpr.get());
-    } else {
-      P = isl_printer_print_str(
-          P, MemAcc->getLatestScopArrayInfo()->getName().c_str());
-      P = isl_printer_print_str(P, "[*]");
-    }
-    P = isl_printer_end_line(P);
-  }
-
-  P = isl_printer_indent(P, -2);
-  P = isl_printer_start_line(P);
-  P = isl_printer_print_str(P, ");");
-  P = isl_printer_end_line(P);
-
-  isl_ast_print_options_free(O);
-  return P;
 }
 
 void IslAstInfo::print(raw_ostream &OS) {
