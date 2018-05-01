@@ -170,6 +170,8 @@ public:
     SetVector<std::pair<const SCEVUnknown *, Loop *>> NonAffineAccesses;
     BaseToElSize ElementSize;
 
+    bool IsValid = true;
+
     /// The region has at least one load instruction.
     bool hasLoads = false;
 

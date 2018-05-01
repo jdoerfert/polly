@@ -82,6 +82,7 @@ enum class RejectReasonKind {
   InvalidCond,
   UndefOperand,
   NonAffBranch,
+  PtrBranch,
   NoBasePtr,
   UndefBasePtr,
   VariantBasePtr,
@@ -100,11 +101,16 @@ enum class RejectReasonKind {
 
   // Other
   Other,
+  ErrorBlockPHI,
+  ErrorBlockOperand,
   IntToPtr,
   Alloca,
   UnknownInst,
+  ExceptionInst,
   Entry,
   Unprofitable,
+  UnprofitableNoLoops,
+  UnprofitableOnlyLoadsOrStores,
   LastOther
 };
 
@@ -356,6 +362,40 @@ class ReportUndefOperand : public ReportAffFunc {
 public:
   ReportUndefOperand(BasicBlock *BB, const Instruction *Inst)
       : ReportAffFunc(RejectReasonKind::UndefOperand, Inst), BB(BB) {}
+
+  /// @name LLVM-RTTI interface
+  //@{
+  static bool classof(const RejectReason *RR);
+  //@}
+
+  /// @name RejectReason interface
+  //@{
+  std::string getRemarkName() const override;
+  const Value *getRemarkBB() const override;
+  std::string getMessage() const override;
+  //@}
+};
+
+//===----------------------------------------------------------------------===//
+/// Captures a ptr branch.
+class ReportPtrBranch : public ReportAffFunc {
+  // The BasicBlock we found the ptr branch in.
+  BasicBlock *BB;
+
+  /// LHS & RHS of the failed condition.
+  //@{
+  const SCEV *LHS;
+  const SCEV *RHS;
+  //@}
+
+public:
+  ReportPtrBranch(BasicBlock *BB, const SCEV *LHS, const SCEV *RHS,
+                  const Instruction *Inst)
+      : ReportAffFunc(RejectReasonKind::PtrBranch, Inst), BB(BB), LHS(LHS),
+        RHS(RHS) {}
+
+  const SCEV *lhs() { return LHS; }
+  const SCEV *rhs() { return RHS; }
 
   /// @name LLVM-RTTI interface
   //@{
@@ -695,6 +735,75 @@ public:
 };
 
 //===----------------------------------------------------------------------===//
+/// Captures errors
+class ReportErrorBlockOperand : public ReportOther {
+  // The offending base value.
+  Instruction *Operand;
+
+public:
+  ReportErrorBlockOperand(Instruction *Operand);
+
+  /// @name LLVM-RTTI interface
+  //@{
+  static bool classof(const RejectReason *RR);
+  //@}
+
+  /// @name RejectReason interface
+  //@{
+  std::string getRemarkName() const override;
+  const Value *getRemarkBB() const override;
+  std::string getMessage() const override;
+  const DebugLoc &getDebugLoc() const override;
+  //@}
+};
+
+//===----------------------------------------------------------------------===//
+/// Captures errors
+class ReportErrorBlockPHI : public ReportOther {
+  // The offending base value.
+  Instruction *PHI;
+
+public:
+  ReportErrorBlockPHI(Instruction *PHI);
+
+  /// @name LLVM-RTTI interface
+  //@{
+  static bool classof(const RejectReason *RR);
+  //@}
+
+  /// @name RejectReason interface
+  //@{
+  std::string getRemarkName() const override;
+  const Value *getRemarkBB() const override;
+  std::string getMessage() const override;
+  const DebugLoc &getDebugLoc() const override;
+  //@}
+};
+
+//===----------------------------------------------------------------------===//
+/// Captures errors
+class ReportExceptionInst : public ReportOther {
+  // The offending base value.
+  Instruction *Inst;
+
+public:
+  ReportExceptionInst(Instruction *Inst);
+
+  /// @name LLVM-RTTI interface
+  //@{
+  static bool classof(const RejectReason *RR);
+  //@}
+
+  /// @name RejectReason interface
+  //@{
+  std::string getRemarkName() const override;
+  const Value *getRemarkBB() const override;
+  std::string getMessage() const override;
+  const DebugLoc &getDebugLoc() const override;
+  //@}
+};
+
+//===----------------------------------------------------------------------===//
 /// Captures errors with bad IntToPtr instructions.
 class ReportIntToPtr : public ReportOther {
   // The offending base value.
@@ -791,6 +900,52 @@ class ReportUnprofitable : public ReportOther {
 
 public:
   ReportUnprofitable(Region *R);
+
+  /// @name LLVM-RTTI interface
+  //@{
+  static bool classof(const RejectReason *RR);
+  //@}
+
+  /// @name RejectReason interface
+  //@{
+  std::string getRemarkName() const override;
+  const Value *getRemarkBB() const override;
+  std::string getMessage() const override;
+  std::string getEndUserMessage() const override;
+  const DebugLoc &getDebugLoc() const override;
+  //@}
+};
+
+//===----------------------------------------------------------------------===//
+/// Report regions that seem not profitable to be optimized.
+class ReportUnprofitableOnlyLoadOrStores : public ReportOther {
+  Region *R;
+
+public:
+  ReportUnprofitableOnlyLoadOrStores(Region *R);
+
+  /// @name LLVM-RTTI interface
+  //@{
+  static bool classof(const RejectReason *RR);
+  //@}
+
+  /// @name RejectReason interface
+  //@{
+  std::string getRemarkName() const override;
+  const Value *getRemarkBB() const override;
+  std::string getMessage() const override;
+  std::string getEndUserMessage() const override;
+  const DebugLoc &getDebugLoc() const override;
+  //@}
+};
+
+//===----------------------------------------------------------------------===//
+/// Report regions that seem not profitable to be optimized.
+class ReportUnprofitableNoLoops : public ReportOther {
+  Region *R;
+
+public:
+  ReportUnprofitableNoLoops(Region *R);
 
   /// @name LLVM-RTTI interface
   //@{

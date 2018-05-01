@@ -59,6 +59,7 @@ Statistic RejectStatistics[] = {
     SCOP_STAT(InvalidCond, "Non-integer branch condition"),
     SCOP_STAT(UndefOperand, "Undefined operands in comparison"),
     SCOP_STAT(NonAffBranch, "Non-affine branch condition"),
+    SCOP_STAT(PtrBranch, "Invalid ptr branch condition"),
     SCOP_STAT(NoBasePtr, "No base pointer"),
     SCOP_STAT(UndefBasePtr, "Undefined base pointer"),
     SCOP_STAT(VariantBasePtr, "Variant base pointer"),
@@ -73,9 +74,12 @@ Statistic RejectStatistics[] = {
               "Compilated access semantics (volatile or atomic)"),
     SCOP_STAT(Alias, "Base address aliasing"),
     SCOP_STAT(Other, ""),
+    SCOP_STAT(ErrorBlockPHI, "Error block PHI"),
+    SCOP_STAT(ErrorBlockOperand, "Error block operand"),
     SCOP_STAT(IntToPtr, "Integer to pointer conversions"),
     SCOP_STAT(Alloca, "Stack allocations"),
     SCOP_STAT(UnknownInst, "Unknown Instructions"),
+    SCOP_STAT(ExceptionInst, "Exception Instructions"),
     SCOP_STAT(Entry, "Contains entry block"),
     SCOP_STAT(Unprofitable, "Assumed to be unprofitable"),
     SCOP_STAT(LastOther, ""),
@@ -321,6 +325,22 @@ std::string ReportUndefOperand::getMessage() const {
 
 bool ReportUndefOperand::classof(const RejectReason *RR) {
   return RR->getKind() == RejectReasonKind::UndefOperand;
+}
+
+//===----------------------------------------------------------------------===//
+// ReportPtrBranch.
+
+std::string ReportPtrBranch::getRemarkName() const { return "PtrBranch"; }
+
+const Value *ReportPtrBranch::getRemarkBB() const { return BB; }
+
+std::string ReportPtrBranch::getMessage() const {
+  return ("Ptr branch in BB '" + BB->getName()).str() + "' with LHS: " + *LHS +
+         " and RHS: " + *RHS;
+}
+
+bool ReportPtrBranch::classof(const RejectReason *RR) {
+  return RR->getKind() == RejectReasonKind::PtrBranch;
 }
 
 //===----------------------------------------------------------------------===//
@@ -652,6 +672,52 @@ bool ReportOther::classof(const RejectReason *RR) {
 }
 
 //===----------------------------------------------------------------------===//
+// ReportErrorBlockOperand.
+ReportErrorBlockOperand::ReportErrorBlockOperand(Instruction *Operand)
+    : ReportOther(RejectReasonKind::ErrorBlockOperand), Operand(Operand) {}
+
+std::string ReportErrorBlockOperand::getRemarkName() const { return "ErrorOperand"; }
+
+const Value *ReportErrorBlockOperand::getRemarkBB() const {
+  return Operand->getParent();
+}
+
+std::string ReportErrorBlockOperand::getMessage() const {
+  return "Find bad ErrorOperand prt: " + *Operand;
+}
+
+const DebugLoc &ReportErrorBlockOperand::getDebugLoc() const {
+  return Operand->getDebugLoc();
+}
+
+bool ReportErrorBlockOperand::classof(const RejectReason *RR) {
+  return RR->getKind() == RejectReasonKind::ErrorBlockOperand;
+}
+
+//===----------------------------------------------------------------------===//
+// ReportErrorBlockPHI.
+ReportErrorBlockPHI::ReportErrorBlockPHI(Instruction *PHI)
+    : ReportOther(RejectReasonKind::ErrorBlockPHI), PHI(PHI) {}
+
+std::string ReportErrorBlockPHI::getRemarkName() const { return "ErrorPHI"; }
+
+const Value *ReportErrorBlockPHI::getRemarkBB() const {
+  return PHI->getParent();
+}
+
+std::string ReportErrorBlockPHI::getMessage() const {
+  return "Find bad ErrorPHI prt: " + *PHI;
+}
+
+const DebugLoc &ReportErrorBlockPHI::getDebugLoc() const {
+  return PHI->getDebugLoc();
+}
+
+bool ReportErrorBlockPHI::classof(const RejectReason *RR) {
+  return RR->getKind() == RejectReasonKind::ErrorBlockPHI;
+}
+
+//===----------------------------------------------------------------------===//
 // ReportIntToPtr.
 ReportIntToPtr::ReportIntToPtr(Instruction *BaseValue)
     : ReportOther(RejectReasonKind::IntToPtr), BaseValue(BaseValue) {}
@@ -696,6 +762,29 @@ bool ReportAlloca::classof(const RejectReason *RR) {
   return RR->getKind() == RejectReasonKind::Alloca;
 }
 
+//===----------------------------------------------------------------------===//
+// ReportExceptionInst.
+
+ReportExceptionInst::ReportExceptionInst(Instruction *Inst)
+    : ReportOther(RejectReasonKind::ExceptionInst), Inst(Inst) {}
+
+std::string ReportExceptionInst::getRemarkName() const { return "ExceptionInst"; }
+
+const Value *ReportExceptionInst::getRemarkBB() const {
+  return Inst->getParent();
+}
+
+std::string ReportExceptionInst::getMessage() const {
+  return "ExceptionInst instruction: " + *Inst;
+}
+
+const DebugLoc &ReportExceptionInst::getDebugLoc() const {
+  return Inst->getDebugLoc();
+}
+
+bool ReportExceptionInst::classof(const RejectReason *RR) {
+  return RR->getKind() == RejectReasonKind::ExceptionInst;
+}
 //===----------------------------------------------------------------------===//
 // ReportUnknownInst.
 
@@ -775,6 +864,77 @@ const DebugLoc &ReportUnprofitable::getDebugLoc() const {
 
 bool ReportUnprofitable::classof(const RejectReason *RR) {
   return RR->getKind() == RejectReasonKind::Unprofitable;
+}
+
+//===----------------------------------------------------------------------===//
+// ReportUnprofitableOnlyLoadOrStores.
+
+ReportUnprofitableOnlyLoadOrStores::ReportUnprofitableOnlyLoadOrStores(
+    Region *R)
+    : ReportOther(RejectReasonKind::UnprofitableOnlyLoadsOrStores), R(R) {}
+
+std::string ReportUnprofitableOnlyLoadOrStores::getRemarkName() const {
+  return "UnprofitableOnlyLoadsOrStores";
+}
+
+const Value *ReportUnprofitableOnlyLoadOrStores::getRemarkBB() const {
+  return R->getEntry();
+}
+
+std::string ReportUnprofitableOnlyLoadOrStores::getMessage() const {
+  return "Region can not profitably be optimized (only load/stores)!";
+}
+
+std::string ReportUnprofitableOnlyLoadOrStores::getEndUserMessage() const {
+  return "No profitable polyhedral optimization found (only load/stores)";
+}
+
+const DebugLoc &ReportUnprofitableOnlyLoadOrStores::getDebugLoc() const {
+  for (const BasicBlock *BB : R->blocks())
+    for (const Instruction &Inst : *BB)
+      if (const DebugLoc &DL = Inst.getDebugLoc())
+        return DL;
+
+  return R->getEntry()->getTerminator()->getDebugLoc();
+}
+
+bool ReportUnprofitableOnlyLoadOrStores::classof(const RejectReason *RR) {
+  return RR->getKind() == RejectReasonKind::UnprofitableOnlyLoadsOrStores;
+}
+
+//===----------------------------------------------------------------------===//
+// ReportUnprofitableNoLoops.
+
+ReportUnprofitableNoLoops::ReportUnprofitableNoLoops(Region *R)
+    : ReportOther(RejectReasonKind::UnprofitableNoLoops), R(R) {}
+
+std::string ReportUnprofitableNoLoops::getRemarkName() const {
+  return "UnprofitableNoLoops";
+}
+
+const Value *ReportUnprofitableNoLoops::getRemarkBB() const {
+  return R->getEntry();
+}
+
+std::string ReportUnprofitableNoLoops::getMessage() const {
+  return "Region can not profitably be optimized (no loops)!";
+}
+
+std::string ReportUnprofitableNoLoops::getEndUserMessage() const {
+  return "No profitable polyhedral optimization found (no loops)";
+}
+
+const DebugLoc &ReportUnprofitableNoLoops::getDebugLoc() const {
+  for (const BasicBlock *BB : R->blocks())
+    for (const Instruction &Inst : *BB)
+      if (const DebugLoc &DL = Inst.getDebugLoc())
+        return DL;
+
+  return R->getEntry()->getTerminator()->getDebugLoc();
+}
+
+bool ReportUnprofitableNoLoops::classof(const RejectReason *RR) {
+  return RR->getKind() == RejectReasonKind::UnprofitableNoLoops;
 }
 
 } // namespace polly

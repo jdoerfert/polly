@@ -155,6 +155,12 @@ static cl::opt<std::string> OnlyRegion(
     cl::cat(PollyCategory));
 
 static cl::opt<bool>
+    ForceStructuredCFG("polly-force-structured-cfg",
+                       cl::desc("Force valid regions to have a structured CFG"),
+                       cl::Hidden, cl::init(false), cl::ZeroOrMore,
+                       cl::cat(PollyCategory));
+
+static cl::opt<bool>
     IgnoreAliasing("polly-ignore-aliasing",
                    cl::desc("Ignore possible aliasing of the array bases"),
                    cl::Hidden, cl::init(false), cl::ZeroOrMore,
@@ -237,7 +243,7 @@ bool polly::PollyInvariantLoadHoisting;
 static cl::opt<bool, true> XPollyInvariantLoadHoisting(
     "polly-invariant-load-hoisting", cl::desc("Hoist invariant loads."),
     cl::location(PollyInvariantLoadHoisting), cl::Hidden, cl::ZeroOrMore,
-    cl::init(false), cl::cat(PollyCategory));
+    cl::init(true), cl::cat(PollyCategory));
 
 /// The minimal trip count under which loops are considered unprofitable.
 static const unsigned MIN_LOOP_TRIP_COUNT = 8;
@@ -376,7 +382,9 @@ ScopDetection::ScopDetection(Function &F, const DominatorTree &DT,
       continue;
     LoopStats Stats = countBeneficialLoops(&DC.CurRegion, SE, LI, 0);
     updateLoopCountStatistic(Stats, false /* OnlyProfitable */);
-    if (isProfitableRegion(DC)) {
+    assert(DC.IsValid);
+    isProfitableRegion(DC);
+    if (DC.IsValid) {
       updateLoopCountStatistic(Stats, true /* OnlyProfitable */);
       continue;
     }
@@ -404,6 +412,8 @@ inline bool ScopDetection::invalid(DetectionContext &Context, bool Assert,
   if (!Context.Verifying) {
     RejectLog &Log = Context.Log;
     std::shared_ptr<RR> RejectReason = std::make_shared<RR>(Arguments...);
+    dbgs() << "SD: invalidate: " << RejectReason->getRemarkName() << " for "
+           << Context.CurRegion.getNameStr() << "\n";
 
     if (PollyTrackFailures)
       Log.report(RejectReason);
@@ -414,7 +424,8 @@ inline bool ScopDetection::invalid(DetectionContext &Context, bool Assert,
     assert(!Assert && "Verification of detected scop failed");
   }
 
-  return false;
+  Context.IsValid = false;
+  return true;
 }
 
 bool ScopDetection::isMaxRegionInScop(const Region &R, bool Verify) const {
@@ -427,7 +438,8 @@ bool ScopDetection::isMaxRegionInScop(const Region &R, bool Verify) const {
         getBBPairForRegion(&R),
         DetectionContext(const_cast<Region &>(R), AA, false /*verifying*/)));
     DetectionContext &Context = It.first->second;
-    return isValidRegion(Context);
+    isValidRegion(Context);
+    return Context.IsValid;
   }
 
   return true;
@@ -558,7 +570,8 @@ bool ScopDetection::isValidSwitch(BasicBlock &BB, SwitchInst *SI,
 
   // Check for invalid usage of different pointers in one expression.
   if (involvesMultiplePtrs(ConditionSCEV, nullptr, L))
-    return false;
+    return invalid<ReportPtrBranch>(Context, /*Assert=*/true, &BB,
+                                    ConditionSCEV, ConditionSCEV, SI);
 
   if (isAffine(ConditionSCEV, L, Context))
     return true;
@@ -577,6 +590,18 @@ bool ScopDetection::isValidBranch(BasicBlock &BB, BranchInst *BI,
   // Constant integer conditions are always affine.
   if (isa<ConstantInt>(Condition))
     return true;
+
+  if (ForceStructuredCFG && !IsLoopBranch &&
+      RI.getRegionFor(&BB)->getEntry() != &BB) {
+    Loop *L = LI.getLoopFor(&BB);
+    if (!L || (!L->isLoopLatch(&BB) && !L->isLoopExiting(&BB))) {
+      DEBUG(dbgs() << "Unstructured: Region for " << BB.getName()
+                   << " is not started by it!\n");
+      dbgs() << "SD: invalidate: Unstructured (SESE) for "
+            << Context.CurRegion.getNameStr() << "\n";
+      return false;
+    }
+  }
 
   if (BinaryOperator *BinOp = dyn_cast<BinaryOperator>(Condition)) {
     auto Opcode = BinOp->getOpcode();
@@ -631,11 +656,13 @@ bool ScopDetection::isValidBranch(BasicBlock &BB, BranchInst *BI,
   // Check for invalid usage of different pointers in one expression.
   if (ICmp->isEquality() && involvesMultiplePtrs(LHS, nullptr, L) &&
       involvesMultiplePtrs(RHS, nullptr, L))
-    return false;
+    return invalid<ReportPtrBranch>(Context, /*Assert=*/true, &BB, LHS, RHS,
+                                    ICmp);
 
   // Check for invalid usage of different pointers in a relational comparison.
   if (ICmp->isRelational() && involvesMultiplePtrs(LHS, RHS, L))
-    return false;
+    return invalid<ReportPtrBranch>(Context, /*Assert=*/true, &BB, LHS, RHS,
+                                    ICmp);
 
   if (isAffine(LHS, L, Context) && isAffine(RHS, L, Context))
     return true;
@@ -1051,8 +1078,13 @@ bool ScopDetection::hasAffineMemoryAccesses(DetectionContext &Context) const {
     if (!hasBaseAffineAccesses(Context, BasePointer, Scope)) {
       if (KeepGoing)
         continue;
-      else
-        return false;
+      else {
+        const auto &Pair = Context.Accesses[BasePointer].front();
+        const Instruction *Insn = Pair.first;
+        auto *AF = Pair.second;
+        return invalid<ReportNonAffineAccess>(Context, /*Assert=*/true, AF,
+                                              Insn, BasePointer->getValue());
+      }
     }
   }
   return true;
@@ -1188,17 +1220,18 @@ bool ScopDetection::isValidInstruction(Instruction &Inst,
       auto *PHI = dyn_cast<PHINode>(OpInst);
       if (PHI) {
         for (User *U : PHI->users()) {
-          if (!isa<TerminatorInst>(U))
-            return false;
+          if (!isa<TerminatorInst>(U)) {
+            return invalid<ReportErrorBlockPHI>(Context, true, PHI);
+          }
         }
       } else {
-        return false;
+        return invalid<ReportErrorBlockOperand>(Context, true, OpInst);
       }
     }
   }
 
   if (isa<LandingPadInst>(&Inst) || isa<ResumeInst>(&Inst))
-    return false;
+    return invalid<ReportExceptionInst>(Context, /*Assert=*/true, &Inst);
 
   // We only check the call instruction but not invoke instruction.
   if (CallInst *CI = dyn_cast<CallInst>(&Inst)) {
@@ -1246,8 +1279,25 @@ bool ScopDetection::canUseISLTripCount(Loop *L,
   // Ensure the loop has valid exiting blocks as well as latches, otherwise we
   // need to overapproximate it as a boxed loop.
   SmallVector<BasicBlock *, 4> LoopControlBlocks;
+
   L->getExitingBlocks(LoopControlBlocks);
+  if (ForceStructuredCFG && LoopControlBlocks.size() != 1) {
+    DEBUG(dbgs() << "Unstructured: #Exiting blocks: "
+                 << LoopControlBlocks.size() << "!\n");
+    dbgs() << "SD: invalidate: Unstructured (Exits) for "
+           << Context.CurRegion.getNameStr() << "\n";
+    return false;
+  }
+
   L->getLoopLatches(LoopControlBlocks);
+  if (ForceStructuredCFG && LoopControlBlocks.size() != 2) {
+    DEBUG(dbgs() << "Unstructured: #Latch blocks: "
+                 << LoopControlBlocks.size() - 1 << "!\n");
+    dbgs() << "SD: invalidate: Unstructured (Latches) for "
+           << Context.CurRegion.getNameStr() << "\n";
+    return false;
+  }
+
   for (BasicBlock *ControlBB : LoopControlBlocks) {
     if (!isValidCFG(*ControlBB, true, false, Context))
       return false;
@@ -1367,6 +1417,10 @@ Region *ScopDetection::expandRegion(Region &R) {
   DEBUG(dbgs() << "\tExpanding " << R.getNameStr() << "\n");
 
   while (ExpandedRegion) {
+    dbgs() << "SD: try expanding " << R.getNameStr() << " to "
+           << ExpandedRegion->getNameStr() << "\n";
+    dbgs() << "SD: findScops in " << ExpandedRegion->getNameStr() << "\n";
+
     const auto &It = DetectionContextMap.insert(std::make_pair(
         getBBPairForRegion(ExpandedRegion.get()),
         DetectionContext(*ExpandedRegion, AA, false /*verifying*/)));
@@ -1439,20 +1493,27 @@ void ScopDetection::removeCachedResults(const Region &R) {
 void ScopDetection::findScops(Region &R) {
   const auto &It = DetectionContextMap.insert(std::make_pair(
       getBBPairForRegion(&R), DetectionContext(R, AA, false /*verifying*/)));
+  dbgs() << "SD: findScops in " << R.getNameStr() << "\n";
   DetectionContext &Context = It.first->second;
 
   bool RegionIsValid = false;
-  if (!PollyProcessUnprofitable && regionWithoutLoops(R, LI))
-    invalid<ReportUnprofitable>(Context, /*Assert=*/true, &R);
-  else
-    RegionIsValid = isValidRegion(Context);
+  if (!PollyProcessUnprofitable && regionWithoutLoops(R, LI)) {
+    dbgs() << "SD: invalidate: no loops"
+           << " for " << Context.CurRegion.getNameStr() << "\n";
+    invalid<ReportUnprofitableNoLoops>(Context, /*Assert=*/true, &R);
+  } else {
+    isValidRegion(Context);
+    RegionIsValid = Context.IsValid;
+  }
 
   bool HasErrors = !RegionIsValid || Context.Log.size() > 0;
 
   if (HasErrors) {
     removeCachedResults(R);
+    dbgs() << "SD: findScops invalid\n";
   } else {
     ValidRegions.insert(&R);
+    dbgs() << "SD: findScops valid\n";
     return;
   }
 
@@ -1485,6 +1546,9 @@ void ScopDetection::findScops(Region &R) {
 
     if (!ExpandedR)
       continue;
+
+    dbgs() << "SD: expanded valid region " << CurrentRegion->getNameStr()
+           << " to " << ExpandedR->getNameStr() << "\n";
 
     R.addSubRegion(ExpandedR, true);
     ValidRegions.insert(ExpandedR);
@@ -1581,7 +1645,8 @@ bool ScopDetection::isProfitableRegion(DetectionContext &Context) const {
   // We can probably not do a lot on scops that only write or only read
   // data.
   if (!Context.hasStores || !Context.hasLoads)
-    return invalid<ReportUnprofitable>(Context, /*Assert=*/true, &CurRegion);
+    return invalid<ReportUnprofitableOnlyLoadOrStores>(Context, /*Assert=*/true,
+                                                       &CurRegion);
 
   int NumLoops =
       countBeneficialLoops(&CurRegion, SE, LI, MIN_LOOP_TRIP_COUNT).NumLoops;
@@ -1615,6 +1680,9 @@ bool ScopDetection::isValidRegion(DetectionContext &Context) const {
 
   if (!PollyAllowFullFunction && CurRegion.isTopLevelRegion()) {
     DEBUG(dbgs() << "Top level region is invalid\n");
+    dbgs() << "SD: invalidate: top level"
+           << " for " << Context.CurRegion.getNameStr() << "\n";
+    Context.IsValid = false;
     return false;
   }
 
@@ -1631,6 +1699,7 @@ bool ScopDetection::isValidRegion(DetectionContext &Context) const {
       dbgs() << "Region entry does not match -polly-region-only";
       dbgs() << "\n";
     });
+    Context.IsValid = false;
     return false;
   }
 
@@ -1641,8 +1710,10 @@ bool ScopDetection::isValidRegion(DetectionContext &Context) const {
           &(CurRegion.getEntry()->getParent()->getEntryBlock()))
     return invalid<ReportEntry>(Context, /*Assert=*/true, CurRegion.getEntry());
 
-  if (!allBlocksValid(Context))
+  if (!allBlocksValid(Context)) {
+    Context.IsValid = false;
     return false;
+  }
 
   if (!isReducibleRegion(CurRegion, DbgLoc))
     return invalid<ReportIrreducibleRegion>(Context, /*Assert=*/true,

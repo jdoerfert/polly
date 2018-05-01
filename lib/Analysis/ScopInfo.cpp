@@ -121,6 +121,25 @@ STATISTIC(AssumptionsInvariantLoad,
 STATISTIC(AssumptionsDelinearization,
           "Number of delinearization assumptions taken.");
 
+STATISTIC(FatalAssumptionsAliasing,
+          "Number of fatal aliasing assumptions taken.");
+STATISTIC(FatalAssumptionsInbounds,
+          "Number of fatal inbounds assumptions taken.");
+STATISTIC(FatalAssumptionsWrapping,
+          "Number of fatal wrapping assumptions taken.");
+STATISTIC(FatalAssumptionsUnsigned,
+          "Number of fatal unsigned assumptions taken.");
+STATISTIC(FatalAssumptionsComplexity, "Number of fatal too complex SCoPs.");
+STATISTIC(FatalAssumptionsUnprofitable, "Number of fatal unprofitable SCoPs.");
+STATISTIC(FatalAssumptionsErrorBlock,
+          "Number of fatal error block assumptions taken.");
+STATISTIC(FatalAssumptionsInfiniteLoop,
+          "Number of fatal bounded loop assumptions taken.");
+STATISTIC(FatalAssumptionsInvariantLoad,
+          "Number of fatal invariant loads assumptions taken.");
+STATISTIC(FatalAssumptionsDelinearization,
+          "Number of fatal delinearization assumptions taken.");
+
 STATISTIC(NumScops, "Number of feasible SCoPs after ScopInfo");
 STATISTIC(NumLoopsInScop, "Number of loops in scops");
 STATISTIC(NumBoxedLoops, "Number of boxed loops in SCoPs after ScopInfo");
@@ -4295,10 +4314,47 @@ void Scop::addAssumption(AssumptionKind Kind, isl::set Set, DebugLoc Loc,
   if (!trackAssumption(Kind, Set, Loc, Sign, BB))
     return;
 
+  bool Valid = hasFeasibleRuntimeContext();
   if (Sign == AS_ASSUMPTION)
     AssumedContext = AssumedContext.intersect(Set).coalesce();
   else
     InvalidContext = InvalidContext.unite(Set).coalesce();
+
+  if (!Valid || hasFeasibleRuntimeContext())
+    return;
+
+  switch (Kind) {
+  case ALIASING:
+    FatalAssumptionsAliasing++;
+    break;
+  case INBOUNDS:
+    FatalAssumptionsInbounds++;
+    break;
+  case WRAPPING:
+    FatalAssumptionsWrapping++;
+    break;
+  case UNSIGNED:
+    FatalAssumptionsUnsigned++;
+    break;
+  case COMPLEXITY:
+    FatalAssumptionsComplexity++;
+    break;
+  case PROFITABLE:
+    FatalAssumptionsUnprofitable++;
+    break;
+  case ERRORBLOCK:
+    FatalAssumptionsErrorBlock++;
+    break;
+  case INFINITELOOP:
+    FatalAssumptionsInfiniteLoop++;
+    break;
+  case INVARIANTLOAD:
+    FatalAssumptionsInvariantLoad++;
+    break;
+  case DELINEARIZATION:
+    FatalAssumptionsDelinearization++;
+    break;
+  }
 }
 
 void Scop::recordAssumption(AssumptionKind Kind, isl::set Set, DebugLoc Loc,
