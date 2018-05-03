@@ -83,9 +83,11 @@ public:
     if (!S.isProfitable(true)) {
       DEBUG(dbgs() << "SCoP pruned because it probably cannot be optimized in "
                       "a significant way\n");
+      dbgs() << "CEV unprofitable scop pruned | " << &S << "\n";
       S.invalidate(PROFITABLE, DebugLoc());
       updateStatistics(S, true);
     } else {
+      dbgs() << "CEV profitable scop not pruned | " << &S << "\n";
       updateStatistics(S, false);
     }
 

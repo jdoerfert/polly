@@ -203,8 +203,10 @@ static bool CodeGen(Scop &S, IslAstInfo &AI, LoopInfo &LI, DominatorTree &DT,
 
   // Check if we created an isl_ast root node, otherwise exit.
   isl_ast_node *AstRoot = Ast.getAst();
-  if (!AstRoot)
+  if (!AstRoot) {
+    dbgs() << "CEV ast was not build | " << &S << "\n";
     return false;
+  }
 
   // Collect statistics. Do it before we modify the IR to avoid having it any
   // influence on the result.
@@ -280,7 +282,9 @@ static bool CodeGen(Scop &S, IslAstInfo &AI, LoopInfo &LI, DominatorTree &DT,
     DT.eraseNode(ExitingBlock);
 
     isl_ast_node_free(AstRoot);
+    dbgs() << "CEV inv preload fail | " << &S << "\n";
   } else {
+    dbgs() << "CEV inv preload done | " << &S << "\n";
     NodeBuilder.addParameters(S.getContext().release());
     Value *RTC = NodeBuilder.createRTC(AI.getRunCondition());
 

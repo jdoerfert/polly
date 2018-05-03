@@ -133,8 +133,11 @@ PWACtx SCEVAffinator::checkForWrapping(const SCEV *Expr, PWACtx PWAC) const {
   // whereas n is the number of bits of the Expr, hence:
   //   n = bitwidth(ExprType)
 
-  if (IgnoreIntegerWrapping || (getNoWrapFlags(Expr) & SCEV::FlagNSW))
+  if (IgnoreIntegerWrapping || (getNoWrapFlags(Expr) & SCEV::FlagNSW)) {
+    S->NonWrappingOperations++;
     return PWAC;
+  }
+  S->WrappingOperations++;
 
   isl::pw_aff PWAMod = addModuloSemantic(PWAC.first, Expr->getType());
 
@@ -146,8 +149,11 @@ PWACtx SCEVAffinator::checkForWrapping(const SCEV *Expr, PWACtx PWAC) const {
     NotEqualSet = NotEqualSet.params();
   NotEqualSet = NotEqualSet.coalesce();
 
-  if (!NotEqualSet.is_empty())
+  if (!NotEqualSet.is_empty()) {
     S->recordAssumption(WRAPPING, NotEqualSet, Loc, AS_RESTRICTION, BB);
+  } else {
+    S->WrappingOperationsSafe++;
+  }
 
   return PWAC;
 }

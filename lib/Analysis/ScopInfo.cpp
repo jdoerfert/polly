@@ -1594,6 +1594,11 @@ bool buildConditionSets(Scop &S, BasicBlock *BB, Value *Condition,
     DominatorTree &DT = *S.getDT();
     Region &R = S.getRegion();
 
+    if (ICond->isUnsigned())
+      S.UnsignedComparisons++;
+    else
+      S.SignedComparisons++;
+
     isl_pw_aff *LHS, *RHS;
     // For unsigned comparisons we assumed the signed bit of neither operand
     // to be set. The comparison is equal to a signed comparison under this
@@ -2565,8 +2570,10 @@ bool Scop::buildDomains(Region *R, DominatorTree &DT, LoopInfo &LI,
   InvalidDomainMap[EntryBB] = isl::manage(isl_set_empty(isl_set_get_space(S)));
   DomainMap[EntryBB] = isl::manage(S);
 
-  if (IsOnlyNonAffineRegion)
+  if (IsOnlyNonAffineRegion) {
+    invalidate(ERRORBLOCK, EntryBB->getTerminator()->getDebugLoc(), EntryBB);
     return !containsErrorBlock(R->getNode(), *R, LI, DT);
+  }
 
   if (!buildDomainsWithBranchConstraints(R, DT, LI, InvalidDomainMap))
     return false;
@@ -3190,10 +3197,14 @@ Scop::buildAliasGroupsForAccesses(AliasAnalysis &AA) {
     if (AS.isMustAlias() || AS.isForwardingAliasSet())
       continue;
     AliasGroupTy AG;
-    for (auto &PR : AS)
+    for (auto &PR : AS) {
+      AliasingPointers++;
       AG.push_back(PtrToAcc[PR.getValue()]);
-    if (AG.size() < 2)
+    }
+    if (AG.size() < 2) {
+      SizeOneAliasGroups++;
       continue;
+    }
     AliasGroups.push_back(std::move(AG));
   }
 
@@ -3218,8 +3229,12 @@ void Scop::splitAliasGroupsByDomain(AliasGroupVectorTy &AliasGroups) {
         AGI++;
       }
     }
-    if (NewAG.size() > 1)
+    if (NewAG.size() == 1)
+      SizeOneAliasGroups++;
+    if (NewAG.size() > 1) {
+      DomainSplitAliasGroups++;
       AliasGroups.push_back(std::move(NewAG));
+    }
     isl_set_free(AGDomain);
   }
 }
@@ -3282,17 +3297,22 @@ bool Scop::buildAliasGroup(Scop::AliasGroupTy &AliasGroup,
 
   // If there are no read-only pointers, and less than two read-write pointers,
   // no alias check is needed.
-  if (ReadOnlyAccesses.empty() && ReadWriteArrays.size() <= 1)
+  if (ReadOnlyAccesses.empty() && ReadWriteArrays.size() <= 1) {
+    NumAliasGroupsSameArray++;
     return true;
+  }
 
   // If there is no read-write pointer, no alias check is needed.
-  if (ReadWriteArrays.empty())
+  if (ReadWriteArrays.empty()) {
+    NumAliasGroupsNoWrite++;
     return true;
+  }
 
   // For non-affine accesses, no alias check can be generated as we cannot
   // compute a sufficiently tight lower and upper bound: bail out.
   for (MemoryAccess *MA : AliasGroup) {
     if (!MA->isAffine()) {
+      NumAliasNonAffine++;
       invalidate(ALIASING, MA->getAccessInstruction()->getDebugLoc(),
                  MA->getAccessInstruction()->getParent());
       return false;
@@ -3301,11 +3321,13 @@ bool Scop::buildAliasGroup(Scop::AliasGroupTy &AliasGroup,
 
   // Ensure that for all memory accesses for which we generate alias checks,
   // their base pointers are available.
-  for (MemoryAccess *MA : AliasGroup) {
-    if (MemoryAccess *BasePtrMA = lookupBasePtrAccess(MA))
+  for (MemoryAccess *MA : AliasGroup)
+    if (MemoryAccess *BasePtrMA = lookupBasePtrAccess(MA)) {
+      if (!PollyInvariantLoadHoisting)
+        return false;
       addRequiredInvariantLoad(
           cast<LoadInst>(BasePtrMA->getAccessInstruction()));
-  }
+    }
 
   MinMaxAliasGroups.emplace_back();
   MinMaxVectorPairTy &pair = MinMaxAliasGroups.back();
@@ -4244,33 +4266,43 @@ bool Scop::trackAssumption(AssumptionKind Kind, isl::set Set, DebugLoc Loc,
 
   switch (Kind) {
   case ALIASING:
+    AliasingAssumptions++;
     AssumptionsAliasing++;
     break;
   case INBOUNDS:
+    InboundsAssumptions++;
     AssumptionsInbounds++;
     break;
   case WRAPPING:
+    WrappingAssumptions++;
     AssumptionsWrapping++;
     break;
   case UNSIGNED:
+    UnsignedAssumptions++;
     AssumptionsUnsigned++;
     break;
   case COMPLEXITY:
+    ComplexityAssumptions++;
     AssumptionsComplexity++;
     break;
   case PROFITABLE:
+    ProfitableAssumptions++;
     AssumptionsUnprofitable++;
     break;
   case ERRORBLOCK:
+    ErrorBlockAssumptions++;
     AssumptionsErrorBlock++;
     break;
   case INFINITELOOP:
+    InfiniteLoopAssumptions++;
     AssumptionsInfiniteLoop++;
     break;
   case INVARIANTLOAD:
+    InvariantLoadAssumptions++;
     AssumptionsInvariantLoad++;
     break;
   case DELINEARIZATION:
+    DelinarizationAssumptions++;
     AssumptionsDelinearization++;
     break;
   }
@@ -4295,10 +4327,50 @@ void Scop::addAssumption(AssumptionKind Kind, isl::set Set, DebugLoc Loc,
   if (!trackAssumption(Kind, Set, Loc, Sign, BB))
     return;
 
+  bool Valid =
+      !(AssumedContext.is_empty() || AssumedContext.is_subset(InvalidContext));
   if (Sign == AS_ASSUMPTION)
     AssumedContext = AssumedContext.intersect(Set).coalesce();
   else
     InvalidContext = InvalidContext.unite(Set).coalesce();
+
+  bool IsFeasible =
+      !(AssumedContext.is_empty() || AssumedContext.is_subset(InvalidContext));
+  if (!Valid || IsFeasible)
+    return;
+
+  switch (Kind) {
+  case ALIASING:
+    FatalAssumptionsAliasing++;
+    break;
+  case INBOUNDS:
+    FatalAssumptionsInbounds++;
+    break;
+  case WRAPPING:
+    FatalAssumptionsWrapping++;
+    break;
+  case UNSIGNED:
+    FatalAssumptionsUnsigned++;
+    break;
+  case COMPLEXITY:
+    FatalAssumptionsComplexity++;
+    break;
+  case PROFITABLE:
+    FatalAssumptionsUnprofitable++;
+    break;
+  case ERRORBLOCK:
+    FatalAssumptionsErrorBlock++;
+    break;
+  case INFINITELOOP:
+    FatalAssumptionsInfiniteLoop++;
+    break;
+  case INVARIANTLOAD:
+    FatalAssumptionsInvariantLoad++;
+    break;
+  case DELINEARIZATION:
+    FatalAssumptionsDelinearization++;
+    break;
+  }
 }
 
 void Scop::recordAssumption(AssumptionKind Kind, isl::set Set, DebugLoc Loc,
@@ -4449,6 +4521,108 @@ void Scop::print(raw_ostream &OS, bool PrintInstructions) const {
   printArrayInfo(OS.indent(4));
   printAliasAssumptions(OS);
   printStatements(OS.indent(4), PrintInstructions);
+}
+
+void Scop::printInfos(raw_ostream &OS) const {
+  OS << "CEV New SCoP | " << this << "\n";
+  SmallPtrSet<Loop *, 8> Loops;
+
+  unsigned NS = 0, NMArr = 0, NMSca = 0, NMRed = 0;
+  for (const ScopStmt &Stmt : *this) {
+    NS++;
+    for (unsigned u = 0; u < Stmt.getNumIterators(); u++) {
+      assert(Stmt.getLoopForDimension(u));
+      Loops.insert(Stmt.getLoopForDimension(u));
+    }
+    for (const MemoryAccess *MA : Stmt) {
+      assert(MA);
+      NMRed += MA->isReductionLike();
+      if (MA->isArrayKind())
+        NMArr++;
+      else
+        NMSca++;
+    }
+  }
+  OS << "CEV #stmts: " << NS << "\n";
+  OS << "CEV #mem array accs: " << NMArr << "\n";
+  OS << "CEV #mem scalar accs: " << NMSca << "\n";
+  OS << "CEV #mem reduction accs: " << NMRed << "\n";
+  OS << "CEV #loops: " << Loops.size() << "\n";
+
+  unsigned MLD = 0;
+  for (Loop *L : Loops) {
+    unsigned LD = 1;
+    while (L && Loops.count(L->getParentLoop())) {
+      LD++;
+      L = L->getParentLoop();
+    }
+    MLD = std::max(MLD, LD);
+  }
+  OS << "CEV Max loop depth: " << MLD << "\n";
+
+  int noOfGroups = 0;
+  for (const MinMaxVectorPairTy &Pair : MinMaxAliasGroups) {
+    if (Pair.second.size() == 0)
+      noOfGroups += 1;
+    else
+      noOfGroups += Pair.second.size();
+  }
+  OS << "CEV #alias groups: " << noOfGroups << "\n";
+  OS << "CEV #min/max alias pairs: " << MinMaxAliasGroups.size() << "\n";
+
+  unsigned NInvLoads = 0, NInvLoadClasses = 0;
+  for (const auto &IAClass : InvariantEquivClasses) {
+    NInvLoadClasses += 1;
+    NInvLoads += std::distance(IAClass.InvariantAccesses.begin(),
+                               IAClass.InvariantAccesses.end());
+  }
+  OS << "CEV #req inv loads: " << getRequiredInvariantLoads().size() << "\n";
+  OS << "CEV #inv loads: " << NInvLoads << "\n";
+  OS << "CEV #inv loads classes: " << NInvLoadClasses << "\n";
+
+  unsigned NErrorBlocks = 0;
+  for (BasicBlock *BB : R.blocks())
+    if (!DomainMap.count(BB))
+      NErrorBlocks++;
+  OS << "CEV #error blocks: " << NErrorBlocks << "\n";
+
+  unsigned NAffSubReg = DC.NonAffineSubRegionSet.size();
+  unsigned NBoxedLoops = getBoxedLoops().size();
+
+  OS << "CEV #non-affine subregions: " << NAffSubReg << "\n";
+  OS << "CEV #boxed loops: " << NBoxedLoops << "\n";
+  OS << "CEV #wrapping operations: " << WrappingOperations << "\n";
+  OS << "CEV #non wrapping operations: " << NonWrappingOperations << "\n";
+  OS << "CEV #wrapping operations safe: " << WrappingOperationsSafe << "\n";
+  OS << "CEV #signed comparisons: " << SignedComparisons << "\n";
+  OS << "CEV #unsigned comparisons: " << UnsignedComparisons << "\n";
+  OS << "CEV #aliasing pointers: " << AliasingPointers << "\n";
+  OS << "CEV #size one alias groups: " << SizeOneAliasGroups << "\n";
+  OS << "CEV #domain split alias groups: " << DomainSplitAliasGroups << "\n";
+  OS << "CEV #alias non-affine: " << NumAliasNonAffine << "\n";
+  OS << "CEV #alias groups same array: " << NumAliasGroupsSameArray << "\n";
+  OS << "CEV #alias groups no write: " << NumAliasGroupsNoWrite << "\n";
+
+  OS << "CEV assumption wrapping: " << WrappingAssumptions
+     << " [Fatal: " << FatalAssumptionsWrapping << "]\n";
+  OS << "CEV assumption inbounds: " << InboundsAssumptions
+     << " [Fatal: " << FatalAssumptionsInbounds << "]\n";
+  OS << "CEV assumption unsigned: " << UnsignedAssumptions
+     << " [Fatal: " << FatalAssumptionsUnsigned << "]\n";
+  OS << "CEV assumption aliasing: " << AliasingAssumptions
+     << " [Fatal: " << FatalAssumptionsAliasing << "]\n";
+  OS << "CEV assumption complexi: " << ComplexityAssumptions
+     << " [Fatal: " << FatalAssumptionsComplexity << "]\n";
+  OS << "CEV assumption profitab: " << ProfitableAssumptions
+     << " [Fatal: " << FatalAssumptionsUnprofitable << "]\n";
+  OS << "CEV assumption errorblo: " << ErrorBlockAssumptions
+     << " [Fatal: " << FatalAssumptionsErrorBlock << "]\n";
+  OS << "CEV assumption infinite: " << InfiniteLoopAssumptions
+     << " [Fatal: " << FatalAssumptionsInfiniteLoop << "]\n";
+  OS << "CEV assumption invaload: " << InvariantLoadAssumptions
+     << " [Fatal: " << FatalAssumptionsInvariantLoad << "]\n";
+  OS << "CEV assumption delinari: " << DelinarizationAssumptions
+     << " [Fatal: " << FatalAssumptionsDelinearization << "]\n";
 }
 
 #if !defined(NDEBUG) || defined(LLVM_ENABLE_DUMP)

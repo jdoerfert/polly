@@ -2888,6 +2888,43 @@ public:
   ///                          well.
   void print(raw_ostream &OS, bool PrintInstructions) const;
 
+  unsigned AliasingPointers = 0;
+  unsigned SizeOneAliasGroups = 0;
+  unsigned DomainSplitAliasGroups = 0;
+  unsigned SignedComparisons = 0;
+  unsigned UnsignedComparisons = 0;
+  unsigned NumAliasNonAffine = 0;
+  unsigned NumAliasGroupsSameArray = 0;
+  unsigned NumAliasGroupsNoWrite = 0;
+
+  unsigned WrappingOperations = 0;
+  unsigned WrappingOperationsSafe = 0;
+  unsigned NonWrappingOperations = 0;
+
+  unsigned WrappingAssumptions = 0;
+  unsigned InboundsAssumptions = 0;
+  unsigned UnsignedAssumptions = 0;
+  unsigned AliasingAssumptions = 0;
+  unsigned ComplexityAssumptions = 0;
+  unsigned ProfitableAssumptions = 0;
+  unsigned ErrorBlockAssumptions = 0;
+  unsigned InfiniteLoopAssumptions = 0;
+  unsigned InvariantLoadAssumptions = 0;
+  unsigned DelinarizationAssumptions = 0;
+
+  unsigned FatalAssumptionsAliasing = 0;
+  unsigned FatalAssumptionsInbounds = 0;
+  unsigned FatalAssumptionsWrapping = 0;
+  unsigned FatalAssumptionsUnsigned = 0;
+  unsigned FatalAssumptionsComplexity = 0;
+  unsigned FatalAssumptionsUnprofitable = 0;
+  unsigned FatalAssumptionsErrorBlock = 0;
+  unsigned FatalAssumptionsInfiniteLoop = 0;
+  unsigned FatalAssumptionsInvariantLoad = 0;
+  unsigned FatalAssumptionsDelinearization = 0;
+
+  void printInfos(raw_ostream &OS) const;
+
 #if !defined(NDEBUG) || defined(LLVM_ENABLE_DUMP)
   /// Print the ScopStmt to stderr.
   void dump() const;

@@ -1552,13 +1552,16 @@ ScopBuilder::ScopBuilder(Region *R, AssumptionCache &AC, AliasAnalysis &AA,
   buildScop(*R, AC, ORE);
 
   DEBUG(dbgs() << *scop);
+  scop->printInfos(dbgs());
 
   if (!scop->hasFeasibleRuntimeContext()) {
     InfeasibleScops++;
+    dbgs() << "CEV SCoP infeasible | " << scop.get() << "\n";
     Msg = "SCoP ends here but was dismissed.";
     DEBUG(dbgs() << "SCoP detected but dismissed\n");
     scop.reset();
   } else {
+    dbgs() << "CEV SCoP feasible | " << scop.get() << "\n";
     Msg = "SCoP ends here.";
     ++ScopFound;
     if (scop->getMaxLoopDepth() > 0)

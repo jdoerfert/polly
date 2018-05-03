@@ -534,8 +534,11 @@ void IslAst::init(const Dependences &D) {
       PerformParallelTest && !S.containsExtensionNode(ScheduleTree);
 
   // Skip AST and code generation if there was no benefit achieved.
-  if (!benefitsFromPolly(S, PerformParallelTest))
+  if (!benefitsFromPolly(S, PerformParallelTest)) {
+    dbgs() << "CEV ast doesn't benefit | " << &S << "\n";
     return;
+  }
+  dbgs() << "CEV ast will be build | " << &S << "\n";
 
   auto ScopStats = S.getStatistics();
   ScopsBeneficial++;

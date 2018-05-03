@@ -155,6 +155,12 @@ static cl::opt<std::string> OnlyRegion(
     cl::cat(PollyCategory));
 
 static cl::opt<bool>
+    ForceStructuredCFG("polly-force-structured-cfg",
+                       cl::desc("Force valid regions to have a structured CFG"),
+                       cl::Hidden, cl::init(false), cl::ZeroOrMore,
+                       cl::cat(PollyCategory));
+
+static cl::opt<bool>
     IgnoreAliasing("polly-ignore-aliasing",
                    cl::desc("Ignore possible aliasing of the array bases"),
                    cl::Hidden, cl::init(false), cl::ZeroOrMore,
@@ -237,7 +243,7 @@ bool polly::PollyInvariantLoadHoisting;
 static cl::opt<bool, true> XPollyInvariantLoadHoisting(
     "polly-invariant-load-hoisting", cl::desc("Hoist invariant loads."),
     cl::location(PollyInvariantLoadHoisting), cl::Hidden, cl::ZeroOrMore,
-    cl::init(false), cl::cat(PollyCategory));
+    cl::init(true), cl::cat(PollyCategory));
 
 /// The minimal trip count under which loops are considered unprofitable.
 static const unsigned MIN_LOOP_TRIP_COUNT = 8;
@@ -470,8 +476,8 @@ bool ScopDetection::onlyValidRequiredInvariantLoads(
   Region &CurRegion = Context.CurRegion;
   const DataLayout &DL = CurRegion.getEntry()->getModule()->getDataLayout();
 
-  if (!PollyInvariantLoadHoisting && !RequiredILS.empty())
-    return false;
+  if (!PollyInvariantLoadHoisting)
+    return RequiredILS.empty();
 
   for (LoadInst *Load : RequiredILS) {
     // If we already know a load has been accepted as required invariant, we
@@ -578,6 +584,16 @@ bool ScopDetection::isValidBranch(BasicBlock &BB, BranchInst *BI,
   if (isa<ConstantInt>(Condition))
     return true;
 
+  if (ForceStructuredCFG && !IsLoopBranch &&
+      RI.getRegionFor(&BB)->getEntry() != &BB) {
+    Loop *L = LI.getLoopFor(&BB);
+    if (!L || (!L->isLoopLatch(&BB) && !L->isLoopExiting(&BB))) {
+      DEBUG(dbgs() << "Unstructured: Region for " << BB.getName()
+                   << " is not started by it!\n");
+      return false;
+    }
+  }
+
   if (BinaryOperator *BinOp = dyn_cast<BinaryOperator>(Condition)) {
     auto Opcode = BinOp->getOpcode();
     if (Opcode == Instruction::And || Opcode == Instruction::Or) {
@@ -597,6 +613,10 @@ bool ScopDetection::isValidBranch(BasicBlock &BB, BranchInst *BI,
 
   if (auto Load = dyn_cast<LoadInst>(Condition))
     if (!IsLoopBranch && Context.CurRegion.contains(Load)) {
+      if (!PollyInvariantLoadHoisting)
+        return invalid<ReportNonAffBranch>(Context, /*Assert=*/true, &BB,
+                                           SE.getSCEV(Load), SE.getSCEV(Load),
+                                           Load);
       Context.RequiredILS.insert(Load);
       return true;
     }
@@ -808,6 +828,8 @@ bool ScopDetection::isInvariant(Value &Val, const Region &Reg,
   // is not hoistable, it will be rejected later, but here we assume it is and
   // that makes the value invariant.
   if (auto LI = dyn_cast<LoadInst>(I)) {
+    if (!PollyInvariantLoadHoisting)
+      return false;
     Ctx.RequiredILS.insert(LI);
     return true;
   }
@@ -930,10 +952,11 @@ bool ScopDetection::hasValidArraySizes(DetectionContext &Context,
     if (auto *Unknown = dyn_cast<SCEVUnknown>(DelinearizedSize)) {
       auto *V = dyn_cast<Value>(Unknown->getValue());
       if (auto *Load = dyn_cast<LoadInst>(V)) {
-        if (Context.CurRegion.contains(Load) &&
-            isHoistableLoad(Load, CurRegion, LI, SE, DT))
+        if (Context.CurRegion.contains(Load) && PollyInvariantLoadHoisting &&
+            isHoistableLoad(Load, CurRegion, LI, SE, DT)) {
           Context.RequiredILS.insert(Load);
-        continue;
+          continue;
+        }
       }
     }
     if (hasScalarDepsInsideRegion(DelinearizedSize, &CurRegion, Scope, false,
@@ -1145,7 +1168,8 @@ bool ScopDetection::isValidAccess(Instruction *Inst, const SCEV *AF,
         Instruction *Inst = dyn_cast<Instruction>(Ptr.getValue());
         if (Inst && Context.CurRegion.contains(Inst)) {
           auto *Load = dyn_cast<LoadInst>(Inst);
-          if (Load && isHoistableLoad(Load, Context.CurRegion, LI, SE, DT)) {
+          if (Load && PollyInvariantLoadHoisting &&
+              isHoistableLoad(Load, Context.CurRegion, LI, SE, DT)) {
             Context.RequiredILS.insert(Load);
             continue;
           }
@@ -1246,8 +1270,21 @@ bool ScopDetection::canUseISLTripCount(Loop *L,
   // Ensure the loop has valid exiting blocks as well as latches, otherwise we
   // need to overapproximate it as a boxed loop.
   SmallVector<BasicBlock *, 4> LoopControlBlocks;
+
   L->getExitingBlocks(LoopControlBlocks);
+  if (ForceStructuredCFG && LoopControlBlocks.size() != 1) {
+    DEBUG(dbgs() << "Unstructured: #Exiting blocks: "
+                 << LoopControlBlocks.size() << "!\n");
+    return false;
+  }
+
   L->getLoopLatches(LoopControlBlocks);
+  if (ForceStructuredCFG && LoopControlBlocks.size() != 2) {
+    DEBUG(dbgs() << "Unstructured: #Latch blocks: "
+                 << LoopControlBlocks.size() - 1 << "!\n");
+    return false;
+  }
+
   for (BasicBlock *ControlBB : LoopControlBlocks) {
     if (!isValidCFG(*ControlBB, true, false, Context))
       return false;

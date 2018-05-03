@@ -1,15 +1,22 @@
 
 #include "polly/Support/SCEVValidator.h"
+#include "polly/Options.h"
 #include "polly/ScopInfo.h"
 #include "llvm/Analysis/RegionInfo.h"
 #include "llvm/Analysis/ScalarEvolution.h"
 #include "llvm/Analysis/ScalarEvolutionExpressions.h"
+#include "llvm/Support/CommandLine.h"
 #include "llvm/Support/Debug.h"
 
 using namespace llvm;
 using namespace polly;
 
 #define DEBUG_TYPE "polly-scev-validator"
+
+static cl::opt<bool> PollyAllowNonNSW("polly-allow-non-nsw",
+                                      cl::desc("allow operations without nsw"),
+                                      cl::Hidden, cl::init(true),
+                                      cl::ZeroOrMore, cl::cat(PollyCategory));
 
 namespace SCEVType {
 /// The type of a SCEV
@@ -185,6 +192,9 @@ public:
         break;
     }
 
+    if (Return.isPARAM() && !PollyAllowNonNSW && !Expr->hasNoSignedWrap())
+      return ValidatorResult(SCEVType::INVALID);
+
     return Return;
   }
 
@@ -220,6 +230,9 @@ public:
     if (HasMultipleParams && Return.isValid())
       return ValidatorResult(SCEVType::PARAM, Expr);
 
+    if (Return.isPARAM() && !PollyAllowNonNSW && !Expr->hasNoSignedWrap())
+      return ValidatorResult(SCEVType::INVALID);
+
     return Return;
   }
 
@@ -247,7 +260,11 @@ public:
     }
 
     if (R->contains(L)) {
+
       if (Recurrence.isINT()) {
+        if (!PollyAllowNonNSW && !Expr->hasNoSignedWrap())
+          return ValidatorResult(SCEVType::INVALID);
+
         ValidatorResult Result(SCEVType::IV);
         Result.addParamsFrom(Start);
         return Result;

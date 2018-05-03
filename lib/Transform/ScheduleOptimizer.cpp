@@ -1490,8 +1490,10 @@ bool IslScheduleOptimizer::runOnScop(Scop &S) {
     return false;
   }
 
-  if (!D.hasValidDependences())
+  if (!D.hasValidDependences()) {
+    dbgs() << "CEV no dependences | " << &S << "\n";
     return false;
+  }
 
   isl_schedule_free(LastSchedule);
   LastSchedule = nullptr;
@@ -1515,8 +1517,10 @@ bool IslScheduleOptimizer::runOnScop(Scop &S) {
 
   isl::union_set Domain = S.getDomains();
 
-  if (!Domain)
+  if (!Domain) {
+    dbgs() << "CEV no domains | " << &S << "\n";
     return false;
+  }
 
   ScopsProcessed++;
   walkScheduleTreeForStatistics(S.getScheduleTree(), 0);
@@ -1605,8 +1609,10 @@ bool IslScheduleOptimizer::runOnScop(Scop &S) {
 
   // In cases the scheduler is not able to optimize the code, we just do not
   // touch the schedule.
-  if (!Schedule)
+  if (!Schedule) {
+    dbgs() << "CEV no new schedule | " << &S << "\n";
     return false;
+  }
 
   ScopsRescheduled++;
 
@@ -1626,8 +1632,10 @@ bool IslScheduleOptimizer::runOnScop(Scop &S) {
   auto NewSchedule = ScheduleTreeOptimizer::optimizeSchedule(Schedule, &OAI);
   walkScheduleTreeForStatistics(NewSchedule, 2);
 
-  if (!ScheduleTreeOptimizer::isProfitableSchedule(S, NewSchedule))
+  if (!ScheduleTreeOptimizer::isProfitableSchedule(S, NewSchedule)) {
+    dbgs() << "CEV no profitable new schedule | " << &S << "\n";
     return false;
+  }
 
   auto ScopStats = S.getStatistics();
   ScopsOptimized++;
@@ -1640,6 +1648,7 @@ bool IslScheduleOptimizer::runOnScop(Scop &S) {
   if (OptimizedScops)
     errs() << S;
 
+  dbgs() << "CEV profitable new schedule | " << &S << "\n";
   return false;
 }
 
