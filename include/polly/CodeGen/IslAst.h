@@ -60,6 +60,14 @@ public:
   IslAst &operator=(IslAst &&) = delete;
   ~IslAst();
 
+  /// @brief Set of AST leave nodes.
+  llvm::SmallVector<isl_ast_node *, 4> Leaves;
+
+  /// @brief Return the leaves of the AST.
+  const llvm::SmallPtrSet<isl_ast_node *, 4> &getASTLeaves() const;
+
+  void addLeaf(__isl_keep isl_ast_node *Leaf) { Leaves.push_back(Leaf); }
+
   static IslAst create(Scop &Scop, const Dependences &D);
 
   /// Print a source code representation of the program.
@@ -78,7 +86,7 @@ public:
   /// @param Build The isl_build object to use to build the condition.
   ///
   /// @returns An ast expression that describes the necessary run-time check.
-  static isl_ast_expr *buildRunCondition(Scop &S,
+  isl_ast_expr *buildRunCondition(Scop &S,
                                          __isl_keep isl_ast_build *Build);
 
 private:
@@ -124,6 +132,9 @@ public:
 
     /// Set of accesses which break reduction dependences.
     MemoryAccessSet BrokenReductions;
+
+    /// @brief The number if iterations we can assume are dependence free.
+    unsigned DependenceFreeIterations = 0;
   };
 
 private:
@@ -185,6 +196,9 @@ public:
 
   /// Get the nodes build context or a nullptr if not available.
   static __isl_give isl_ast_build *getBuild(__isl_keep isl_ast_node *Node);
+
+  /// @brief Get the number of dependence free iterations for the node or 0.
+  static unsigned getDependenceFreeIterations(__isl_keep isl_ast_node *Node);
 
   ///}
 };

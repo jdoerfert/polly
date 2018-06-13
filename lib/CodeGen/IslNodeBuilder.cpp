@@ -99,6 +99,13 @@ static cl::opt<int> PollyTargetFirstLevelCacheLineSize(
     cl::desc("The size of the first level cache line size specified in bytes."),
     cl::Hidden, cl::init(64), cl::ZeroOrMore, cl::cat(PollyCategory));
 
+static cl::opt<int> MaxVectorWidth("polly-max-vector-width",
+                                   cl::desc("The maximal vector width"),
+                                   cl::init(16), cl::ZeroOrMore,
+                                   cl::cat(PollyCategory));
+
+static int gcd(int a, int b) { return (a == 0) ? b : gcd(b % a, a); }
+
 __isl_give isl_ast_expr *
 IslNodeBuilder::getUpperBound(__isl_keep isl_ast_node *For,
                               ICmpInst::Predicate &Predicate) {
@@ -434,7 +441,7 @@ void IslNodeBuilder::createMark(__isl_take isl_ast_node *Node) {
     bool Vector = PollyVectorizerChoice == VECTORIZER_POLLY;
     int VectorWidth = getNumberOfIterations(Child);
     if (Vector && 1 < VectorWidth && VectorWidth <= 16)
-      createForVector(Child, VectorWidth);
+      createForVector(Child, VectorWidth, VectorWidth);
     else
       createForSequential(Child, true);
     isl_id_free(Id);
@@ -449,7 +456,7 @@ void IslNodeBuilder::createMark(__isl_take isl_ast_node *Node) {
 }
 
 void IslNodeBuilder::createForVector(__isl_take isl_ast_node *For,
-                                     int VectorWidth) {
+                                     int VectorWidth, int NumberOfIterations, bool IsParallel) {
   isl_ast_node *Body = isl_ast_node_for_get_body(For);
   isl_ast_expr *Init = isl_ast_node_for_get_init(For);
   isl_ast_expr *Inc = isl_ast_node_for_get_inc(For);
@@ -467,6 +474,28 @@ void IslNodeBuilder::createForVector(__isl_take isl_ast_node *For,
     ValueLB = Builder.CreateSExt(ValueLB, MaxType);
   if (MaxType != ValueInc->getType())
     ValueInc = Builder.CreateSExt(ValueInc, MaxType);
+
+  BasicBlock *ExitBlock = nullptr;
+  if (VectorWidth != NumberOfIterations) {
+    assert((NumberOfIterations / VectorWidth) * VectorWidth ==
+               NumberOfIterations &&
+           "Number of iterations should be divisable by the vector width");
+
+    CmpInst::Predicate Predicate;
+    isl_ast_expr *UB = getUpperBound(For, Predicate);
+    Value *ValueUB = ExprBuilder.create(UB);
+    if (MaxType != ValueUB->getType())
+      ValueUB = Builder.CreateSExt(ValueUB, MaxType);
+
+    Value *Stride = ConstantInt::getSigned(MaxType, VectorWidth);
+
+    Stride = Builder.CreateMul(ValueInc, Stride, "polly.vec.stride");
+
+    bool UseGuard = NumberOfIterations > 0;
+    ValueLB =
+        createLoop(ValueLB, ValueUB, Stride, Builder, LI, DT, ExitBlock,
+                   Predicate, &Annotator, IsParallel, UseGuard);
+  }
 
   std::vector<Value *> IVS(VectorWidth);
   IVS[0] = ValueLB;
@@ -499,6 +528,10 @@ void IslNodeBuilder::createForVector(__isl_take isl_ast_node *For,
     isl_ast_node_dump(Body);
     llvm_unreachable("Unhandled isl_ast_node in vectorizer");
   }
+
+  if (ExitBlock)
+    Builder.SetInsertPoint(&*ExitBlock->begin());
+
 
   IDToValue.erase(IDToValue.find(IteratorID));
   isl_id_free(IteratorID);
@@ -779,11 +812,24 @@ void IslNodeBuilder::createFor(__isl_take isl_ast_node *For) {
   bool Vector = PollyVectorizerChoice == VECTORIZER_POLLY;
 
   if (Vector && IslAstInfo::isInnermostParallel(For) &&
-      !IslAstInfo::isReductionParallel(For)) {
-    int VectorWidth = getNumberOfIterations(For);
-    if (1 < VectorWidth && VectorWidth <= 16 && !hasPartialAccesses(For)) {
-      createForVector(For, VectorWidth);
-      return;
+      !IslAstInfo::isReductionParallel(For) && !hasPartialAccesses(For)) {
+    int NumberOfIterations = getNumberOfIterations(For);
+    int VectorWidth = std::min(MaxVectorWidth.getValue(), NumberOfIterations);
+    // FIXME: The gcd is necessary since we do not compute left over loops.
+    VectorWidth = gcd(VectorWidth, NumberOfIterations);
+    if (VectorWidth > 1)
+      return createForVector(For, VectorWidth, NumberOfIterations, true);
+  }
+
+  int DepFreeIterations = IslAstInfo::getDependenceFreeIterations(For);
+  if (DepFreeIterations > 1) {
+    int NumberOfIterations = getNumberOfIterations(For);
+    int VectorWidth = std::min(DepFreeIterations, NumberOfIterations);
+    // FIXME: The gcd is necessary since we do not compute left over loops.
+    VectorWidth = gcd(VectorWidth, NumberOfIterations);
+    if (VectorWidth > 1) {
+      if (Vector)
+        return createForVector(For, VectorWidth, NumberOfIterations, false);
     }
   }
 

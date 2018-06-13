@@ -93,6 +93,12 @@ static cl::opt<bool> DetectParallel("polly-ast-detect-parallel",
                                     cl::init(false), cl::ZeroOrMore,
                                     cl::cat(PollyCategory));
 
+//unsigned polly::PollyUnrollMinDepDis;
+static cl::opt<unsigned> PollyUnrollMinDepDis(
+    "polly-unroll-min-dep-distance",
+    cl::desc("Check minimal dependence distance in RTCs to unroll loop."),
+    cl::Hidden, cl::init(4), cl::ZeroOrMore, cl::cat(PollyCategory));
+
 STATISTIC(ScopsProcessed, "Number of SCoPs processed");
 STATISTIC(ScopsBeneficial, "Number of beneficial SCoPs");
 STATISTIC(BeneficialAffineLoops, "Number of beneficial affine loops");
@@ -121,6 +127,8 @@ struct AstBuildUserInfo {
 
   /// The last iterator id created for the current SCoP.
   isl_id *LastForNodeId = nullptr;
+
+  IslAst *IA = nullptr;
 };
 
 } // namespace polly
@@ -187,6 +195,8 @@ static isl_printer *cbPrintFor(__isl_take isl_printer *Printer,
 
   if (DD)
     Printer = printLine(Printer, DepDisPragmaStr, DD);
+
+  Printer = printLine(Printer, "#pragma dep-free iterations: " + std::to_string(IslAstInfo::getDependenceFreeIterations(Node)));
 
   if (IslAstInfo::isInnermostParallel(Node))
     Printer = printLine(Printer, SimdPragmaStr + BrokenReductionsStr);
@@ -287,6 +297,10 @@ astBuildAfterFor(__isl_take isl_ast_node *Node, __isl_keep isl_ast_build *Build,
   assert(!Payload->Build && "Build environment already set");
   Payload->Build = isl_ast_build_copy(Build);
   Payload->IsInnermost = (Id == BuildInfo->LastForNodeId);
+
+  // Collect innermost (leave) nodes.
+  if (BuildInfo->IA && Payload->IsInnermost)
+    BuildInfo->IA->addLeaf(Node);
 
   // Innermost loops that are surrounded by parallel loops have not yet been
   // tested for parallelism. Test them here to ensure we check all innermost
@@ -410,17 +424,102 @@ __isl_give isl_ast_expr *
 IslAst::buildRunCondition(Scop &S, __isl_keep isl_ast_build *Build) {
   isl_ast_expr *RunCondition;
 
+  isl_set *AssumedCtx = S.getAssumedContext().release();
+  isl_set *InvalidCtx = S.getInvalidContext().release();
+
+  if (PollyUnrollMinDepDis > 1 && !Leaves.empty()) {
+    isl_ast_expr *IncExpr;
+    isl_pw_aff *MinDDPA, *DDPA, *IncPA, *OnePA, *AdjustedDDPA;
+    isl_set *InvDomain, *UniverseDomain;
+    isl_val *DDVal, *IncVal, *OneVal;
+    isl_local_space *LocSpace;
+    isl_space *Space;
+
+    Space = S.getParamSpace().release();
+    LocSpace = isl_local_space_from_space(isl_space_copy(Space));
+    UniverseDomain = isl_set_universe(Space);
+
+    OneVal = isl_val_one(isl_set_get_ctx(UniverseDomain));
+    OnePA = isl_pw_aff_from_aff(
+        isl_aff_val_on_domain(isl_local_space_copy(LocSpace), OneVal));
+
+    DDVal = isl_val_int_from_ui(Ctx.get(), PollyUnrollMinDepDis);
+    //auto *DDExpr = isl_ast_expr_from_val(isl_val_copy(DDVal));
+    DDPA = isl_pw_aff_from_aff(
+        isl_aff_val_on_domain(isl_local_space_copy(LocSpace), DDVal));
+
+    for (isl_ast_node *For : Leaves) {
+      if (isl_ast_node_get_type(For) != isl_ast_node_for)
+        continue;
+
+      MinDDPA = IslAstInfo::getMinimalDependenceDistance(For);
+      if (!MinDDPA)
+        continue;
+
+      if (isl_pw_aff_is_equal(MinDDPA, OnePA)) {
+        isl_pw_aff_free(MinDDPA);
+        continue;
+      }
+
+      IncExpr = isl_ast_node_for_get_inc(For);
+      if (isl_ast_expr_get_type(IncExpr) != isl_ast_expr_int) {
+        isl_pw_aff_free(MinDDPA);
+        isl_ast_expr_free(IncExpr);
+        continue;
+      }
+
+      IncVal = isl_ast_expr_get_val(IncExpr);
+      IncPA = isl_pw_aff_from_aff(
+          isl_aff_val_on_domain(isl_local_space_copy(LocSpace), IncVal));
+
+      AdjustedDDPA = isl_pw_aff_mul(isl_pw_aff_copy(DDPA), IncPA);
+      InvDomain = isl_pw_aff_ge_set(AdjustedDDPA, MinDDPA);
+
+      if (isl_set_is_empty(InvDomain)) {
+        isl_set_free(InvDomain);
+        isl_ast_expr_free(IncExpr);
+        //isl_pw_aff_free(MinDDPA);
+        continue;
+      }
+
+      IslAstUserPayload *Payload = IslAstInfo::getNodePayload(For);
+      Payload->DependenceFreeIterations = PollyUnrollMinDepDis;
+
+      if (isl_set_is_equal(InvDomain, UniverseDomain)) {
+        isl_set_free(InvDomain);
+        isl_ast_expr_free(IncExpr);
+        //isl_pw_aff_free(MinDDPA);
+        continue;
+      }
+
+      InvalidCtx = isl_set_union(InvalidCtx, InvDomain);
+      InvalidCtx = isl_set_coalesce(InvalidCtx);
+      isl_ast_expr_free(IncExpr);
+      //auto *MinDDExpr = isl_ast_build_expr_from_pw_aff(Build, MinDDPA);
+      //auto *AdjDDExpr = isl_ast_expr_mul(isl_ast_expr_copy(DDExpr), IncExpr);
+      //auto *CmpDDExpr = isl_ast_expr_ge(AdjDDExpr, MinDDExpr);
+      //RunCondition = isl_ast_expr_and(RunCondition, CmpDDExpr);
+      //isl_set_free(InvDomain);
+    }
+
+    isl_local_space_free(LocSpace);
+    isl_set_free(UniverseDomain);
+    //isl_ast_expr_free(DDExpr);
+    isl_pw_aff_free(DDPA);
+    isl_pw_aff_free(OnePA);
+  }
+
   // The conditions that need to be checked at run-time for this scop are
   // available as an isl_set in the runtime check context from which we can
   // directly derive a run-time condition.
-  auto *PosCond =
-      isl_ast_build_expr_from_set(Build, S.getAssumedContext().release());
-  if (S.hasTrivialInvalidContext()) {
+  auto *PosCond = isl_ast_build_expr_from_set(Build, AssumedCtx);
+
+  if (isl_set_is_empty(InvalidCtx)) {
+    isl_set_free(InvalidCtx);
     RunCondition = PosCond;
   } else {
     auto *ZeroV = isl_val_zero(isl_ast_build_get_ctx(Build));
-    auto *NegCond =
-        isl_ast_build_expr_from_set(Build, S.getInvalidContext().release());
+    auto *NegCond = isl_ast_build_expr_from_set(Build, InvalidCtx);
     auto *NotNegCond = isl_ast_expr_eq(isl_ast_expr_from_val(ZeroV), NegCond);
     RunCondition = isl_ast_expr_and(PosCond, NotNegCond);
   }
@@ -559,6 +658,7 @@ void IslAst::init(const Dependences &D) {
   if (PerformParallelTest) {
     BuildInfo.Deps = &D;
     BuildInfo.InParallelFor = false;
+    BuildInfo.IA = this;
 
     Build = isl_ast_build_set_before_each_for(Build, &astBuildBeforeFor,
                                               &BuildInfo);
@@ -572,10 +672,10 @@ void IslAst::init(const Dependences &D) {
                                               &BuildInfo);
   }
 
-  RunCondition = buildRunCondition(S, Build);
-
   Root = isl_ast_build_node_from_schedule(Build, S.getScheduleTree().release());
   walkAstForStatistics(Root);
+
+  RunCondition = buildRunCondition(S, Build);
 
   isl_ast_build_free(Build);
 }
@@ -660,6 +760,12 @@ IslAstInfo::getMinimalDependenceDistance(__isl_keep isl_ast_node *Node) {
   IslAstUserPayload *Payload = getNodePayload(Node);
   return Payload ? isl_pw_aff_copy(Payload->MinimalDependenceDistance)
                  : nullptr;
+}
+
+unsigned
+IslAstInfo::getDependenceFreeIterations(__isl_keep isl_ast_node *Node) {
+  IslAstUserPayload *Payload = getNodePayload(Node);
+  return Payload ? Payload->DependenceFreeIterations : 0;
 }
 
 IslAstInfo::MemoryAccessSet *
