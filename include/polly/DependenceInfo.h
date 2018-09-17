@@ -59,7 +59,7 @@ struct Dependences {
   };
 
   /// Map type for reduction dependences.
-  using ReductionDependencesMapTy = DenseMap<MemoryAccess *, isl_map *>;
+  using ReductionDependencesMapTy = DenseMap<MemoryAccess *, isl_union_map *>;
 
   /// Map type to associate statements with schedules.
   using StatementToIslMapTy = DenseMap<ScopStmt *, isl_map *>;
@@ -107,7 +107,7 @@ struct Dependences {
   /// Return the reduction dependences caused by @p MA.
   ///
   /// @return The reduction dependences caused by @p MA or nullptr if none.
-  __isl_give isl_map *getReductionDependences(MemoryAccess *MA) const;
+  __isl_give isl_union_map *getReductionDependences(MemoryAccess *MA) const;
 
   /// Return all reduction dependences.
   const ReductionDependencesMapTy &getReductionDependences() const {
@@ -158,6 +158,9 @@ struct Dependences {
   /// Destructor that will free internal objects.
   ~Dependences() { releaseMemory(); }
 
+  /// Set the reduction dependences for @p MA to @p Deps.
+  void setReductionDependences(MemoryAccess *MA, __isl_take isl_map *Deps);
+
 private:
   /// Create an empty dependences struct.
   explicit Dependences(const std::shared_ptr<isl_ctx> &IslCtx,
@@ -166,13 +169,10 @@ private:
         IslCtx(IslCtx), Level(Level) {}
 
   /// Calculate and add at the privatization dependences.
-  void addPrivatizationDependences();
+  void addPrivatizationDependences(Scop &S);
 
   /// Calculate the dependences for a certain SCoP @p S.
   void calculateDependences(Scop &S);
-
-  /// Set the reduction dependences for @p MA to @p Deps.
-  void setReductionDependences(MemoryAccess *MA, __isl_take isl_map *Deps);
 
   /// Free the objects associated with this Dependences struct.
   ///

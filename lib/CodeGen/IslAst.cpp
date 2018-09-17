@@ -236,7 +236,7 @@ static bool astScheduleDimIsParallel(__isl_keep isl_ast_build *Build,
   for (const auto &MaRedPair : D->getReductionDependences()) {
     if (!MaRedPair.second)
       continue;
-    RedDeps = isl_union_map_from_map(isl_map_copy(MaRedPair.second));
+    RedDeps = isl_union_map_copy(MaRedPair.second);
     if (!D->isParallel(Schedule, RedDeps))
       NodeInfo->BrokenReductions.insert(MaRedPair.first);
   }

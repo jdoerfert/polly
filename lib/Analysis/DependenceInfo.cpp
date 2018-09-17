@@ -57,6 +57,11 @@ static cl::opt<bool>
                   cl::Hidden, cl::init(true), cl::ZeroOrMore,
                   cl::cat(PollyCategory));
 
+static cl::opt<bool> UseReductionChains(
+    "polly-dependences-use-reduction-chains",
+    cl::desc("Exploit reduction chains in dependence analysis"), cl::Hidden,
+    cl::init(true), cl::ZeroOrMore, cl::cat(PollyCategory));
+
 enum AnalysisType { VALUE_BASED_ANALYSIS, MEMORY_BASED_ANALYSIS };
 
 static cl::opt<enum AnalysisType> OptAnalysisType(
@@ -84,7 +89,6 @@ static cl::opt<Dependences::AnalysisLevel> OptAnalysisLevel(
     cl::cat(PollyCategory));
 
 //===----------------------------------------------------------------------===//
-
 /// Tag the @p Relation domain with @p TagId
 static __isl_give isl_map *tag(__isl_take isl_map *Relation,
                                __isl_take isl_id *TagId) {
@@ -111,6 +115,455 @@ static __isl_give isl_map *tag(__isl_take isl_map *Relation, MemoryAccess *MA,
   return Relation;
 }
 
+static void extractStmtAndAccess(bool Domain, const isl::map &M,
+                                 ScopStmt *&Stmt, MemoryAccess *&MA) {
+  isl::set S = Domain ? M.domain() : M.range();
+  Stmt =
+      static_cast<ScopStmt *>(S.unwrap().get_tuple_id(isl::dim::in).get_user());
+  MA = static_cast<MemoryAccess *>(
+      S.unwrap().get_tuple_id(isl::dim::out).get_user());
+}
+
+static void extractStmtsAndAccesses(const isl::map &M, ScopStmt *&SrcStmt,
+                                    MemoryAccess *&SrcMA, ScopStmt *&TrgStmt,
+                                    MemoryAccess *&TrgMA) {
+  extractStmtAndAccess(true, M, SrcStmt, SrcMA);
+  extractStmtAndAccess(false, M, TrgStmt, TrgMA);
+}
+
+static void printDependencyMap(raw_ostream &OS, __isl_keep isl_union_map *DM) {
+  if (DM)
+    OS << DM << "\n";
+  else
+    OS << "n/a\n";
+}
+
+struct Dep {
+  MemoryAccess *SrcMA, *TrgMA;
+  isl::map Dep;
+};
+using DepMapTy = DenseMap<MemoryAccess *, SmallVector<Dep *, 4>>;
+
+struct ReductionComputationChain {
+  using RedTy = MemoryAccess::ReductionType;
+  MemoryAccess *ReadMA, *WriteMA;
+  isl::set ReadDom, WriteDom;
+  RedTy RT;
+  isl::union_set AllDoms;
+  isl::map ReadToWriteMap;
+  SmallVector<isl::map, 8> TraversedComputeMaps;
+  SmallVector<std::pair<MemoryAccess *, MemoryAccess *>, 8> TraversedComputes;
+  SmallVector<Dep *, 8> TraversedRAWs;
+  SmallPtrSet<ReductionComputationChain *, 16> SubChains;
+  void dump(raw_ostream &OS) const {
+    OS << to_str() << "\n";
+  }
+  std::string to_str() const {
+    return ("[" + std::to_string(SubChains.size()) + "]" + ReadDom.to_str() +
+            " --[" + MemoryAccess::getReductionOperatorStr(RT) + "]--> " +
+            WriteDom.to_str());
+  }
+};
+
+using RCCsMapTy =
+    DenseMap<MemoryAccess *, SmallVector<ReductionComputationChain *, 4>>;
+
+static isl::map makeComputeFlowMap(MemoryAccess *FromMA, MemoryAccess *ToMA) {
+  isl_space *DS = FromMA->getStatement()->getDomainSpace().release();
+  isl_map *DomIdMap = isl_map_identity(
+      isl_space_map_from_domain_and_range(isl_space_copy(DS), DS));
+  isl_map *ReadRel = isl_map_copy(DomIdMap);
+  ReadRel = tag(ReadRel, FromMA, Dependences::AL_Access);
+  isl_map *WriteRel = DomIdMap;
+  WriteRel = tag(WriteRel, ToMA, Dependences::AL_Access);
+  isl_map *ComputeFlow =
+      isl_map_apply_range(ReadRel, isl_map_reverse(WriteRel));
+  return isl::manage(ComputeFlow);
+}
+
+static void dumpRCCs(RCCsMapTy &RCCsMap) {
+  for (auto &It : RCCsMap) {
+    errs() << "- " << It.first->getAccessRelationStr() << "\n";
+    for (auto &RCC: It.second) {
+      errs() << "  - [" << RCC->TraversedComputes.size() << "]["
+             << RCC->TraversedRAWs.size() << "] " << RCC->to_str() << "\n";
+    }
+  }
+}
+
+static void buildInitialRCCs(Scop &S, RCCsMapTy &RCCsMap) {
+  for (ScopStmt &Stmt : S) {
+    for (auto &It: Stmt.ComputationChains)
+      for (auto &CC : It.second) {
+        auto ComputeFlowMap = makeComputeFlowMap(CC.ReadMA, CC.WriteMA);
+        RCCsMap[CC.ReadMA].push_back(
+            new ReductionComputationChain{CC.ReadMA,
+                                          CC.WriteMA,
+                                          ComputeFlowMap.domain(),
+                                          ComputeFlowMap.range(),
+                                          CC.RedTy,
+                                          ComputeFlowMap.range(),
+                                          ComputeFlowMap,
+                                          {ComputeFlowMap},
+                                          {{CC.ReadMA, CC.WriteMA}}});
+      }
+  }
+}
+
+static void detectReductionDependences(
+    Dependences &DepObj, Scop &S, LoopInfo &LI, isl::union_map &RAWs,
+    isl::union_map &WARs, isl::union_map &WAWs, isl::union_map &InRCRAWs,
+    isl::union_map &InRCWARs, isl::union_map &InRCWAWs, isl::union_map &REDs) {
+  RCCsMapTy RCCsMap;
+  buildInitialRCCs(S, RCCsMap);
+  dumpRCCs(RCCsMap);
+
+  DepMapTy RAWMap, WARMap, WAWMap;
+  DepMapTy *Map;
+  const std::function<isl::stat(isl::map)> CreateMaping = [&](isl::map M) {
+    if (!M.domain_is_wrapping())
+      return isl::stat::ok;
+    assert(M.range_is_wrapping());
+
+    ScopStmt *BeforeStmt, *AfterStmt;
+    MemoryAccess *BeforeMA, *AfterMA;
+    extractStmtsAndAccesses(M, BeforeStmt, BeforeMA, AfterStmt, AfterMA);
+    (*Map)[BeforeMA].push_back(new Dep{BeforeMA, AfterMA, M});
+    return isl::stat::ok;
+  };
+  Map = &RAWMap;
+  RAWs.foreach_map(CreateMaping);
+  Map = &WARMap;
+  WARs.foreach_map(CreateMaping);
+  Map = &WAWMap;
+  WAWs.foreach_map(CreateMaping);
+
+  DenseMap<std::pair<MemoryAccess *, MemoryAccess *>,
+           ReductionComputationChain *>
+      RCCCollection;
+
+  SmallVector<ReductionComputationChain *, 32> WorklistNonHeaders;
+  SmallVector<ReductionComputationChain *, 32> WorklistHeaders;
+  SmallVector<ReductionComputationChain *, 32> Worklist;
+  for (auto &It : RCCsMap) {
+    for (ReductionComputationChain *RCCPtr : It.second) {
+      ReductionComputationChain &RCC = *RCCPtr;
+      bool Success =
+          RCCCollection.insert({{RCC.ReadMA, RCC.WriteMA}, RCCPtr}).second;
+      assert(Success);
+
+      isl::set OutgoingDom = isl::set::empty(RCC.WriteDom.get_space());
+      isl::set InvalidOutgoingDom = OutgoingDom;
+
+      for (Dep *RAWDepPtr : RAWMap.lookup(RCC.WriteMA)) {
+        Dep &RAWDep = *RAWDepPtr;
+        assert(RAWDep.SrcMA == RCC.WriteMA);
+        isl::set RAWOutgoingDom = RAWDep.Dep.domain();
+        InvalidOutgoingDom =
+            InvalidOutgoingDom.unite(OutgoingDom.intersect(RAWOutgoingDom));
+        OutgoingDom = OutgoingDom.unite(RAWOutgoingDom);
+      }
+      if (!InvalidOutgoingDom.is_empty()) {
+        RCC.WriteDom = RCC.WriteDom.subtract(InvalidOutgoingDom);
+        RCC.ReadDom = RCC.ReadDom.subtract(
+            InvalidOutgoingDom.apply(RCC.ReadToWriteMap.reverse()));
+      }
+      if (RCC.ReadDom.is_empty())
+        continue;
+      if (LI.isLoopHeader(RCC.ReadMA->getStatement()->getEntryBlock()))
+        WorklistHeaders.push_back(RCCPtr);
+      else
+        WorklistNonHeaders.push_back(RCCPtr);
+    }
+    //Worklist.append(It.second.begin(), It.second.end());
+  }
+  Worklist.append(WorklistHeaders.begin(), WorklistHeaders.end());
+  Worklist.append(WorklistNonHeaders.begin(), WorklistNonHeaders.end());
+
+  isl::space Space = RAWs.get_space();
+  REDs = isl::union_map::empty(Space);
+
+  while (!Worklist.empty()) {
+    ReductionComputationChain &RCC = *Worklist.pop_back_val();
+
+    for (Dep *RAWDepPtr : RAWMap.lookup(RCC.WriteMA)) {
+      Dep &RAWDep = *RAWDepPtr;
+      assert(RAWDep.SrcMA == RCC.WriteMA);
+
+      isl::set RAWOutgoingDom = RAWDep.Dep.domain();
+      if (RAWOutgoingDom.is_disjoint(RCC.WriteDom))
+        continue;
+
+      isl::set RAWOutgoingRng = RAWDep.Dep.range();
+
+      unsigned NumWL = Worklist.size();
+      assert(RAWDep.TrgMA->isRead());
+      const auto &StartingRCCs = (RCCsMap.lookup(RAWDep.TrgMA));
+      bool Overwrite = false &&
+          StartingRCCs.size() == 1 && RAWOutgoingDom.is_equal(RCC.WriteDom);
+
+      for (auto *NextRCCPtr: StartingRCCs) {
+        ReductionComputationChain &NextRCC = *NextRCCPtr;
+        auto RTJoin = MemoryAccess::join(RCC.RT, NextRCC.RT);
+        if (RTJoin == MemoryAccess::RT_NONE)
+          continue;
+        ReductionComputationChain *NextRCCInCollection =
+            RCCCollection.lookup({NextRCC.ReadMA, NextRCC.WriteMA});
+        assert(NextRCCInCollection);
+        if (NextRCCInCollection != NextRCCPtr) {
+          continue;
+        }
+        if (RAWOutgoingRng.is_disjoint(NextRCC.ReadDom))
+          continue;
+
+
+        auto DealWithWAW = [&](bool RCCisFirst, Dep &WAWDep) {
+          ReductionComputationChain &LastRCC = RCC;
+          ReductionComputationChain &NextRCC = *NextRCCPtr;
+          isl::map RAWDepDep = RAWDep.Dep;
+          if (!RCCisFirst) {
+            std::swap(LastRCC, NextRCC);
+          }
+
+          Dep *WARDepPtr = nullptr;
+          for (auto *WARDepP : WARMap.lookup(LastRCC.ReadMA)) {
+            Dep &WARDep = *WARDepP;
+            if (WARDep.TrgMA != NextRCC.WriteMA)
+              continue;
+            assert(!WARDepPtr);
+            WARDepPtr = &WARDep;
+          }
+          if (!WARDepPtr)
+            return;
+
+          Dep &WARDep = *WARDepPtr;
+
+          isl::set RedBegin =
+              WAWDep.Dep.apply_domain(LastRCC.ReadToWriteMap.reverse()).domain();
+          RedBegin = RedBegin.intersect(
+              WARDep.Dep.intersect_range(NextRCC.WriteDom).domain());
+          RedBegin = RedBegin.intersect(LastRCC.ReadDom);
+          if (RedBegin.is_empty())
+            return;
+
+          DenseMap<MemoryAccess *, isl::map> LastRedMADomMap;
+          DenseMap<MemoryAccess *, isl::map> NextRedMADomMap;
+          isl::map RedSet =
+              isl::map::identity(RedBegin.get_space().map_from_set())
+                  .intersect_domain(RedBegin);
+          //RedSet = RedSet.apply_domain(LastRCC.ReadToWriteMap)
+                       //.apply_domain(RAWDepDep);
+          assert(LastRCC.TraversedComputeMaps.size() ==
+                 LastRCC.TraversedComputes.size());
+          assert(LastRCC.TraversedComputeMaps.size() ==
+                 LastRCC.TraversedRAWs.size() + 1);
+          for (unsigned i = 0, e = LastRCC.TraversedComputes.size(); i < e;
+               i++) {
+            auto &It = LastRCC.TraversedComputes[i];
+            if (!LastRedMADomMap.count(It.first))
+              LastRedMADomMap[It.first] = RedSet;
+            else
+              LastRedMADomMap[It.first] = RedSet.unite(LastRedMADomMap[It.first]);
+            assert(!It.first->isWrite());
+            RedSet = RedSet.apply_range(LastRCC.TraversedComputeMaps[i]);
+            if (!LastRedMADomMap.count(It.second))
+              LastRedMADomMap[It.second] = RedSet;
+            else
+              LastRedMADomMap[It.second] = RedSet.unite(LastRedMADomMap[It.second]);
+            assert(It.second->isWrite());
+            if (i + 1 == e)
+              break;
+            RedSet = RedSet.apply_range(LastRCC.TraversedRAWs[i]->Dep);
+          }
+          RedSet = RedSet.apply_range(RAWDepDep);
+
+          assert(NextRCC.TraversedComputeMaps.size() ==
+                 NextRCC.TraversedComputes.size());
+          assert(NextRCC.TraversedComputeMaps.size() ==
+                 NextRCC.TraversedRAWs.size() + 1);
+          for (unsigned i = 0, e = NextRCC.TraversedComputes.size(); i < e;
+               i++) {
+            auto &It = NextRCC.TraversedComputes[i];
+            if (!NextRedMADomMap.count(It.first))
+              NextRedMADomMap[It.first] = RedSet;
+            else
+              NextRedMADomMap[It.first] =
+                  RedSet.unite(NextRedMADomMap[It.first]);
+            assert(!It.first->isWrite());
+            RedSet = RedSet.apply_range(NextRCC.TraversedComputeMaps[i]);
+            if (!NextRedMADomMap.count(It.second))
+              NextRedMADomMap[It.second] = RedSet;
+            else
+              NextRedMADomMap[It.second] =
+                  RedSet.unite(NextRedMADomMap[It.second]);
+            assert(It.second->isWrite());
+            if (i + 1 == e)
+              break;
+            RedSet = RedSet.apply_range(NextRCC.TraversedRAWs[i]->Dep);
+          }
+
+          assert(LastRCC.TraversedComputes.front().first == LastRCC.ReadMA);
+          auto RemoveDeps = [&](std::pair<MemoryAccess *, MemoryAccess *> &TC) {
+            MemoryAccess &ReadMA = *TC.first;
+            MemoryAccess &WriteMA = *TC.second;
+
+            isl::map ReadRedSet = LastRedMADomMap[&ReadMA];
+            assert(ReadRedSet);
+            isl::map WriteRedSet = LastRedMADomMap[&WriteMA];
+            assert(WriteRedSet);
+
+            auto CollectAndRemoveREDDep = [&](DepMapTy &Map, MemoryAccess &MA,
+                                              decltype(NextRedMADomMap) &MAMap,
+                                              isl::map M, isl::union_map &UM) {
+              for (auto *DPtr : Map.lookup(&MA)) {
+                Dep &D = *DPtr;
+                isl::map TrgRedDep = MAMap.lookup(D.TrgMA);
+                if (!TrgRedDep)
+                  continue;
+                isl::map M2 = TrgRedDep.apply_domain(M);
+                isl::map RedDep = D.Dep.intersect(M2);
+                if (RedDep.is_empty())
+                  continue;
+                D.Dep = D.Dep.subtract(RedDep);
+                UM = UM.add_map(RedDep);
+                if (&UM == &REDs) {
+                  DepObj.setReductionDependences(
+                      &MA, isl_set_unwrap(
+                               isl_map_domain(isl_map_zip(RedDep.release()))));
+                }
+              }
+            };
+            CollectAndRemoveREDDep(WARMap, ReadMA, NextRedMADomMap, ReadRedSet,
+                                   REDs);
+            CollectAndRemoveREDDep(RAWMap, WriteMA, NextRedMADomMap,
+                                   WriteRedSet, REDs);
+            CollectAndRemoveREDDep(WAWMap, WriteMA, NextRedMADomMap,
+                                   WriteRedSet, REDs);
+            CollectAndRemoveREDDep(WARMap, ReadMA, LastRedMADomMap, ReadRedSet,
+                                   InRCWARs);
+            CollectAndRemoveREDDep(RAWMap, WriteMA, LastRedMADomMap,
+                                   WriteRedSet, InRCRAWs);
+            CollectAndRemoveREDDep(WAWMap, WriteMA, LastRedMADomMap,
+                                   WriteRedSet, InRCWAWs);
+          };
+
+          for (auto &It : LastRCC.TraversedComputes)
+            RemoveDeps(It);
+          //for (auto &It : NextRCC.TraversedComputes)
+            //RemoveDeps(It);
+        };
+
+        bool WAWFound = false;
+        for (auto *WAWDepPtr : WAWMap.lookup(RCC.WriteMA)) {
+          auto &WAWDep = *WAWDepPtr;
+          if (WAWDep.TrgMA != NextRCC.WriteMA)
+            continue;
+          DealWithWAW(true, WAWDep);
+          WAWFound = true;
+        }
+        if (WAWFound)
+          continue;
+
+        if (RAWDep.Dep.is_empty())
+          continue;
+
+        isl::map R2WDep = RCC.ReadToWriteMap.apply_range(RAWDep.Dep);
+
+        if (RCC.ReadMA == NextRCC.ReadMA) {
+          int Exact = 1;
+          R2WDep =
+              isl::manage(isl_map_transitive_closure(R2WDep.release(), &Exact));
+          if (Exact != 1)
+            continue;
+        }
+
+        //RCC.ReadToWriteMap.dump();
+        //RAWDep.Dep.dump();
+        //R2WDep.dump();
+        //NextRCC.ReadToWriteMap.dump();
+
+        isl::map R2WDepR2W = R2WDep.apply_range(NextRCC.ReadToWriteMap);
+        if (R2WDepR2W.is_empty())
+          continue;
+
+        ReductionComputationChain *OtherRCC =
+            RCCCollection.lookup({RCC.ReadMA, NextRCC.WriteMA});
+        if (OtherRCC) {
+          if (R2WDepR2W.is_subset(OtherRCC->ReadToWriteMap))
+            continue;
+          RCCCollection.erase({RCC.ReadMA, NextRCC.WriteMA});
+        }
+
+        ReductionComputationChain *CompoundRCC;
+        if (Overwrite) {
+          CompoundRCC = &RCC;
+          CompoundRCC->WriteMA = NextRCC.WriteMA;
+          CompoundRCC->ReadDom = RCC.ReadDom.intersect(R2WDepR2W.domain());
+          CompoundRCC->WriteDom = NextRCC.WriteDom.intersect(R2WDepR2W.range());
+          CompoundRCC->RT = RTJoin;
+          CompoundRCC->ReadToWriteMap = R2WDepR2W;
+        } else {
+          CompoundRCC = new ReductionComputationChain{
+              RCC.ReadMA,
+              NextRCC.WriteMA,
+              RCC.ReadDom.intersect(R2WDepR2W.domain()),
+              NextRCC.WriteDom.intersect(R2WDepR2W.range()),
+              RTJoin,
+              NextRCC.WriteDom.intersect(R2WDepR2W.range()),
+              R2WDepR2W};
+          CompoundRCC->TraversedComputes = RCC.TraversedComputes;
+          CompoundRCC->TraversedComputeMaps = RCC.TraversedComputeMaps;
+          CompoundRCC->TraversedRAWs = RCC.TraversedRAWs;
+          CompoundRCC->SubChains = RCC.SubChains;
+          CompoundRCC->SubChains.insert(&RCC);
+          CompoundRCC->AllDoms = CompoundRCC->AllDoms.unite(RCC.AllDoms);
+
+          bool Success =
+              RCCCollection
+                  .insert({{CompoundRCC->ReadMA, CompoundRCC->WriteMA},
+                           CompoundRCC})
+                  .second;
+          assert(Success);
+        }
+
+        CompoundRCC->TraversedComputes.append(NextRCC.TraversedComputes.begin(),
+                                              NextRCC.TraversedComputes.end());
+        CompoundRCC->TraversedComputeMaps.append(
+            NextRCC.TraversedComputeMaps.begin(),
+            NextRCC.TraversedComputeMaps.end());
+        CompoundRCC->TraversedRAWs.push_back(&RAWDep);
+        CompoundRCC->TraversedRAWs.append(NextRCC.TraversedRAWs.begin(),
+                                          NextRCC.TraversedRAWs.end());
+        CompoundRCC->SubChains.insert(NextRCC.SubChains.begin(),
+                                      NextRCC.SubChains.end());
+        CompoundRCC->SubChains.insert(&NextRCC);
+        CompoundRCC->AllDoms = CompoundRCC->AllDoms.unite(NextRCC.AllDoms);
+        Worklist.push_back(CompoundRCC);
+      }
+
+      for (unsigned u = NumWL, e = Worklist.size(); u < e; u++)
+        RCCsMap[Worklist[u]->ReadMA].push_back(Worklist[u]);
+    }
+  }
+
+  DEBUG(errs() << "Expanded RCCs:\n");
+  DEBUG(dumpRCCs(RCCsMap));
+  DEBUG(errs() << "REDs:\n"<<REDs.to_str() << "\n");
+
+  RAWs = RAWs.subtract(REDs).subtract(InRCRAWs);
+  WARs = WARs.subtract(REDs).subtract(InRCWARs);
+  WAWs = WAWs.subtract(REDs).subtract(InRCWAWs);
+
+  for (auto &It : RCCsMap)
+    DeleteContainerPointers(It.second);
+  for (auto &It : RAWMap)
+    DeleteContainerPointers(It.second);
+  for (auto &It : WARMap)
+    DeleteContainerPointers(It.second);
+  for (auto &It : WAWMap)
+    DeleteContainerPointers(It.second);
+}
+
 /// Collect information about the SCoP @p S.
 static void collectInfo(Scop &S, isl_union_map *&Read,
                         isl_union_map *&MustWrite, isl_union_map *&MayWrite,
@@ -125,44 +578,36 @@ static void collectInfo(Scop &S, isl_union_map *&Read,
   isl_union_map *StmtSchedule = isl_union_map_empty(Space);
 
   SmallPtrSet<const ScopArrayInfo *, 8> ReductionArrays;
-  if (UseReductions)
+  if (UseReductions || UseReductionChains)
     for (ScopStmt &Stmt : S)
       for (MemoryAccess *MA : Stmt)
         if (MA->isReductionLike())
           ReductionArrays.insert(MA->getScopArrayInfo());
 
-  for (ScopStmt &Stmt : S) {
+  auto HandleStmt = [&](ScopStmt &Stmt) {
+    bool HasNonRAAccs = false;
     for (MemoryAccess *MA : Stmt) {
       isl_set *domcp = Stmt.getDomain().release();
       isl_map *accdom = MA->getAccessRelation().release();
 
       accdom = isl_map_intersect_domain(accdom, domcp);
 
+      Dependences::AnalysisLevel MALevel = Level;
       if (ReductionArrays.count(MA->getScopArrayInfo())) {
-        // Wrap the access domain and adjust the schedule accordingly.
-        //
-        // An access domain like
-        //   Stmt[i0, i1] -> MemAcc_A[i0 + i1]
-        // will be transformed into
-        //   [Stmt[i0, i1] -> MemAcc_A[i0 + i1]] -> MemAcc_A[i0 + i1]
-        //
-        // We collect all the access domains in the ReductionTagMap.
-        // This is used in Dependences::calculateDependences to create
-        // a tagged Schedule tree.
-
-        ReductionTagMap =
-            isl_union_map_add_map(ReductionTagMap, isl_map_copy(accdom));
-        accdom = isl_map_range_map(accdom);
+        MALevel = Dependences::AL_Access;
       } else {
-        accdom = tag(accdom, MA, Level);
-        if (Level > Dependences::AL_Statement) {
-          isl_map *StmtScheduleMap = Stmt.getSchedule().release();
-          assert(StmtScheduleMap &&
-                 "Schedules that contain extension nodes require special "
-                 "handling.");
-          isl_map *Schedule = tag(StmtScheduleMap, MA, Level);
-          StmtSchedule = isl_union_map_add_map(StmtSchedule, Schedule);
-        }
+        HasNonRAAccs = true;
+      }
+
+      accdom = tag(accdom, MA, MALevel);
+      if (MALevel > Dependences::AL_Statement) {
+        isl_map *StmtScheduleMap = Stmt.getSchedule().release();
+        assert(StmtScheduleMap &&
+               "Schedules that contain extension nodes require special "
+               "handling.");
+        isl_map *Schedule = tag(StmtScheduleMap, MA, MALevel);
+        ReductionTagMap = isl_union_map_add_map(ReductionTagMap, Schedule);
+      } else {
       }
 
       if (MA->isRead())
@@ -173,10 +618,20 @@ static void collectInfo(Scop &S, isl_union_map *&Read,
         MustWrite = isl_union_map_add_map(MustWrite, accdom);
     }
 
-    if (!ReductionArrays.empty() && Level == Dependences::AL_Statement)
+    //if (Level == Dependences::AL_Statement)
+      //StmtSchedule =
+          //isl_union_map_add_map(StmtSchedule, Stmt.getSchedule().release());
+    if (HasNonRAAccs && Level == Dependences::AL_Statement) {
+      isl_space *DS = Stmt.getDomainSpace().release();
+      isl_map *DomIdMap = isl_map_identity(
+          isl_space_map_from_domain_and_range(isl_space_copy(DS), DS));
       StmtSchedule =
-          isl_union_map_add_map(StmtSchedule, Stmt.getSchedule().release());
-  }
+          isl_union_map_add_map(StmtSchedule, DomIdMap);
+    }
+  };
+  for (ScopStmt &Stmt : S)
+    HandleStmt(Stmt);
+  HandleStmt(S.EscapeStmt);
 
   StmtSchedule = isl_union_map_intersect_params(
       StmtSchedule, S.getAssumedContext().release());
@@ -240,7 +695,7 @@ static isl_stat fixSetToZero(__isl_take isl_set *Zero, void *user) {
 ///
 /// Note: This function also computes the (reverse) transitive closure of the
 ///       reduction dependences.
-void Dependences::addPrivatizationDependences() {
+void Dependences::addPrivatizationDependences(Scop &S) {
   isl_union_map *PrivRAW, *PrivWAW, *PrivWAR;
 
   // The transitive closure might be over approximated, thus could lead to
@@ -249,22 +704,22 @@ void Dependences::addPrivatizationDependences() {
   // the transitive closure.
   TC_RED = isl_union_map_transitive_closure(isl_union_map_copy(RED), nullptr);
 
-  // FIXME: Apply the current schedule instead of assuming the identity schedule
-  //        here. The current approach is only valid as long as we compute the
-  //        dependences only with the initial (identity schedule). Any other
-  //        schedule could change "the direction of the backward dependences" we
-  //        want to eliminate here.
+  isl::union_map Schedule = S.getSchedule();
+  TC_RED = isl_union_map_apply_domain(TC_RED, Schedule.copy());
+  TC_RED = isl_union_map_apply_range(TC_RED, Schedule.copy());
+
   isl_union_set *UDeltas = isl_union_map_deltas(isl_union_map_copy(TC_RED));
   isl_union_set *Universe = isl_union_set_universe(isl_union_set_copy(UDeltas));
   isl_union_set *Zero = isl_union_set_empty(isl_union_set_get_space(Universe));
   isl_union_set_foreach_set(Universe, fixSetToZero, &Zero);
+  isl_union_set_free(Universe);
   isl_union_map *NonPositive = isl_union_set_lex_le_union_set(UDeltas, Zero);
 
   TC_RED = isl_union_map_subtract(TC_RED, NonPositive);
-
-  TC_RED = isl_union_map_union(
-      TC_RED, isl_union_map_reverse(isl_union_map_copy(TC_RED)));
   TC_RED = isl_union_map_coalesce(TC_RED);
+
+  auto *TC_RED_REV = isl_union_map_reverse(isl_union_map_copy(TC_RED));
+  TC_RED_REV = isl_union_map_coalesce(TC_RED_REV);
 
   isl_union_map **Maps[] = {&RAW, &WAW, &WAR};
   isl_union_map **PrivMaps[] = {&PrivRAW, &PrivWAW, &PrivWAR};
@@ -274,13 +729,17 @@ void Dependences::addPrivatizationDependences() {
     *PrivMap = isl_union_map_apply_range(isl_union_map_copy(*Map),
                                          isl_union_map_copy(TC_RED));
     *PrivMap = isl_union_map_union(
-        *PrivMap, isl_union_map_apply_range(isl_union_map_copy(TC_RED),
+        *PrivMap, isl_union_map_apply_range(isl_union_map_copy(TC_RED_REV),
                                             isl_union_map_copy(*Map)));
 
     *Map = isl_union_map_union(*Map, *PrivMap);
   }
 
-  isl_union_set_free(Universe);
+
+  isl_union_map_free(TC_RED_REV);
+  isl::union_map RevSchedule = Schedule.reverse();
+  TC_RED = isl_union_map_apply_domain(TC_RED, RevSchedule.copy());
+  TC_RED = isl_union_map_apply_range(TC_RED, RevSchedule.copy());
 }
 
 static __isl_give isl_union_flow *buildFlow(__isl_keep isl_union_map *Snk,
@@ -414,13 +873,193 @@ void Dependences::calculateDependences(Scop &S) {
 
   bool HasReductions = !isl_union_map_is_empty(ReductionTagMap);
 
+  Schedule = S.getScheduleTree().release();
   DEBUG(dbgs() << "Read: " << Read << '\n';
         dbgs() << "MustWrite: " << MustWrite << '\n';
         dbgs() << "MayWrite: " << MayWrite << '\n';
         dbgs() << "ReductionTagMap: " << ReductionTagMap << '\n';
-        dbgs() << "TaggedStmtDomain: " << TaggedStmtDomain << '\n';);
+        dbgs() << "Schedule: "; isl_schedule_dump(Schedule); dbgs() << "\n";
+        dbgs() << "TaggedStmtDomain: "; isl_union_set_dump(TaggedStmtDomain);
+        dbgs() << '\n';);
 
-  Schedule = S.getScheduleTree().release();
+
+  if (UseReductionChains) {
+    isl_union_map *IdentityMap;
+    isl_union_pw_multi_aff *ReductionTags, *IdentityTags, *Tags;
+    //ReductionTags =
+        //isl_union_map_domain_map_union_pw_multi_aff(ReductionTagMap);
+    ReductionTags = isl_union_map_domain_map_union_pw_multi_aff(
+        isl_union_set_unwrap(isl_union_map_domain(ReductionTagMap)));
+    // ReductionTags =
+    // isl_union_set_unwrap(isl_union_set_copy());
+
+    IdentityMap = isl_union_set_identity(TaggedStmtDomain);
+    IdentityTags = isl_union_pw_multi_aff_from_union_map(IdentityMap);
+
+    Tags = isl_union_pw_multi_aff_union_add(ReductionTags, IdentityTags);
+    Schedule = isl_schedule_pullback_union_pw_multi_aff(Schedule, Tags);
+
+    DEBUG(dbgs() << "Read: " << Read << "\n";
+               dbgs() << "MustWrite: " << MustWrite << "\n";
+               dbgs() << "MayWrite: " << MayWrite << "\n";
+               dbgs() << "Schedule: " << Schedule << "\n");
+
+    isl_union_map *StrictWAW = nullptr;
+    {
+      IslMaxOperationsGuard MaxOpGuard(IslCtx.get(), OptComputeOut);
+
+      RAW = WAW = WAR = RED = nullptr;
+      isl_union_map *Write = isl_union_map_union(isl_union_map_copy(MustWrite),
+                                                 isl_union_map_copy(MayWrite));
+
+      // We are interested in detecting reductions that do not have intermediate
+      // computations that are captured by other statements.
+      //
+      // Example:
+      // void f(int *A, int *B) {
+      //     for(int i = 0; i <= 100; i++) {
+      //
+      //            *-WAR (S0[i] -> S0[i + 1] 0 <= i <= 100)------------*
+      //            |                                                   |
+      //            *-WAW (S0[i] -> S0[i + 1] 0 <= i <= 100)------------*
+      //            |                                                   |
+      //            v                                                   |
+      //     S0:    *A += i; >------------------*-----------------------*
+      //                                        |
+      //         if (i >= 98) {          WAR (S0[i] -> S1[i]) 98 <= i <= 100
+      //                                        |
+      //     S1:        *B = *A; <--------------*
+      //         }
+      //     }
+      // }
+      //
+      // S0[0 <= i <= 100] has a reduction. However, the values in
+      // S0[98 <= i <= 100] is captured in S1[98 <= i <= 100].
+      // Since we allow free reordering on our reduction dependences, we need to
+      // remove all instances of a reduction statement that have data
+      // dependences originating from them. In the case of the example, we need
+      // to remove S0[98 <= i <= 100] from our reduction dependences.
+      //
+      // When we build up the WAW dependences that are used to detect
+      // reductions, we consider only **Writes that have no intermediate
+      // Reads**.
+      //
+      // `isl_union_flow_get_must_dependence` gives us dependences of the form:
+      // (sink <- must_source).
+      //
+      // It *will not give* dependences of the form:
+      // 1. (sink <- ... <- may_source <- ... <- must_source)
+      // 2. (sink <- ... <- must_source <- ... <- must_source)
+      //
+      // For a detailed reference on ISL's flow analysis, see:
+      // "Presburger Formulas and Polyhedral Compilation" - Approximate Dataflow
+      //  Analysis.
+      //
+      // Since we set "Write" as a must-source, "Read" as a may-source, and ask
+      // for must dependences, we get all Writes to Writes that **do not flow
+      // through a Read**.
+      //
+      // ScopInfo::checkForReductions makes sure that if something captures
+      // the reduction variable in the same basic block, then it is rejected
+      // before it is even handed here. This makes sure that there is exactly
+      // one read and one write to a reduction variable in a Statement.
+      // Example:
+      //     void f(int *sum, int A[N], int B[N]) {
+      //       for (int i = 0; i < N; i++) {
+      //         *sum += A[i]; < the store and the load is not tagged as a
+      //         B[i] = *sum;  < reduction-like access due to the overlap.
+      //       }
+      //     }
+
+      isl_union_flow *Flow = buildFlow(Write, Write, Read, Schedule);
+      isl_union_flow_free(Flow);
+
+      if (OptAnalysisType == VALUE_BASED_ANALYSIS) {
+        Flow = buildFlow(Read, MustWrite, MayWrite, Schedule);
+        RAW = isl_union_flow_get_may_dependence(Flow);
+        isl_union_flow_free(Flow);
+
+        Flow = buildFlow(Write, MustWrite, MayWrite, Schedule);
+        WAW = isl_union_flow_get_may_dependence(Flow);
+        isl_union_flow_free(Flow);
+
+        WAR = buildWAR(Write, MustWrite, Read, Schedule);
+        isl_union_map_free(Write);
+        isl_schedule_free(Schedule);
+      } else {
+        isl_union_flow *Flow;
+
+        Flow = buildFlow(Read, nullptr, Write, Schedule);
+        RAW = isl_union_flow_get_may_dependence(Flow);
+        isl_union_flow_free(Flow);
+
+        Flow = buildFlow(Write, nullptr, Read, Schedule);
+        WAR = isl_union_flow_get_may_dependence(Flow);
+        isl_union_flow_free(Flow);
+
+        Flow = buildFlow(Write, nullptr, Write, Schedule);
+        WAW = isl_union_flow_get_may_dependence(Flow);
+        isl_union_flow_free(Flow);
+
+        isl_union_map_free(Write);
+        isl_schedule_free(Schedule);
+      }
+
+      isl_union_map_free(MustWrite);
+      isl_union_map_free(MayWrite);
+      isl_union_map_free(Read);
+
+      RAW = isl_union_map_coalesce(RAW);
+      WAW = isl_union_map_coalesce(WAW);
+      WAR = isl_union_map_coalesce(WAR);
+
+      // End of max_operations scope.
+    }
+
+    if (isl_ctx_last_error(IslCtx.get()) == isl_error_quota) {
+      isl_union_map_free(RAW);
+      isl_union_map_free(WAW);
+      isl_union_map_free(WAR);
+      RAW = WAW = WAR = StrictWAW = nullptr;
+      isl_ctx_reset_error(IslCtx.get());
+    }
+    {
+      DEBUG(dump(); errs() << "\n\n";);
+      isl::union_map RAWObj = isl::manage(RAW);
+      isl::union_map WARObj = isl::manage(WAR);
+      isl::union_map WAWObj = isl::manage(WAW);
+      isl::union_map InRCRAWObj = isl::union_map::empty(RAWObj.get_space());
+      isl::union_map InRCWARObj = InRCRAWObj;
+      isl::union_map InRCWAWObj = InRCWARObj;
+      isl::union_map RedObj;
+      detectReductionDependences(*this, S, *S.getLI(), RAWObj, WARObj, WAWObj,
+                                 InRCRAWObj, InRCWARObj, InRCWAWObj, RedObj);
+      if (Level == AL_Statement) {
+        RAWObj = RAWObj.zip().domain().unwrap();
+        WARObj = WARObj.zip().domain().unwrap();
+        WAWObj = WAWObj.zip().domain().unwrap();
+        InRCRAWObj = InRCRAWObj.zip().domain().unwrap();
+        InRCWARObj = InRCWARObj.zip().domain().unwrap();
+        InRCWAWObj = InRCWAWObj.zip().domain().unwrap();
+        RedObj = RedObj.zip().domain().unwrap();
+      }
+      RAW = RAWObj.release();
+      WAR = WARObj.release();
+      WAW = WAWObj.release();
+      RED = RedObj.release();
+
+      DEBUG(dump(); errs() << "\n\n";);
+      addPrivatizationDependences(S);
+      DEBUG(dump(); errs() << "\n\n";);
+      WAR = isl_union_map_union(WAR, InRCWARObj.release());
+      RAW = isl_union_map_union(RAW, InRCRAWObj.release());
+      WAW = isl_union_map_union(WAW, InRCWAWObj.release());
+      DEBUG(dump(); errs() << "\n\n";);
+      // dump();
+      // errs()<<"\n\n";
+    }
+    return;
+  }
 
   if (!HasReductions) {
     isl_union_map_free(ReductionTagMap);
@@ -645,7 +1284,7 @@ void Dependences::calculateDependences(Scop &S) {
     WAR = isl_union_map_subtract(WAR, isl_union_map_copy(RED));
 
     // Step 4)
-    addPrivatizationDependences();
+    addPrivatizationDependences(S);
   }
 
   DEBUG({
@@ -836,13 +1475,6 @@ bool Dependences::isParallel(isl_union_map *Schedule, isl_union_map *Deps,
   return false;
 }
 
-static void printDependencyMap(raw_ostream &OS, __isl_keep isl_union_map *DM) {
-  if (DM)
-    OS << DM << "\n";
-  else
-    OS << "n/a\n";
-}
-
 void Dependences::print(raw_ostream &OS) const {
   OS << "\tRAW dependences:\n\t\t";
   printDependencyMap(OS, RAW);
@@ -868,7 +1500,7 @@ void Dependences::releaseMemory() {
   RED = RAW = WAR = WAW = TC_RED = nullptr;
 
   for (auto &ReductionDeps : ReductionDependences)
-    isl_map_free(ReductionDeps.second);
+    isl_union_map_free(ReductionDeps.second);
   ReductionDependences.clear();
 }
 
@@ -901,15 +1533,18 @@ bool Dependences::hasValidDependences() const {
   return (RAW != nullptr) && (WAR != nullptr) && (WAW != nullptr);
 }
 
-__isl_give isl_map *
+__isl_give isl_union_map *
 Dependences::getReductionDependences(MemoryAccess *MA) const {
-  return isl_map_copy(ReductionDependences.lookup(MA));
+  return isl_union_map_copy(ReductionDependences.lookup(MA));
 }
 
 void Dependences::setReductionDependences(MemoryAccess *MA, isl_map *D) {
-  assert(ReductionDependences.count(MA) == 0 &&
-         "Reduction dependences set twice!");
-  ReductionDependences[MA] = D;
+  isl_union_map *&OD = ReductionDependences[MA];
+  if (OD) {
+    OD = isl_union_map_add_map(OD, D);
+  }
+  else
+    OD = isl_union_map_from_map(D);
 }
 
 const Dependences &

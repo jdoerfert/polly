@@ -511,12 +511,13 @@ public:
   ///
   /// Commutative and associative binary operations suitable for reductions
   enum ReductionType {
-    RT_NONE, ///< Indicate no reduction at all
+    RT_INIT, ///< Unspecified use
     RT_ADD,  ///< Addition
     RT_MUL,  ///< Multiplication
     RT_BOR,  ///< Bitwise Or
     RT_BXOR, ///< Bitwise XOr
     RT_BAND, ///< Bitwise And
+    RT_NONE, ///< Indicate no reduction at all
   };
 
 private:
@@ -558,7 +559,7 @@ private:
   /// property is only exploited for statement instances that load from and
   /// store to the same data location. Doing so at dependence analysis time
   /// could allow us to handle the above example.
-  ReductionType RedType = RT_NONE;
+  ReductionType RedType = RT_INIT;
 
   /// Parent ScopStmt of this access.
   ScopStmt *Statement;
@@ -910,6 +911,17 @@ public:
   /// Return a string representation of the reduction type @p RT.
   static const std::string getReductionOperatorStr(ReductionType RT);
 
+  static MemoryAccess::ReductionType join(ReductionType RT0,
+                                          ReductionType RT1) {
+    if (RT0 == RT1)
+      return RT0;
+    if (RT0 == RT_INIT)
+      return RT1;
+    if (RT1 == RT_INIT)
+      return RT0;
+    return RT_NONE;
+  }
+
   /// Return the element type of the accessed array wrt. this access.
   Type *getElementType() const { return ElementType; }
 
@@ -1183,6 +1195,22 @@ struct InvariantEquivClassTy {
 /// Type for invariant accesses equivalence classes.
 using InvariantEquivClassesTy = SmallVector<InvariantEquivClassTy, 8>;
 
+struct ComputationChain {
+  MemoryAccess::ReductionType RedTy;
+  MemoryAccess *WriteMA;
+  MemoryAccess *ReadMA;
+
+  void dump(raw_ostream &OS) const {
+    OS << WriteMA->getId().get_name() << " --[" << RedTy << "]--> "
+       << ReadMA->getId().get_name() << "\n";
+  }
+  std::string to_str() const {
+    return ("" + ReadMA->getScopArrayInfo()->getName() + " --[" +
+            MemoryAccess::getReductionOperatorStr(RedTy) + "]--> " +
+            WriteMA->getScopArrayInfo()->getName());
+  }
+};
+
 /// Statement of the Scop
 ///
 /// A Scop statement represents an instruction in the Scop.
@@ -1193,7 +1221,11 @@ using InvariantEquivClassesTy = SmallVector<InvariantEquivClassTy, 8>;
 class ScopStmt {
   friend class ScopBuilder;
 
+  isl::union_map ReductionLocationMapping;
+
 public:
+  DenseMap<MemoryAccess *, SmallVector<ComputationChain, 4>> ComputationChains;
+
   /// Create the ScopStmt from a BasicBlock.
   ScopStmt(Scop &parent, BasicBlock &bb, Loop *SurroundingLoop,
            std::vector<Instruction *> Instructions, int Count);
@@ -2374,6 +2406,9 @@ public:
   Scop(const Scop &) = delete;
   Scop &operator=(const Scop &) = delete;
   ~Scop();
+
+  ScopStmt EscapeStmt;
+  DenseMap<std::pair<BasicBlock *, BasicBlock *>, isl::set> EdgeCondMap;
 
   /// Get the count of copy statements added to this Scop.
   ///

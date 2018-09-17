@@ -172,8 +172,10 @@ void ScopBuilder::buildEscapingDependences(Instruction *Inst) {
   // Check for uses of this instruction outside the scop. Because we do not
   // iterate over such instructions and therefore did not "ensure" the existence
   // of a write, we must determine such use here.
-  if (scop->isEscaping(Inst))
+  if (scop->isEscaping(Inst)) {
     ensureValueWrite(Inst);
+    ensureValueRead(Inst, &scop->EscapeStmt);
+  }
 }
 
 /// Check that a value is a Fortran Array descriptor.
@@ -1151,8 +1153,7 @@ void ScopBuilder::collectSurroundingLoops(ScopStmt &Stmt) {
 }
 
 /// Return the reduction type for a given binary operator.
-static MemoryAccess::ReductionType getReductionType(const BinaryOperator *BinOp,
-                                                    const Instruction *Load) {
+static MemoryAccess::ReductionType getReductionType(const BinaryOperator *BinOp) {
   if (!BinOp)
     return MemoryAccess::RT_NONE;
   switch (BinOp->getOpcode()) {
@@ -1181,65 +1182,211 @@ static MemoryAccess::ReductionType getReductionType(const BinaryOperator *BinOp,
   }
 }
 
+
+isl::map getRedLocMap(isl::set Loc, ArrayRef<isl::id> RedTypeIds,
+                      MemoryAccess::ReductionType RT = MemoryAccess::RT_NONE) {
+  isl::set Rng =
+      isl::set::universe(Loc.get_space().params().add_dims(isl::dim::set, 0));
+  Rng = Rng.set_tuple_id(RedTypeIds[RT]);
+  //Rng = Rng.fix_si(isl::dim::set, 0, RT);
+  return isl::map::from_domain_and_range(Loc, Rng);
+}
+
 void ScopBuilder::checkForReductions(ScopStmt &Stmt) {
-  SmallVector<MemoryAccess *, 2> Loads;
-  SmallVector<std::pair<MemoryAccess *, MemoryAccess *>, 4> Candidates;
+  if (Stmt.isRegionStmt())
+    return;
+  DEBUG(Stmt.dump());
 
-  // First collect candidate load-store reduction chains by iterating over all
-  // stores and collecting possible reduction loads.
-  for (MemoryAccess *StoreMA : Stmt) {
-    if (StoreMA->isRead())
-      continue;
+  isl::id RedTypeIds[7];
+  isl::ctx Ctx = Stmt.getIslCtx();
+  for (MemoryAccess::ReductionType RT :
+       {MemoryAccess::RT_INIT, MemoryAccess::RT_ADD, MemoryAccess::RT_MUL,
+        MemoryAccess::RT_BOR, MemoryAccess::RT_BXOR, MemoryAccess::RT_BAND,
+        MemoryAccess::RT_NONE})
+    RedTypeIds[RT] = isl::id::alloc(
+        Ctx, MemoryAccess::getReductionOperatorStr(RT), (void *)RT);
 
-    Loads.clear();
-    collectCandidateReductionLoads(StoreMA, Loads);
-    for (MemoryAccess *LoadMA : Loads)
-      Candidates.push_back(std::make_pair(LoadMA, StoreMA));
+  auto PSpace = Stmt.getParent()->getParamSpace();
+  Stmt.ReductionLocationMapping = isl::union_map::empty(PSpace);
+
+  using ReadFlowMapTy = DenseMap<MemoryAccess *, MemoryAccess::ReductionType>;
+  DenseMap<const Instruction *, ReadFlowMapTy> InstructionToReadFlowMap;
+
+  DenseMap<const Instruction *, SmallVector<MemoryAccess *, 4>> WritesMap;
+
+  auto AddRead =[](MemoryAccess *ReadMA, ReadFlowMapTy &ReadFlowMap) {
+    assert(ReadMA->isRead());
+    if (ReadFlowMap.count(ReadMA)) {
+      ReadFlowMap[ReadMA] = MemoryAccess::RT_NONE;
+    } else {
+      ReadFlowMap[ReadMA] = MemoryAccess::RT_INIT;
+    }
+  };
+
+  for (auto &It : Stmt.PHIReads) {
+    const Instruction *I = It.first;
+    AddRead(It.second, InstructionToReadFlowMap[I]);
+  }
+  for (auto &It : Stmt.ValueReads) {
+    Instruction *I = dyn_cast<Instruction>(It.first);
+    AddRead(It.second, InstructionToReadFlowMap[I]);
+  }
+  for (auto &It : Stmt.InstructionToAccess) {
+    const Instruction *I = It.first;
+    for (MemoryAccess *MA : It.second) {
+      if (MA->isRead())
+        AddRead(MA, InstructionToReadFlowMap[I]);
+      else
+        WritesMap[I].push_back(MA);
+    }
+  }
+  for (auto &It : Stmt.ValueWrites) {
+    const Instruction *I = It.first;
+    WritesMap[I].push_back(It.second);
+  }
+  for (auto &It : Stmt.PHIWrites) {
+    MemoryAccess *MA  = It.second;
+    Value *WrittenVal =
+        It.first->getIncomingValueForBlock(Stmt.getBasicBlock());
+    Instruction *I = dyn_cast<Instruction>(WrittenVal);
+    if (I) {
+      WritesMap[I].push_back(MA);
+    }
   }
 
-  // Then check each possible candidate pair.
-  for (const auto &CandidatePair : Candidates) {
-    bool Valid = true;
-    isl::map LoadAccs = CandidatePair.first->getAccessRelation();
-    isl::map StoreAccs = CandidatePair.second->getAccessRelation();
+  for (Instruction &I : *Stmt.getBasicBlock()) {
+    auto &ReadFlowMap = InstructionToReadFlowMap[&I];
+    unsigned N = 0;
+    for (auto &U : I.uses()) {
+      if (!Stmt.contains(cast<Instruction>(U.getUser())))
+        continue;
+      N++;
+    }
+    DEBUG(errs() << I << " has " << ReadFlowMap.size() << " initial reads and "
+                 << N << " in stmt uses!\n");
 
-    // Skip those with obviously unequal base addresses.
-    if (!LoadAccs.has_equal_space(StoreAccs)) {
-      continue;
+    if (auto *Cast = dyn_cast<CastInst>(&I)) {
+      if (isa<Instruction>(Cast->getOperand(0)) &&
+          Stmt.contains(cast<Instruction>(Cast->getOperand(0)))) {
+        assert(InstructionToReadFlowMap.count(Cast));
+        assert(ReadFlowMap.empty());
+        ReadFlowMap = InstructionToReadFlowMap[Cast];
+      }
+    } else if (auto *PHI = dyn_cast<PHINode>(&I)) {
+      (void)PHI;
+
+    } else if (isa<LoadInst>(&I) || isa<StoreInst>(&I)) {
+      auto *PtrI = dyn_cast<Instruction>(MemAccInst(&I).getPointerOperand());
+      if (PtrI && Stmt.contains(PtrI)) {
+        assert(InstructionToReadFlowMap.count(PtrI));
+        for (auto &It : InstructionToReadFlowMap[PtrI]) {
+          MemoryAccess *MA = It.first;
+          isl::map AccRel = MA->getAccessRelation();
+          // isl::set AccLoc = Stmt.getDomain().apply(AccRel);
+          isl::set AccLoc = AccRel.intersect_domain(Stmt.getDomain()).wrap();
+          DEBUG(errs() << "Inv 2 AccLoc: " << AccLoc.to_str() << "\n");
+          Stmt.ReductionLocationMapping = Stmt.ReductionLocationMapping.unite(
+              getRedLocMap(AccLoc, RedTypeIds));
+        }
+      } else if (PtrI) {
+        if (MemoryAccess *MA = Stmt.lookupValueReadOf(PtrI)) {
+          isl::map AccRel = MA->getAccessRelation();
+          // isl::set AccLoc = Stmt.getDomain().apply(AccRel);
+          isl::set AccLoc = AccRel.intersect_domain(Stmt.getDomain()).wrap();
+          DEBUG(errs() << "Inv 3 AccLoc: " << AccLoc.to_str() << "\n");
+          Stmt.ReductionLocationMapping = Stmt.ReductionLocationMapping.unite(
+              getRedLocMap(AccLoc, RedTypeIds));
+        }
+      }
+      if (auto *S = dyn_cast<StoreInst>(&I)) {
+        auto *ValI = dyn_cast<Instruction>(S->getValueOperand());
+        if (ValI && InstructionToReadFlowMap.count(ValI)) {
+          assert(ReadFlowMap.empty());
+          ReadFlowMap = InstructionToReadFlowMap[ValI];
+        }
+      }
+    } else if (auto *BinOp = dyn_cast<BinaryOperator>(&I)) {
+      auto RedTy = getReductionType(BinOp);
+      const auto &LeftReadFlowMap = InstructionToReadFlowMap.lookup(
+          dyn_cast<Instruction>(BinOp->getOperand(0)));
+      const auto &RightReadFlowMap = InstructionToReadFlowMap.lookup(
+          dyn_cast<Instruction>(BinOp->getOperand(1)));
+      for (auto &It : LeftReadFlowMap) {
+        if (RightReadFlowMap.count(It.first))
+          ReadFlowMap[It.first] = MemoryAccess::RT_NONE;
+        else
+          ReadFlowMap[It.first] = MemoryAccess::join(It.second, RedTy);
+      }
+      for (auto &It : RightReadFlowMap) {
+        if (LeftReadFlowMap.count(It.first))
+          ReadFlowMap[It.first] = MemoryAccess::RT_NONE;
+        else
+          ReadFlowMap[It.first] = MemoryAccess::join(It.second, RedTy);
+      }
+    } else {
+      /* Default */
+      for (Value *Op : I.operands())
+        if (Instruction *IOp = dyn_cast<Instruction>(Op))
+          for (auto &It : InstructionToReadFlowMap.lookup(IOp)) {
+            MemoryAccess *MA = It.first;
+            isl::map AccRel = MA->getAccessRelation();
+            // isl::set AccLoc = Stmt.getDomain().apply(AccRel);
+            isl::set AccLoc = AccRel.intersect_domain(Stmt.getDomain()).wrap();
+            DEBUG(errs() << "Inv 4 AccLoc: " << AccLoc.to_str() << "\n");
+            Stmt.ReductionLocationMapping =
+                Stmt.ReductionLocationMapping.unite(getRedLocMap(AccLoc, RedTypeIds));
+          }
     }
 
-    // And check if the remaining for overlap with other memory accesses.
-    isl::map AllAccsRel = LoadAccs.unite(StoreAccs);
-    AllAccsRel = AllAccsRel.intersect_domain(Stmt.getDomain());
-    isl::set AllAccs = AllAccsRel.range();
+    if (N > 1)
+      for (auto &It : ReadFlowMap)
+        It.second = MemoryAccess::RT_NONE;
 
-    for (MemoryAccess *MA : Stmt) {
-      if (MA == CandidatePair.first || MA == CandidatePair.second)
-        continue;
+    DEBUG({
+      errs() << "Read flow map for " << I << "\n";
+      for (auto &It : ReadFlowMap)
+        errs() << "  - [" << It.second << "] "
+               << It.first->getAccessRelationStr() << "\n";
+      errs() << "\n";
+    });
+  }
 
-      isl::map AccRel =
-          MA->getAccessRelation().intersect_domain(Stmt.getDomain());
-      isl::set Accs = AccRel.range();
+  for (auto &It : WritesMap) {
+    auto &Writes= It.second;
+    const Instruction &I = *It.first;
+    auto &ReadFlowMap = InstructionToReadFlowMap[&I];
 
-      if (AllAccs.has_equal_space(Accs)) {
-        isl::set OverlapAccs = Accs.intersect(AllAccs);
-        Valid = Valid && OverlapAccs.is_empty();
+    for (MemoryAccess *WriteMA : Writes) {
+      assert(WriteMA->isWrite());
+      isl::map WriteRel = WriteMA->getAccessRelation();
+
+      for (auto &It : ReadFlowMap) {
+        MemoryAccess *ReadMA = It.first;
+        isl::map ReadRel = ReadMA->getAccessRelation();
+
+        isl::map WriteReadLoc = WriteRel.range_product(ReadRel);
+
+        auto RedTy = It.second;
+
+        DEBUG(errs() << "Red WriteReadLoc: " << WriteReadLoc.to_str() << " -> "
+                          << RedTy << "\n");
+        auto RLM = getRedLocMap(WriteReadLoc.wrap(), RedTypeIds, RedTy);
+        Stmt.ReductionLocationMapping =
+            Stmt.ReductionLocationMapping.unite(RLM);
+        Stmt.ComputationChains[ReadMA].push_back({RedTy, WriteMA, ReadMA});
+        ReadMA->markAsReductionLike(RedTy);
+        WriteMA->markAsReductionLike(RedTy);
       }
     }
-
-    if (!Valid)
-      continue;
-
-    const LoadInst *Load =
-        dyn_cast<const LoadInst>(CandidatePair.first->getAccessInstruction());
-    MemoryAccess::ReductionType RT =
-        getReductionType(dyn_cast<BinaryOperator>(Load->user_back()), Load);
-
-    // If no overlapping access was found we mark the load and store as
-    // reduction like.
-    CandidatePair.first->markAsReductionLike(RT);
-    CandidatePair.second->markAsReductionLike(RT);
   }
+
+  DEBUG({
+    errs() << "\nStmt [" << Stmt.getDomainStr() << "\n";
+    for (const auto &It : Stmt.ComputationChains)
+      for (const auto &Chain : It.second)
+        Chain.dump(errs());
+    errs() << "\n\n\n";
+  });
 }
 
 void ScopBuilder::collectCandidateReductionLoads(
@@ -1483,9 +1630,9 @@ void ScopBuilder::buildScop(Region &R, AssumptionCache &AC,
     collectSurroundingLoops(Stmt);
     buildAccessRelations(Stmt);
 
-    if (DetectReductions)
-      checkForReductions(Stmt);
   }
+  buildDomain(scop->EscapeStmt);
+  buildAccessRelations(scop->EscapeStmt);
 
   // Check early for a feasible runtime context.
   if (!scop->hasFeasibleRuntimeContext()) {
@@ -1530,6 +1677,10 @@ void ScopBuilder::buildScop(Region &R, AssumptionCache &AC,
     DEBUG(dbgs() << "Bailing-out because of unfeasible context (late)\n");
     return;
   }
+
+  if (DetectReductions)
+    for (ScopStmt &Stmt : scop->Stmts)
+        checkForReductions(Stmt);
 
 #ifndef NDEBUG
   verifyUses(scop.get(), LI, DT);

@@ -646,8 +646,9 @@ const std::string
 MemoryAccess::getReductionOperatorStr(MemoryAccess::ReductionType RT) {
   switch (RT) {
   case MemoryAccess::RT_NONE:
-    llvm_unreachable("Requested a reduction operator string for a memory "
-                     "access which isn't a reduction");
+    return "T";
+  case MemoryAccess::RT_INIT:
+    return "B";
   case MemoryAccess::RT_ADD:
     return "+";
   case MemoryAccess::RT_MUL:
@@ -1000,6 +1001,28 @@ void MemoryAccess::buildAccessRelation(const ScopArrayInfo *SAI) {
     AccessRelation = AccessRelation.flat_range_product(SubscriptMap);
   }
 
+  #if 0
+  if ((SAI->isPHIKind() || SAI->isExitPHIKind()) && isWrite()) {
+    errs() << Statement->getBaseName() << " -> "
+           << AccessInstruction->getParent()->getName() << ": "
+           << *AccessInstruction << "\n";
+    //AccessRelation.dump();
+    for (auto &It : Incoming) {
+      //errs() << It.first->getName() << " => " << *It.second << "\n";
+      isl::set ReadDom =
+          Statement->getParent()
+              ->EdgeCondMap[{It.first, AccessInstruction->getParent()}];
+      if (!ReadDom) {
+        assert(AccessInstruction->getParent() ==
+               Statement->getParent()->getRegion().getExit());
+        ReadDom = Statement->getDomain().reset_tuple_id().lexmax();
+      }
+      AccessRelation = AccessRelation.intersect_domain(ReadDom);
+    }
+    //AccessRelation.dump();
+  }
+  #endif
+
   Space = Statement->getDomainSpace();
   AccessRelation = AccessRelation.set_tuple_id(
       isl::dim::in, Space.get_tuple_id(isl::dim::set));
@@ -1061,11 +1084,7 @@ isl::id MemoryAccess::getId() const { return Id; }
 
 raw_ostream &polly::operator<<(raw_ostream &OS,
                                MemoryAccess::ReductionType RT) {
-  if (RT == MemoryAccess::RT_NONE)
-    OS << "NONE";
-  else
-    OS << MemoryAccess::getReductionOperatorStr(RT);
-  return OS;
+  return OS << MemoryAccess::getReductionOperatorStr(RT);
 }
 
 void MemoryAccess::setFortranArrayDescriptor(Value *FAD) { this->FAD = FAD; }
@@ -2565,6 +2584,9 @@ bool Scop::buildDomains(Region *R, DominatorTree &DT, LoopInfo &LI,
   InvalidDomainMap[EntryBB] = isl::manage(isl_set_empty(isl_set_get_space(S)));
   DomainMap[EntryBB] = isl::manage(S);
 
+  S = isl_set_universe(isl_space_set_alloc(getIslCtx().get(), 0, 0));
+  DomainMap[R->getExit()] = isl::manage(S);
+
   if (IsOnlyNonAffineRegion)
     return !containsErrorBlock(R->getNode(), *R, LI, DT);
 
@@ -2852,6 +2874,8 @@ bool Scop::buildDomainsWithBranchConstraints(
       // Skip blocks outside the region.
       if (!contains(SuccBB))
         continue;
+
+      //EdgeCondMap[{BB, SuccBB}] = CondSet;
 
       // If we propagate the domain of some block to "SuccBB" we do not have to
       // adjust the domain.
@@ -3374,7 +3398,8 @@ Scop::Scop(Region &R, ScalarEvolution &ScalarEvolution, LoopInfo &LI,
     : IslCtx(isl_ctx_alloc(), isl_ctx_free), SE(&ScalarEvolution), DT(&DT),
       R(R), name(R.getNameStr()), HasSingleExitEdge(R.getExitingBlock()),
       DC(DC), ORE(ORE), Affinator(this, LI),
-      ID(getNextID((*R.getEntry()->getParent()).getName().str())) {
+      ID(getNextID((*R.getEntry()->getParent()).getName().str())),
+      EscapeStmt(*this, *R.getExit(), nullptr, {}, 0) {
   if (IslOnErrorAbort)
     isl_options_set_on_error(getIslCtx().get(), ISL_ON_ERROR_ABORT);
   buildContext();
@@ -3535,8 +3560,12 @@ void Scop::finalizeAccesses() {
 void Scop::updateAccessDimensionality() {
   // Check all array accesses for each base pointer and find a (virtual) element
   // size for the base pointer that divides all access functions.
+  SmallVector<ScopStmt *, 8> Stmts;
   for (ScopStmt &Stmt : *this)
-    for (MemoryAccess *Access : Stmt) {
+    Stmts.push_back(&Stmt);
+  Stmts.push_back(&EscapeStmt);
+  for (ScopStmt *Stmt : Stmts)
+    for (MemoryAccess *Access : *Stmt) {
       if (!Access->isArrayKind())
         continue;
       ScopArrayInfo *Array =
@@ -3552,14 +3581,18 @@ void Scop::updateAccessDimensionality() {
       Array->updateElementType(Ty);
     }
 
-  for (auto &Stmt : *this)
-    for (auto &Access : Stmt)
+  for (ScopStmt *Stmt : Stmts)
+    for (auto &Access : *Stmt)
       Access->updateDimensionality();
 }
 
 void Scop::foldAccessRelations() {
-  for (auto &Stmt : *this)
-    for (auto &Access : Stmt)
+  SmallVector<ScopStmt *, 8> Stmts;
+  for (ScopStmt &Stmt : *this)
+    Stmts.push_back(&Stmt);
+  Stmts.push_back(&EscapeStmt);
+  for (ScopStmt *Stmt : Stmts)
+    for (auto &Access : *Stmt)
       Access->foldAccessRelation();
 }
 
@@ -4410,6 +4443,8 @@ void Scop::printStatements(raw_ostream &OS, bool PrintInstructions) const {
     Stmt.print(OS, PrintInstructions);
   }
 
+  EscapeStmt.print(OS, false);
+
   OS.indent(4) << "}\n";
 }
 
@@ -4487,6 +4522,7 @@ isl::union_set Scop::getDomains() const {
 
   for (const ScopStmt &Stmt : *this)
     Domain = isl_union_set_add_set(Domain, Stmt.getDomain().release());
+  Domain = isl_union_set_add_set(Domain, EscapeStmt.getDomain().release());
 
   return isl::manage(Domain);
 }
@@ -4697,7 +4733,10 @@ void Scop::buildSchedule(LoopInfo &LI) {
   LoopStackTy LoopStack({LoopStackElementTy(L, nullptr, 0)});
   buildSchedule(getRegion().getNode(), LoopStack, LI);
   assert(LoopStack.size() == 1 && LoopStack.back().L == L);
-  Schedule = LoopStack[0].Schedule;
+
+  isl::union_set UDomain{EscapeStmt.getDomain()};
+  auto StmtSchedule = isl::schedule::from_domain(UDomain);
+  Schedule = combineInSequence(LoopStack[0].Schedule, StmtSchedule);
 }
 
 /// To generate a schedule for the elements in a Region we traverse the Region
