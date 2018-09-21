@@ -838,6 +838,39 @@ void MemoryAccess::computeBoundsOnAccessRelation(unsigned ElementSize) {
   if (BasePtrSCEV && !isa<SCEVCouldNotCompute>(BasePtrSCEV))
     PtrSCEV = SE->getMinusSCEV(PtrSCEV, BasePtrSCEV);
 
+  Scop *S = Statement->getParent();
+  Region &R = S->getRegion();
+  SCEVInterval SI = getInterval(PtrSCEV, *SE);
+  if (SI.Min && SI.Min != PtrSCEV && isAffineExpr(&R, nullptr, SI.Min, *SE)) {
+    auto MinPWA = getPwAff(SI.Min);
+    MinPWA = MinPWA.scale_down(isl::val(MinPWA.get_ctx(), ElementSize));
+    isl::map MinMap = isl::map::from_pw_aff(MinPWA);
+    Statement->getDomain().params().dump();
+    MinMap = MinMap.gist_params(Statement->getDomain().params());
+    MinMap = MinMap.set_tuple_id(isl::dim::in,
+                                 AccessRelation.get_tuple_id(isl::dim::in));
+    MinMap = MinMap.set_tuple_id(isl::dim::out,
+                                 AccessRelation.get_tuple_id(isl::dim::out));
+    MinMap = MinMap.apply_range(MinMap.lex_le(MinMap.get_space().range()));
+    AccessRelation = AccessRelation.intersect(MinMap);
+  }
+
+  if (SI.Max && SI.Max != PtrSCEV && isAffineExpr(&R, nullptr, SI.Max, *SE)) {
+    auto MaxPWA = getPwAff(SI.Max);
+    MaxPWA = MaxPWA.scale_down(isl::val(MaxPWA.get_ctx(), ElementSize));
+    MaxPWA = MaxPWA.add(
+        getPwAff(SE->getConstant(SI.Max->getType(), ElementSize - 1)));
+    isl::map MaxMap = isl::map::from_pw_aff(MaxPWA);
+    Statement->getDomain().params().dump();
+    MaxMap = MaxMap.gist_params(Statement->getDomain().params());
+    MaxMap = MaxMap.set_tuple_id(isl::dim::in,
+                                 AccessRelation.get_tuple_id(isl::dim::in));
+    MaxMap = MaxMap.set_tuple_id(isl::dim::out,
+                                 AccessRelation.get_tuple_id(isl::dim::out));
+    MaxMap = MaxMap.apply_range(MaxMap.lex_gt(MaxMap.get_space().range()));
+    AccessRelation = AccessRelation.intersect(MaxMap);
+  }
+
   const ConstantRange &Range = SE->getSignedRange(PtrSCEV);
   if (Range.isFullSet())
     return;
@@ -2149,11 +2182,11 @@ void Scop::addSemanticKnowledge(LoopInfo &LI,
     auto *L = LI.getLoopFor(MemIntr->getParent());
     auto *LengthVal = SE->getSCEVAtScope(MemIntr->getLength(), L);
     PWACtx LengthPWACtx = getPwAff(LengthVal, Stmt->getEntryBlock());
-    isl::set LengthZeroDom = isl::manage(LengthPWACtx.first).zero_set();
+    isl::set LengthZeroDom = (LengthPWACtx.first).zero_set();
     isl::set StmtDom = Stmt->getDomain();
     StmtDom = StmtDom.reset_tuple_id().subtract(Stmt->getInvalidDomain());
     LengthZeroDom = LengthZeroDom.intersect(StmtDom.reset_tuple_id());
-    LengthZeroDom = LengthZeroDom.subtract(isl::manage(LengthPWACtx.second));
+    LengthZeroDom = LengthZeroDom.subtract(LengthPWACtx.second);
     Context = Context.intersect(LengthZeroDom.params());
   }
 }
@@ -2239,6 +2272,23 @@ void Scop::addParameterBounds() {
   for (auto *Parameter : Parameters) {
     ConstantRange SRange = SE->getSignedRange(Parameter);
     Context = addRangeBoundsToSet(Context, SRange, PDim++, isl::dim::param);
+
+    SCEVInterval SI = getInterval(Parameter, *SE);
+    if (SI.Min && SI.Min != Parameter &&
+        isAffineExpr(&getRegion(), nullptr, SI.Min, *SE)) {
+      auto PPWA = getPwAffOnly(Parameter);
+      auto MinPWA = getPwAffOnly(SI.Min);
+      auto MinSet = PPWA.ge_set(MinPWA).params();
+      Context = Context.intersect(MinSet);
+    }
+
+    if (SI.Max && SI.Max != Parameter &&
+        isAffineExpr(&getRegion(), nullptr, SI.Max, *SE)) {
+      auto PPWA = getPwAffOnly(Parameter);
+      auto MaxPWA = getPwAffOnly(SI.Max);
+      auto MaxSet = PPWA.le_set(MaxPWA).params();
+      Context = Context.intersect(MaxSet);
+    }
   }
 }
 

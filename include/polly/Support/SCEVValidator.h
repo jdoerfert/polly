@@ -114,6 +114,16 @@ const llvm::SCEV *tryForwardThroughPHI(const llvm::SCEV *Expr, llvm::Region &R,
 llvm::Value *getUniqueNonErrorValue(llvm::PHINode *PHI, llvm::Region *R,
                                     llvm::LoopInfo &LI,
                                     const llvm::DominatorTree &DT);
+
+struct SCEVInterval {
+  const llvm::SCEV *Min;
+  const llvm::SCEV *Max;
+  SCEVInterval() : Min(nullptr), Max(nullptr) {}
+  SCEVInterval(const llvm::SCEV *Min, const llvm::SCEV *Max)
+      : Min(Min), Max(Max) {}
+};
+
+SCEVInterval getInterval(const llvm::SCEV *Expr, llvm::ScalarEvolution &SE);
 } // namespace polly
 
 #endif

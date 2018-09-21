@@ -776,4 +776,142 @@ Value *getUniqueNonErrorValue(PHINode *PHI, Region *R, LoopInfo &LI,
 
   return V;
 }
+
+/// @brief
+struct SCEVIntervalAnalysis
+    : public SCEVVisitor<SCEVIntervalAnalysis, SCEVInterval> {
+private:
+  ScalarEvolution &SE;
+
+public:
+  SCEVIntervalAnalysis(ScalarEvolution &SE) : SE(SE) {}
+
+  SCEVInterval visitConstant(const SCEVConstant *Constant) {
+    return SCEVInterval(Constant, Constant);
+  }
+
+  SCEVInterval visitTruncateExpr(const SCEVTruncateExpr *Expr) {
+    return SCEVInterval(Expr, Expr);
+  }
+
+  SCEVInterval visitZeroExtendExpr(const SCEVZeroExtendExpr *Expr) {
+    auto SI = visit(Expr->getOperand());
+    if (SI.Min)
+      SI.Min = SE.getZeroExtendExpr(SI.Min, Expr->getType());
+    if (SI.Max)
+      SI.Max = SE.getZeroExtendExpr(SI.Max, Expr->getType());
+    return SI;
+  }
+
+  SCEVInterval visitSignExtendExpr(const SCEVSignExtendExpr *Expr) {
+    auto SI = visit(Expr->getOperand());
+    if (SI.Min)
+      SI.Min = SE.getSignExtendExpr(SI.Min, Expr->getType());
+    if (SI.Max)
+      SI.Max = SE.getSignExtendExpr(SI.Max, Expr->getType());
+    return SI;
+  }
+
+  SCEVInterval visitAddExpr(const SCEVAddExpr *Expr) {
+    return SCEVInterval(Expr, Expr);
+    // SCEVInterval Return = visit(Expr->getOperand(0));
+    // if (!Return.Min || !Return.Max)
+    // return SCEVInterval();
+
+    // for (int i = 1, e = Expr->getNumOperands(); i < e; ++i) {
+    // SCEVInterval Op = visit(Expr->getOperand(i));
+    // if (!Op.Min || !Op.Max)
+    // return SCEVInterval();
+
+    // Return.Min = SE.getSMinExpr(Return.Min, Op.Min);
+    //}
+    // return Return;
+  }
+
+  SCEVInterval visitMulExpr(const SCEVMulExpr *Expr) {
+    return SCEVInterval(Expr, Expr);
+  }
+
+  SCEVInterval visitUDivExpr(const SCEVUDivExpr *Expr) {
+    return SCEVInterval(Expr, Expr);
+  }
+
+  SCEVInterval visitAddRecExpr(const SCEVAddRecExpr *Expr) {
+    if (!SE.hasLoopInvariantBackedgeTakenCount(Expr->getLoop()))
+      return SCEVInterval(Expr, Expr);
+    auto *StartSCEV = Expr->getStart();
+    auto *StepSCEV = Expr->getStepRecurrence(SE);
+    auto *TripCountSCEV = SE.getBackedgeTakenCount(Expr->getLoop());
+    if (Expr->getType() == TripCountSCEV->getType()) {
+      /* No Op */
+    } else if (TripCountSCEV->getType()->getScalarSizeInBits() >
+               Expr->getType()->getScalarSizeInBits()) {
+      auto *Ty = TripCountSCEV->getType();
+      StartSCEV = SE.getSignExtendExpr(StartSCEV, Ty);
+      StepSCEV = SE.getSignExtendExpr(StepSCEV, Ty);
+    } else {
+      TripCountSCEV = SE.getSignExtendExpr(TripCountSCEV, Expr->getType());
+    }
+
+    SCEVInterval Start = visit(StartSCEV);
+    SCEVInterval Step = visit(StepSCEV);
+    //bool IsKnowPos = SE.isKnownPositive(StepSCEV);
+    //bool IsKnowNeg = !IsKnowPos && SE.isKnownNegative(StepSCEV);
+    //if (!IsKnowPos && !IsKnowNeg)
+      //return SCEVInterval();
+
+    //auto *Min = IsKnowPos ? Start.Min : nullptr;
+    //auto *Max = IsKnowNeg ? Start.Max : nullptr;
+    //if (isa<SCEVCouldNotCompute>(TripCountSCEV))
+      //return SCEVInterval(Min, Max);
+
+    SCEVInterval TripCount = visit(TripCountSCEV);
+    if (!TripCount.Max || !Step.Max)
+      return SCEVInterval();
+
+    auto *MaxOffset = SE.getMulExpr(TripCount.Max, Step.Max);
+    //if ((IsKnowPos && !Start.Max) || (!IsKnowPos && !Start.Min))
+      //return SCEVInterval(Min, Max);
+
+    auto *Min = SE.getSMinExpr(Start.Min, SE.getAddExpr(Start.Min, MaxOffset));
+    auto *Max = SE.getSMaxExpr(Start.Max, SE.getAddExpr(Start.Max, MaxOffset));
+
+    //if (IsKnowPos)
+      //Max = SE.getAddExpr(Start.Max, MaxOffset);
+    //else
+      //Min = SE.getAddExpr(Start.Min, MaxOffset);
+
+    return SCEVInterval(Min, Max);
+  }
+
+  SCEVInterval visitSMaxExpr(const SCEVSMaxExpr *Expr) {
+    SCEVInterval Return = visit(Expr->getOperand(0));
+    if (!Return.Min || !Return.Max)
+      return SCEVInterval();
+
+    for (int i = 1, e = Expr->getNumOperands(); i < e; ++i) {
+      SCEVInterval Op = visit(Expr->getOperand(i));
+      if (!Op.Min || !Op.Max)
+        return SCEVInterval();
+
+      Return.Min = SE.getSMaxExpr(Return.Min, Op.Min);
+      Return.Max = SE.getSMaxExpr(Return.Max, Op.Max);
+    }
+
+    return Return;
+  }
+
+  SCEVInterval visitUMaxExpr(const SCEVUMaxExpr *Expr) {
+    return SCEVInterval(Expr, Expr);
+  }
+
+  SCEVInterval visitUnknown(const SCEVUnknown *Expr) {
+    return SCEVInterval(Expr, Expr);
+  }
+};
+
+SCEVInterval getInterval(const SCEV *Expr, ScalarEvolution &SE) {
+  SCEVIntervalAnalysis SIA(SE);
+  return SIA.visit(Expr);
+}
 } // namespace polly
