@@ -18,8 +18,11 @@
 #include "polly/Options.h"
 #include "polly/Support/GICHelper.h"
 #include "polly/Support/SCEVValidator.h"
+#include "polly/Support/VirtualInstruction.h"
+#include "llvm/Transforms/Utils/Local.h"
 #include "llvm/Analysis/RegionIterator.h"
 #include "llvm/IR/DiagnosticInfo.h"
+#include "llvm/IR/Verifier.h"
 
 using namespace llvm;
 using namespace polly;
@@ -30,6 +33,10 @@ STATISTIC(ScopFound, "Number of valid Scops");
 STATISTIC(RichScopFound, "Number of Scops containing a loop");
 STATISTIC(InfeasibleScops,
           "Number of SCoPs with statically infeasible context.");
+
+static cl::opt<bool> OneWrite("polly-one-write", cl::desc(""), cl::Hidden,
+                              cl::ZeroOrMore, cl::init(false),
+                              cl::cat(PollyCategory));
 
 static cl::opt<bool> ModelReadOnlyScalars(
     "polly-analyze-read-only-scalars",
@@ -64,7 +71,7 @@ void ScopBuilder::buildPHIAccesses(PHINode *PHI, Region *NonAffineSubRegion,
     if (NonAffineSubRegion && NonAffineSubRegion->contains(OpBB)) {
       auto *OpInst = dyn_cast<Instruction>(Op);
       if (!OpInst || !NonAffineSubRegion->contains(OpInst))
-        ensureValueRead(Op, OpBB);
+        ensureValueRead(PHI, Op, OpBB);
       continue;
     }
 
@@ -82,7 +89,7 @@ void ScopBuilder::buildScalarDependences(Instruction *Inst) {
 
   // Pull-in required operands.
   for (Use &Op : Inst->operands())
-    ensureValueRead(Op.get(), Inst->getParent());
+    ensureValueRead(Inst, Op.get(), Inst->getParent());
 }
 
 void ScopBuilder::buildEscapingDependences(Instruction *Inst) {
@@ -212,6 +219,8 @@ bool ScopBuilder::buildAccessMultiDimParam(MemAccInst Inst, ScopStmt *Stmt) {
 
   Sizes.insert(Sizes.end(), AccItr->second.Shape->DelinearizedSizes.begin(),
                AccItr->second.Shape->DelinearizedSizes.end());
+  if (Sizes.size() == 1)
+    return false;
   // Remove the element size. This information is already provided by the
   // ElementSize parameter. In case the element size of this access and the
   // element size used for delinearization differs the delinearization is
@@ -224,7 +233,10 @@ bool ScopBuilder::buildAccessMultiDimParam(MemAccInst Inst, ScopStmt *Stmt) {
   if (ElementSize != DelinearizedSize)
     scop->invalidate(DELINEARIZATION, Inst->getDebugLoc());
 
-  addArrayAccess(Inst, AccType, BasePointer->getValue(), ElementType, true,
+  bool IsAffine = !AccItr->second.DelinearizedSubscripts.empty();
+  if (!IsAffine && AccType == MemoryAccess::MUST_WRITE)
+    AccType = MemoryAccess::MAY_WRITE;
+  addArrayAccess(Inst, AccType, BasePointer->getValue(), ElementType, IsAffine,
                  AccItr->second.DelinearizedSubscripts, Sizes, Val);
   return true;
 }
@@ -307,9 +319,27 @@ bool ScopBuilder::buildAccessCallInst(MemAccInst Inst, ScopStmt *Stmt) {
   if (CI->doesNotAccessMemory() || isIgnoredIntrinsic(CI))
     return true;
 
-  bool ReadOnly = false;
-  auto *AF = SE.getConstant(IntegerType::getInt64Ty(CI->getContext()), 0);
   auto *CalledFunction = CI->getCalledFunction();
+  if (CalledFunction->getName().equals("_ZSt3expf"))
+    return true;
+
+  auto *AF = SE.getConstant(IntegerType::getInt64Ty(CI->getContext()), 0);
+  if (CalledFunction->getName().equals("fprintf") ||
+      CalledFunction->getName().equals("fwrite") ||
+      CalledFunction->getName().equals("fputc")) {
+    Loop *L = LI.getLoopFor(CI->getParent());
+    unsigned Idx = CalledFunction->getName().equals("fprintf")
+                       ? 0
+                       : CI->getNumArgOperands() - 1;
+    auto *ArgSCEV = SE.getSCEVAtScope(CI->getArgOperand(Idx), L);
+    ArgSCEV = scop->getRepresentingInvariantLoadSCEV(ArgSCEV);
+    addArrayAccess(Inst, MemoryAccess::MUST_WRITE,
+                   cast<SCEVUnknown>(ArgSCEV)->getValue(), ArgSCEV->getType(),
+                   false, {AF}, {nullptr}, CI);
+    return true;
+  }
+
+  bool ReadOnly = false;
   switch (AA.getModRefBehavior(CalledFunction)) {
   case FMRB_UnknownModRefBehavior:
     llvm_unreachable("Unknown mod ref behaviour cannot be represented.");
@@ -494,7 +524,7 @@ MemoryAccess *ScopBuilder::addMemoryAccess(
     return nullptr;
 
   Value *BaseAddr = BaseAddress;
-  std::string BaseName = getIslCompatibleName("MemRef_", BaseAddr, "");
+  std::string BaseName = getIslCompatibleName("MemRef_", BaseAddr, 0, "", true);
 
   bool isKnownMustAccess = false;
 
@@ -556,7 +586,8 @@ void ScopBuilder::ensureValueWrite(Instruction *Inst) {
                   ArrayRef<const SCEV *>(), MemoryKind::Value);
 }
 
-void ScopBuilder::ensureValueRead(Value *V, BasicBlock *UserBB) {
+void ScopBuilder::ensureValueRead(Instruction *Inst, Value *V,
+                                  BasicBlock *UserBB) {
 
   // There cannot be an "access" for literal constants. BasicBlock references
   // (jump destinations) also never change.
@@ -567,6 +598,10 @@ void ScopBuilder::ensureValueRead(Value *V, BasicBlock *UserBB) {
   // not need to add a value dependences.
   auto *Scope = LI.getLoopFor(UserBB);
   if (canSynthesize(V, *scop, &SE, Scope))
+    return;
+
+  // TODO HACK
+  if (V->getType()->isIntegerTy(1))
     return;
 
   // Do not build scalar dependences for required invariant loads as we will
@@ -600,7 +635,7 @@ void ScopBuilder::ensureValueRead(Value *V, BasicBlock *UserBB) {
   if (UserStmt->lookupValueReadOf(V))
     return;
 
-  addMemoryAccess(UserBB, nullptr, MemoryAccess::READ, V, V->getType(), true, V,
+  addMemoryAccess(UserBB, Inst, MemoryAccess::READ, V, V->getType(), true, V,
                   ArrayRef<const SCEV *>(), ArrayRef<const SCEV *>(),
                   MemoryKind::Value);
   if (ValueInst)
@@ -625,7 +660,7 @@ void ScopBuilder::ensurePHIWrite(PHINode *PHI, BasicBlock *IncomingBlock,
   // exiting edges from subregion each can be the effective written value of the
   // subregion. As such, all of them must be made available in the subregion
   // statement.
-  ensureValueRead(IncomingValue, IncomingBlock);
+  ensureValueRead(PHI, IncomingValue, IncomingBlock);
 
   // Do not add more than one MemoryAccess per PHINode and ScopStmt.
   if (MemoryAccess *Acc = IncomingStmt->lookupPHIWriteOf(PHI)) {
@@ -634,11 +669,11 @@ void ScopBuilder::ensurePHIWrite(PHINode *PHI, BasicBlock *IncomingBlock,
     return;
   }
 
-  MemoryAccess *Acc =
-      addMemoryAccess(IncomingStmt->getEntryBlock(), PHI,
-                      MemoryAccess::MUST_WRITE, PHI, PHI->getType(), true, PHI,
-                      ArrayRef<const SCEV *>(), ArrayRef<const SCEV *>(),
-                      IsExitBlock ? MemoryKind::ExitPHI : MemoryKind::PHI);
+  MemoryAccess *Acc = addMemoryAccess(
+      IncomingStmt->getEntryBlock(), PHI, MemoryAccess::MUST_WRITE, PHI,
+      PHI->getType(), true, IncomingValue, ArrayRef<const SCEV *>(),
+      ArrayRef<const SCEV *>(),
+      IsExitBlock ? MemoryKind::ExitPHI : MemoryKind::PHI);
   assert(Acc);
   Acc->addIncoming(IncomingBlock, IncomingValue);
 }
@@ -650,7 +685,162 @@ void ScopBuilder::addPHIReadAccess(PHINode *PHI) {
 }
 
 void ScopBuilder::buildScop(Region &R, AssumptionCache &AC) {
+  if (OneWrite || PollyExpProp) {
+    DEBUG(errs() << "Before one write stmt creation:\n";
+          R.getEntry()->getParent()->dump(); R.dump());
+
+    ScopDetection::RegionSet &NASSet =
+        SD.getDetectionContext(&R)->NonAffineSubRegionSet;
+    DEBUG({
+      errs() << "Non affine regions:\n";
+      for (auto *R : NASSet)
+        R->dump();
+    });
+
+    RegionInfo *RI = R.getRegionInfo();
+    SmallVector<PHINode *, 4> PHIsToDemote;
+    for (auto *BB : R.blocks()) {
+      auto *BBR = RI->getRegionFor(BB);
+      if (NASSet.count(BBR)) {
+        continue;
+      }
+
+      auto *Scope = LI.getLoopFor(BB);
+      for (auto &I : *BB) {
+        if (!isa<PHINode>(I))
+          break;
+        if (canSynthesize(&I, R, &SE, Scope)) {
+          DEBUG(errs() << "Can synthesize PHI: " << I << "\n");
+          continue;
+        }
+        auto *PHI = cast<PHINode>(&I);
+        DEBUG(errs() << "Will demote PHI: " << I << "\n");
+        PHIsToDemote.push_back(PHI);
+      }
+    }
+    for (auto &I : *R.getExit()) {
+      if (!isa<PHINode>(I))
+        break;
+      auto *PHI = cast<PHINode>(&I);
+      DEBUG(errs() << "Will demote PHI: " << I << "\n");
+      PHIsToDemote.push_back(PHI);
+    }
+    for (auto *PHI : PHIsToDemote) {
+      if (PHI->getNumIncomingValues() == 1) {
+        PHI->replaceAllUsesWith(PHI->getIncomingValue(0));
+        PHI->eraseFromParent();
+      } else {
+        DEBUG(errs() << "Demote PHI: " << *PHI << "\n");
+        DemotePHIToStack(PHI);
+      }
+    }
+    DEBUG(errs() << "After PHI demotation:\n";
+          R.getEntry()->getParent()->dump());
+
+    SmallVector<Instruction *, 4> InstToDemote;
+    for (auto *BB : R.blocks()) {
+      auto *BBR = RI->getRegionFor(BB);
+      if (NASSet.count(BBR))
+        continue;
+
+      auto *Scope = LI.getLoopFor(BB);
+      SmallVector<Instruction *, 32> Insts;
+      for (auto &I : *BB) {
+        Insts.push_back(&I);
+      }
+      bool First = true;
+      for (auto It = Insts.rbegin() + 1, End = Insts.rend(); It != End; It++) {
+        Instruction *I = *It;
+        if (I->mayHaveSideEffects()) {
+          if (First) {
+            First = false;
+          } else {
+            splitBlock(I->getParent(), *(It - 1), &DT, &LI, RI);
+            continue;
+          }
+        }
+
+        if (canSynthesize(I, R, &SE, Scope))
+          continue;
+
+        // TODO HACK
+        if (I->getType()->isIntegerTy(1))
+          continue;
+
+        for (auto *User : I->users()) {
+          auto *UserI = dyn_cast<Instruction>(User);
+          if (!UserI || UserI->getParent() == BB)
+            continue;
+          if (First) {
+            First = false;
+          } else {
+            splitBlock(I->getParent(), *(It - 1), &DT, &LI, RI);
+          }
+          DEBUG(errs() << "Demote I: " << *I << " due to " << *UserI << "\n");
+          AllocaInst *AI = DemoteRegToStack(*I);
+          for (auto *User : AI->users()) {
+            auto *UserI = cast<Instruction>(User);
+            if (isa<StoreInst>(UserI))
+              continue;
+            assert(isa<LoadInst>(User));
+            if (UserI->getParent() != I->getParent())
+              continue;
+            assert(UserI->getNumUses() == 1);
+            auto *UserIUser = cast<Instruction>(UserI->user_back());
+            if (UserIUser->getParent() == I->getParent()) {
+              UserIUser->replaceUsesOfWith(UserI, I);
+              UserI->eraseFromParent();
+              continue;
+            }
+
+            assert(isa<PHINode>(UserIUser));
+            auto *PHI = cast<PHINode>(UserIUser);
+            if (canSynthesize(I, R, &SE, Scope))
+              continue;
+
+            if (PHI->getNumIncomingValues() == 1) {
+              PHI->replaceAllUsesWith(I);
+              PHI->eraseFromParent();
+            } else {
+              assert(PHI->getNumIncomingValues() == 1);
+              UserI->moveBefore(&*PHI->getParent()->getFirstInsertionPt());
+              PHI->replaceAllUsesWith(UserI);
+              PHI->eraseFromParent();
+            }
+          }
+          break;
+        }
+      }
+    }
+    for (BasicBlock &BB : *R.getEntry()->getParent())
+      for (Instruction &I : BB)
+        if (!I.hasName() && !I.getType()->isVoidTy())
+          I.setName("n");
+
+    for (auto *BB : R.blocks()) {
+      auto *L = LI.getLoopFor(BB);
+      StoreInst *SI = nullptr;
+      for (auto &I : *BB)
+        if (auto *S = dyn_cast<StoreInst>(&I)) {
+          if (SI) {
+            SI = nullptr;
+            break;
+          } else {
+            SI = S;
+          }
+        }
+      if (SI && L) {
+        //createExpressionTree(*BB, L);
+        //sortBB(SI, L);
+      }
+    }
+    DEBUG(errs() << "After one write stmt creation:\n";
+          R.getEntry()->getModule()->dump());
+    assert(!verifyFunction(*R.getEntry()->getParent(), &errs()));
+  }
+
   scop.reset(new Scop(R, SE, LI, *SD.getDetectionContext(&R)));
+  scop->buildInvariantEquivalenceClasses();
 
   buildStmts(R);
   buildAccessFunctions(R);

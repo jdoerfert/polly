@@ -54,7 +54,7 @@ static cl::opt<bool> LegalityCheckDisabled(
 static cl::opt<bool>
     UseReductions("polly-dependences-use-reductions",
                   cl::desc("Exploit reductions in dependence analysis"),
-                  cl::Hidden, cl::init(true), cl::ZeroOrMore,
+                  cl::Hidden, cl::init(false), cl::ZeroOrMore,
                   cl::cat(PollyCategory));
 
 enum AnalysisType { VALUE_BASED_ANALYSIS, MEMORY_BASED_ANALYSIS };
@@ -165,10 +165,14 @@ static void collectInfo(Scop &S, isl_union_map *&Read,
         }
       }
 
+      //if (!MA->isAffine()) {
+        //accdom = isl_map_fix_si(accdom, isl_dim_out, 0, 0);
+      //}
+
       if (MA->isRead())
         Read = isl_union_map_add_map(Read, accdom);
-      else if (MA->isMayWrite())
-        MayWrite = isl_union_map_add_map(MayWrite, accdom);
+      //else if (MA->isMayWrite())
+        //MayWrite = isl_union_map_add_map(MayWrite, accdom);
       else
         MustWrite = isl_union_map_add_map(MustWrite, accdom);
     }
@@ -299,6 +303,106 @@ static __isl_give isl_union_flow *buildFlow(__isl_keep isl_union_map *Snk,
                           << isl_ctx_last_error(isl_schedule_get_ctx(Schedule))
                           << '\n';);
   return Flow;
+}
+
+/// Compute exact WAR dependences
+/// We need exact WAR dependences. That is, if there are
+/// dependences of the form:
+/// must-W2 (sink) <- must-W1 (sink) <- R (source)
+/// We wish to generate *ONLY*:
+/// { R -> W1 },
+/// NOT:
+/// { R -> W2, R -> W1 }
+///
+/// However, in the case of may-writes, we do *not* wish to allow
+/// may-writes to block must-writes. This makes sense, since perhaps the
+/// may-write will not happen. In that case, the exact dependence will
+/// be the (read -> must-write).
+/// Example:
+/// must-W2 (sink) <- may-W1 (sink) <- R (source)
+/// We wish to generate:
+/// { R-> W1, R -> W2 }
+///
+/// We use the fact that may dependences are not allowed to flow
+/// through a must source. That way, reads will be stopped by intermediate
+/// must-writes.
+/// However, may-sources may not interfere with one another. Hence, reads
+/// will not block each other from generating dependences.
+///
+/// Write (Sink) <- MustWrite (Must-Source) <- Read (MaySource) is
+/// present, then the dependence
+///    { Write <- Read }
+/// is not tracked.
+///
+/// We would like to specify the Must-Write as kills, source as Read
+/// and sink as Write.
+/// ISL does not have the functionality currently to support "kills".
+/// Use the Must-Source as a way to specify "kills".
+/// The drawback is that we will have both
+///   { Write <- MustWrite, Write <- Read }
+///
+/// We need to filter this to track only { Write <- Read }.
+///
+/// Filtering { Write <- Read } from WAROverestimated:
+/// --------------------------------------------------
+/// isl_union_flow_get_full_may_dependence gives us dependences of the form
+///   WAROverestimated = { Read+MustWrite -> [Write -> MemoryAccess]}
+///
+///  We need to intersect the domain with Read to get only
+///  Read dependences.
+///    Read = { Read -> MemoryAccess }
+///
+///
+/// 1. Construct:
+///   WARMemAccesses = { Read+Write -> [Read+Write -> MemoryAccess] }
+/// This takes a Read+Write from WAROverestimated and maps it to the
+/// corresponding wrapped memory access from WAROverestimated.
+///
+/// 2. Apply WARMemAcesses to the domain of WAR Overestimated to give:
+///   WAR = { [Read+Write -> MemoryAccess] -> [Write -> MemoryAccess] }
+///
+/// WAR is in a state where we can intersect with Read, since they
+/// have the same structure.
+///
+/// 3. Intersect this with a wrapped Read. Read is wrapped
+/// to ensure the domains look the same.
+///   WAR = WAR \intersect (wrapped Read)
+///   WAR = { [Read -> MemoryAccesss] -> [Write -> MemoryAccess] }
+///
+///  4. Project out the memory access in the domain to get
+///  WAR = { Read -> Write }
+static isl_union_map *buildWAR(isl_union_map *Write, isl_union_map *MustWrite,
+                               isl_union_map *Read, isl_schedule *Schedule) {
+  isl_union_flow *Flow = buildFlow(Write, MustWrite, Read, Schedule);
+  auto *WAROverestimated = isl_union_flow_get_full_may_dependence(Flow);
+
+  // 1. Constructing WARMemAccesses
+  // WarMemAccesses = { Read+Write -> [Write -> MemAccess] }
+  // Range factor of range product
+  //     { Read+Write -> MemAcesss }
+  // Domain projection
+  //     { [Read+Write -> MemAccess] -> Read+Write }
+  // Reverse
+  //     { Read+Write -> [Read+Write -> MemAccess] }
+  auto WARMemAccesses = isl_union_map_copy(WAROverestimated);
+  WARMemAccesses = isl_union_map_range_factor_range(WAROverestimated);
+  WARMemAccesses = isl_union_map_domain_map(WARMemAccesses);
+  WARMemAccesses = isl_union_map_reverse(WARMemAccesses);
+
+  // 2. Apply to get domain tagged with memory accesses
+  isl_union_map *WAR =
+      isl_union_map_apply_domain(WAROverestimated, WARMemAccesses);
+
+  // 3. Intersect with Read to extract only reads
+  auto ReadWrapped = isl_union_map_wrap(isl_union_map_copy(Read));
+  WAR = isl_union_map_intersect_domain(WAR, ReadWrapped);
+
+  // 4. Project out memory accesses to get usual style dependences
+  WAR = isl_union_map_range_factor_domain(WAR);
+  WAR = isl_union_map_domain_factor_domain(WAR);
+
+  isl_union_flow_free(Flow);
+  return WAR;
 }
 
 void Dependences::calculateDependences(Scop &S) {
@@ -439,33 +543,7 @@ void Dependences::calculateDependences(Scop &S) {
       WAW = isl_union_flow_get_may_dependence(Flow);
       isl_union_flow_free(Flow);
 
-      // We need exact WAR dependences. That is, if there are
-      // dependences of the form:
-      // must-W2 (sink) <- must-W1 (sink) <- R (source)
-      // We wish to generate *ONLY*:
-      // { R -> W1 },
-      // NOT:
-      // { R -> W2, R -> W1 }
-      //
-      // However, in the case of may-writes, we do *not* wish to allow
-      // may-writes to block must-writes. This makes sense, since perhaps the
-      // may-write will not happen. In that case, the exact dependence will
-      // be the (read -> must-write).
-      // Example:
-      // must-W2 (sink) <- may-W1 (sink) <- R (source)
-      // We wish to generate:
-      // { R-> W1, R -> W2 }
-      //
-      //
-      // To achieve this, we use the fact that *must* dependences are not
-      // allowed to flow through the may-source.
-      // Since we set the may-source to MustWrite, we are guarenteed that
-      // only the exact ("shortest") (must-write -> read) is captured.
-      // Any number of intermediate may-writes are allowed.
-      Flow = buildFlow(Write, Read, MustWrite, Schedule);
-      WAR = isl_union_flow_get_must_dependence(Flow);
-      isl_union_flow_free(Flow);
-
+      WAR = buildWAR(Write, MustWrite, Read, Schedule);
       isl_union_map_free(Write);
       isl_schedule_free(Schedule);
     } else {
@@ -811,10 +889,10 @@ __isl_give isl_union_map *Dependences::getDependences(int Kinds) const {
   if (Kinds & TYPE_WAW)
     Deps = isl_union_map_union(Deps, isl_union_map_copy(WAW));
 
-  if (Kinds & TYPE_RED)
+  if (Kinds & TYPE_RED && RED)
     Deps = isl_union_map_union(Deps, isl_union_map_copy(RED));
 
-  if (Kinds & TYPE_TC_RED)
+  if (Kinds & TYPE_TC_RED && TC_RED)
     Deps = isl_union_map_union(Deps, isl_union_map_copy(TC_RED));
 
   Deps = isl_union_map_coalesce(Deps);
@@ -843,6 +921,11 @@ DependenceInfo::getDependences(Dependences::AnalysisLevel Level) {
     return *d;
 
   return recomputeDependences(Level);
+}
+
+void DependenceInfo::setDependences(Dependences::AnalysisLevel Level,
+                                    Dependences *Dep) {
+  D[Level].reset(Dep);
 }
 
 const Dependences &

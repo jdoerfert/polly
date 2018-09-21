@@ -150,36 +150,18 @@ static bool checkIslAstExprInt(__isl_take isl_ast_expr *Expr,
 
 int IslNodeBuilder::getNumberOfIterations(__isl_keep isl_ast_node *For) {
   assert(isl_ast_node_get_type(For) == isl_ast_node_for);
-  auto Body = isl_ast_node_for_get_body(For);
 
-  // First, check if we can actually handle this code.
-  switch (isl_ast_node_get_type(Body)) {
-  case isl_ast_node_user:
-    break;
-  case isl_ast_node_block: {
-    isl_ast_node_list *List = isl_ast_node_block_get_children(Body);
-    for (int i = 0; i < isl_ast_node_list_n_ast_node(List); ++i) {
-      isl_ast_node *Node = isl_ast_node_list_get_ast_node(List, i);
-      int Type = isl_ast_node_get_type(Node);
-      isl_ast_node_free(Node);
-      if (Type != isl_ast_node_user) {
-        isl_ast_node_list_free(List);
-        isl_ast_node_free(Body);
-        return -1;
-      }
-    }
-    isl_ast_node_list_free(List);
-    break;
-  }
-  default:
-    isl_ast_node_free(Body);
+  auto InitExpr = isl_ast_node_for_get_init(For);
+  if (isl_ast_expr_get_type(InitExpr) != isl_ast_expr_int) {
+    isl_ast_expr_free(InitExpr);
     return -1;
   }
-  isl_ast_node_free(Body);
 
-  auto Init = isl_ast_node_for_get_init(For);
-  if (!checkIslAstExprInt(Init, isl_val_is_zero))
-    return -1;
+  auto InitVal = isl_ast_expr_get_val(InitExpr);
+  isl_ast_expr_free(InitExpr);
+  int Init = isl_val_get_num_si(InitVal);
+  isl_val_free(InitVal);
+
   auto Inc = isl_ast_node_for_get_inc(For);
   if (!checkIslAstExprInt(Inc, isl_val_is_one))
     return -1;
@@ -191,7 +173,7 @@ int IslNodeBuilder::getNumberOfIterations(__isl_keep isl_ast_node *For) {
   }
   auto UpVal = isl_ast_expr_get_val(UB);
   isl_ast_expr_free(UB);
-  int NumberIterations = isl_val_get_num_si(UpVal);
+  int NumberIterations = isl_val_get_num_si(UpVal) - Init;
   isl_val_free(UpVal);
   if (NumberIterations < 0)
     return -1;
@@ -203,16 +185,36 @@ int IslNodeBuilder::getNumberOfIterations(__isl_keep isl_ast_node *For) {
 
 /// Extract the values and SCEVs needed to generate code for a block.
 static int findReferencesInBlock(struct SubtreeReferences &References,
-                                 const ScopStmt *Stmt, const BasicBlock *BB) {
-  for (const Instruction &Inst : *BB)
+                                 const ScopStmt *Stmt, BasicBlock *BB) {
+  for (Instruction &Inst : *BB) {
+    if (Value *NewVal = References.GlobalMap.lookup(&Inst)) {
+      References.Values.insert(NewVal);
+      continue;
+    }
+    if (isa<LoadInst>(Inst) || isa<StoreInst>(Inst) ||
+        isa<GetElementPtrInst>(Inst))
+      continue;
     for (Value *SrcVal : Inst.operands()) {
+      if (isa<Argument>(SrcVal)) {
+        References.Values.insert(SrcVal);
+        continue;
+      }
+      if (Value *NewVal = References.GlobalMap.lookup(SrcVal)) {
+        References.Values.insert(NewVal);
+        continue;
+      }
       auto *Scope = References.LI.getLoopFor(BB);
       if (canSynthesize(SrcVal, References.S, &References.SE, Scope)) {
         References.SCEVs.insert(References.SE.getSCEVAtScope(SrcVal, Scope));
         continue;
-      } else if (Value *NewVal = References.GlobalMap.lookup(SrcVal))
-        References.Values.insert(NewVal);
+      }
+      if (auto *SrcInst = dyn_cast<Instruction>(SrcVal))
+        if (!Stmt->getParent()->contains(SrcInst)) {
+          References.Values.insert(SrcVal);
+          continue;
+        }
     }
+  }
   return 0;
 }
 
@@ -225,12 +227,21 @@ isl_stat addReferencesFromStmt(const ScopStmt *Stmt, void *UserPtr,
   else {
     assert(Stmt->isRegionStmt() &&
            "Stmt was neither block nor region statement");
-    for (const BasicBlock *BB : Stmt->getRegion()->blocks())
+    for (BasicBlock *BB : Stmt->getRegion()->blocks())
       findReferencesInBlock(References, Stmt, BB);
   }
 
+  //for (const auto &It : Stmt->LocalRecomputeMAs)
+    //addReferencesFromRI(*It.second, References);
+
+  //auto *Domain = Stmt->getDomain();
+  //bool Empty = isl_set_is_empty(Domain);
+  //isl_set_free(Domain);
+  //if (Empty)
+    //return isl_stat_ok;
+
   for (auto &Access : *Stmt) {
-    if (Access->isArrayKind()) {
+    //if (Access->isArrayKind()) {
       auto *BasePtr = Access->getScopArrayInfo()->getBasePtr();
       if (Instruction *OpInst = dyn_cast<Instruction>(BasePtr))
         if (Stmt->getParent()->contains(OpInst))
@@ -238,7 +249,7 @@ isl_stat addReferencesFromStmt(const ScopStmt *Stmt, void *UserPtr,
 
       References.Values.insert(BasePtr);
       continue;
-    }
+    //}
 
     if (CreateScalarRefs)
       References.Values.insert(References.BlockGen.getOrCreateAlloca(*Access));
@@ -308,6 +319,13 @@ void IslNodeBuilder::getReferencesInSubtree(__isl_keep isl_ast_node *For,
 
   isl_union_set *Schedule = isl_union_map_domain(getScheduleForAstNode(For));
   addReferencesFromStmtUnionSet(Schedule, References);
+
+  auto &InvariantEquivClasses = S.getInvariantAccesses();
+  for (auto &IAClass : InvariantEquivClasses) {
+    const MemoryAccessList &MAs = IAClass.InvariantAccesses;
+    for (const MemoryAccess *MA : MAs)
+      Values.insert(ValueMap.lookup(MA->getAccessInstruction()));
+  }
 
   for (const SCEV *Expr : SCEVs) {
     findValues(Expr, SE, Values);
@@ -449,6 +467,375 @@ void IslNodeBuilder::createForVector(__isl_take isl_ast_node *For,
   isl_ast_expr_free(Iterator);
 }
 
+static isl_map *removeFixedInputDims(isl_map *M) {
+  unsigned NumDims = isl_map_dim(M, isl_dim_in);
+  isl_set *S = isl_map_domain(isl_map_copy(M));
+  for (unsigned d = 0, md = 0; d < NumDims; d++, md++) {
+    auto *Val = isl_set_plain_get_val_if_fixed(S, isl_dim_set, d);
+    if (Val && !isl_val_is_nan(Val))
+      M = isl_map_project_out(M, isl_dim_in, md--, 1);
+    isl_val_free(Val);
+  }
+
+  isl_set_free(S);
+  return M;
+}
+
+void IslNodeBuilder::colocateAccesses() {
+  auto &MALoopMap = BlockGen.MALoopMap;
+  if (MALoopMap.empty())
+    return;
+
+  //static int replaced = 0;
+  //static int MaxReplace = 3;
+  //if (replaced > MaxReplace)
+    //return;
+  for (auto &SAIIt : MALoopMap) {
+    auto *SAI = SAIIt.first;
+    auto &AccessMap = SAIIt.second;
+    //errs() << "  SAI: " << SAI->getName() << " [#" << AccessMap.size()
+           //<< "]\n";
+    if (AccessMap.size() < 2)
+      continue;
+
+    for (auto &It0 : AccessMap) {
+      auto *CurVal = It0.first;
+      if (CurVal->getNumUses() == 0)
+        continue;
+
+      //errs() << "CurVal: " << *CurVal << "\n";
+      auto *AccRel0 = isl_map_copy(It0.second.second);
+      AccRel0 = removeFixedInputDims(AccRel0);
+      //errs() << "AccRel0: " << AccRel0 << "\n";
+      Instruction *SameVal = nullptr;
+      for (auto &It1 : AccessMap) {
+        if (It1.first == CurVal)
+          continue;
+        if (It1.first->getNumUses() == 0)
+          continue;
+        if (It1.second.first->WriteMA->getScopArrayInfo() == SAI)
+          continue;
+        auto *AccRel1 = isl_map_copy(It1.second.second);
+        AccRel1 = removeFixedInputDims(AccRel1);
+        bool Equal = isl_map_plain_is_equal(AccRel0, AccRel1);
+        //if (Equal)
+          //errs() << "AccRel1: " << AccRel1 << "\n";
+        isl_map_free(AccRel1);
+        if (!Equal)
+          continue;
+
+        SameVal = It1.first;
+        break;
+      }
+      isl_map_free(AccRel0);
+
+      if (!SameVal) {
+        //errs() << "No same val found!\n";
+        continue;
+      }
+      //errs() << "SameVal: " << *SameVal << "\n";
+
+      if (DT.dominates(CurVal, SameVal)) {
+        //SameVal->getParent()->dump();
+        //errs() << "Replace " << *SameVal << " by " << *CurVal <<"\n";
+        SameVal->replaceAllUsesWith(CurVal);
+        //replaced++;
+      } else if (DT.dominates(SameVal, CurVal)) {
+        //CurVal->getParent()->dump();
+        //errs() << "Replace " << *CurVal << " by " << *SameVal <<"\n";
+        CurVal->replaceAllUsesWith(SameVal);
+        //replaced++;
+      }
+      //if (replaced > MaxReplace)
+        //return;
+    }
+  }
+}
+
+void IslNodeBuilder::createLoopPHIs(isl_ast_node *For) {
+  auto &MALoopMap = BlockGen.MALoopMap;
+  if (MALoopMap.empty())
+    return;
+
+  auto *L = Annotator.peekLoop();
+  assert(L);
+  auto *HeaderBB = L->getHeader();
+  auto *PreHeaderBB = L->getLoopPreheader();
+  auto *LatchBB = L->getLoopLatch();
+
+  ValueMapT RemapBBMap;
+  auto IP = Builder.GetInsertPoint();
+  Builder.SetInsertPoint(PreHeaderBB->getTerminator());
+
+  DenseMap<Instruction *, PHINode *> PHIMap;
+  DenseMap<ScopStmt *, isl_map*> LastItMaps;
+
+  errs() << "Create loop PHIs\n";
+  //errs() << "MALoopMap:\n";
+  for (auto &SAIIt : MALoopMap) {
+    auto *SAI = SAIIt.first;
+    auto &AccessMap = SAIIt.second;
+    //errs() << "  SAI: " << SAI->getName() << " [#" << AccessMap.size()
+           //<< "] [LD: " << L->getLoopDepth() << "]\n";
+    if (AccessMap.size() < 2)
+      continue;
+    //if (!isa<Instruction>(SAI->getBasePtr()))
+      //continue;
+
+    for (auto &It0 : AccessMap) {
+      auto *CurVal = It0.first;
+      if (CurVal->getNumUses() == 0)
+        continue;
+      if (PHIMap.count(CurVal))
+        continue;
+
+      auto *Stmt = It0.second.first;
+      //errs() << "Stmt: " << Stmt->getBaseName() << " : " << Stmt->getDomainStr()
+             //<< "\n";
+      if (Stmt->getNumIterators() < 2)
+        continue;
+
+      auto *AccRel0 = isl_map_copy(It0.second.second);
+      //errs() << "    " << *CurVal << "\n    => " << AccRel0 << "\n";
+
+      if (!isl_map_involves_dims(AccRel0, isl_dim_in, 0,
+                                 isl_map_dim(AccRel0, isl_dim_in))) {
+        isl_map_free(AccRel0);
+        continue;
+      }
+      if (!isl_map_is_injective(AccRel0)) {
+        isl_map_free(AccRel0);
+        continue;
+      }
+
+      isl_map *&LastItMap = LastItMaps[Stmt];
+      if (!LastItMap) {
+        //isl_union_map *USchedule = getScheduleForAstNode(For);
+        isl_union_map *USchedule =
+          isl_ast_build_get_schedule(Stmt->getAstBuild());
+        assert(USchedule && "For statement annotation does not contain its schedule");
+        //errs() << "Sched: " << USchedule << "\n";
+        USchedule = isl_union_map_intersect_domain(
+            USchedule, isl_union_set_from_set(Stmt->getDomain()));
+        //errs() << "Sched: " << USchedule << "\n";
+        auto *SchedRng = isl_map_range(isl_map_from_union_map(USchedule));
+        unsigned NumSchedDims = isl_set_dim(SchedRng, isl_dim_set);
+        if (NumSchedDims == 0) {
+          isl_set_free(SchedRng);
+          isl_map_free(AccRel0);
+          continue;
+        }
+        int InnerDim = NumSchedDims - 1;
+        do {
+          auto *Val =
+              isl_set_plain_get_val_if_fixed(SchedRng, isl_dim_set, InnerDim);
+          bool Done = !Val || isl_val_is_nan(Val);
+          isl_val_free(Val);
+          if (Done)
+            break;
+        } while (InnerDim-- > 0);
+        LastItMap = isl_map_lex_gt(isl_set_get_space(SchedRng));
+        errs() << "GTM: " << LastItMap << " for " << Stmt->getBaseName() << "\n";
+        for (unsigned Dim = 0; Dim  < NumSchedDims; Dim++)
+          if (Dim != InnerDim)
+            LastItMap =
+                isl_map_equate(LastItMap, isl_dim_in, Dim, isl_dim_out, Dim);
+        //errs() << "GTM: " << LastItMap << " for " << Stmt->getBaseName() << "\n";
+        LastItMap = isl_map_intersect_domain(LastItMap, isl_set_copy(SchedRng));
+        LastItMap = isl_map_intersect_range(LastItMap, SchedRng);
+        //errs() << "GTM: " << LastItMap << " for " << Stmt->getBaseName() << "\n";
+        LastItMap = isl_map_lexmax(LastItMap);
+        //errs() << "GTM: " << LastItMap << " for " << Stmt->getBaseName() << "\n";
+        //LastItMap = isl_map_gist_domain(LastItMap, isl_set_copy(SchedRng));
+        //LastItMap = isl_map_gist_range(LastItMap, SchedRng);
+        LastItMap = isl_map_gist_params(LastItMap, Stmt->getParent()->getAssumedContext());
+      }
+      errs() << "LIM: " << LastItMap << " for " << Stmt->getBaseName() << "\n";
+      //errs() << "AccRel0: " << AccRel0 << "\n";
+
+      isl_set *AccDom = isl_map_domain(isl_map_copy(AccRel0));
+      while (isl_map_can_zip(LastItMap) && !isl_set_is_wrapping(AccDom)) {
+        LastItMap = isl_set_unwrap(isl_map_range(isl_map_zip(LastItMap)));
+        //errs() << "LIM: " << LastItMap << " for " << Stmt->getBaseName() << "\n";
+      }
+      isl_set_free(AccDom);
+
+      //errs() << "AccRel0: " << AccRel0 << "\n";
+      AccRel0 = isl_map_apply_domain(AccRel0, isl_map_copy(LastItMap));
+      errs() << "AccRel0: " << AccRel0 << "\n";
+      AccRel0 = removeFixedInputDims(AccRel0);
+      errs() << "AccRel0: " << AccRel0 << "\n";
+      int LastDim = isl_map_dim(AccRel0, isl_dim_in) - 1;
+      if (LastDim < 0 ||
+          !isl_map_involves_dims(AccRel0, isl_dim_in, LastDim, 1)) {
+        isl_map_free(AccRel0);
+        continue;
+      }
+      if (!isl_map_is_injective(AccRel0)) {
+        isl_map_free(AccRel0);
+        continue;
+      }
+
+      Value *NextItVal = nullptr;
+      for (auto &It1 : AccessMap) {
+        auto *NextVal = It1.first;
+        if (NextVal == CurVal || NextVal->getNumUses() == 0)
+          continue;
+        if (isa<LoadInst>(NextVal))
+          continue;
+
+        auto *AccRel1 = isl_map_copy(It1.second.second);
+        AccRel1 = removeFixedInputDims(AccRel1);
+        bool Equal = isl_map_is_subset(AccRel0, AccRel1);
+        //if (Equal)
+          //errs() << "AccRel1: " << AccRel1 << "\n";
+        isl_map_free(AccRel1);
+        if (!Equal)
+          continue;
+
+        NextItVal = It1.first;
+        break;
+      }
+      isl_map_free(AccRel0);
+
+      if (!NextItVal) {
+        //errs() << "No next it val found!\n";
+        continue;
+      }
+
+      //errs() << "NextItVal: " << *NextItVal << "\n";
+      assert(CurVal != NextItVal);
+
+      auto *PHI = PHINode::Create(CurVal->getType(), 2, CurVal->getName() + "_rec",
+                                  HeaderBB->getFirstNonPHI());
+      PHI->addIncoming(NextItVal, LatchBB);
+
+      unsigned PHINo = PHIMap.size();
+      std::function<Value *(Value *)> CopyRec = [&](Value *Op) {
+        auto *I = dyn_cast<Instruction>(Op);
+        if (!I || !L->contains(I))
+          return Op;
+        if (auto *NewI = RemapBBMap.lookup(I))
+          return NewI;
+        if (auto *PHI = dyn_cast<PHINode>(I)) {
+          if (PHI->getParent() != HeaderBB) {
+            HeaderBB->getParent()->dump();
+            L->dump();
+            HeaderBB->dump();
+            PHI->dump();
+          }
+          assert(PHI->getParent() == HeaderBB);
+          assert(PHI->getNumIncomingValues() == 2);
+          auto *NewVal = PHI->getIncomingValueForBlock(PreHeaderBB);
+          RemapBBMap[PHI] = NewVal;
+          return NewVal;
+        }
+
+        auto *ICopy = I->clone();
+        for (auto &Op : I->operands()) {
+          auto *NewOp = CopyRec(Op);
+          assert(NewOp);
+          ICopy->replaceUsesOfWith(Op, NewOp);
+        }
+        Builder.Insert(ICopy,
+                       I->getName() + "_" + std::to_string(PHINo) + "_init");
+        RemapBBMap[I] = ICopy;
+        return static_cast<Value *>(ICopy);
+      };
+
+      auto *InitVal = CopyRec(CurVal);
+      assert(InitVal);
+      //errs() << "InitVal: " << *InitVal << "\n";
+      PHI->addIncoming(InitVal, PreHeaderBB);
+      PHIMap[CurVal] = PHI;
+      //errs() << "PHI: " << *PHI << "\n";
+    }
+  }
+
+  splitBlock(HeaderBB, HeaderBB->getFirstNonPHIOrDbgOrLifetime(), &DT, &LI,
+             S.getRegion().getRegionInfo());
+  Instruction *FIP = HeaderBB->getTerminator();
+
+  DenseMap<PHINode *, Instruction *> FirstUserMap;
+  SmallPtrSet<PHINode *, 16> Ordered;
+  SmallPtrSet<Instruction *, 16> Moved;
+  std::function<void(PHINode *)> OrderPHIOp = [&](PHINode *PHI) {
+    if (!Ordered.insert(PHI).second)
+      return;
+    auto *LatchOpI = dyn_cast<Instruction>(PHI->getIncomingValueForBlock(LatchBB));
+    if (!LatchOpI)
+      return;
+    if (auto *LatchOpPHI = dyn_cast<PHINode>(LatchOpI)) {
+      OrderPHIOp(LatchOpPHI);
+      if (PHI != LatchOpPHI->getNextNode())
+        PHI->moveBefore(LatchOpPHI->getNextNode());
+      return;
+    }
+
+    SmallVector<Instruction *, 16> Worklist;
+    SmallVector<Instruction *, 16> Ops;
+    Worklist.push_back(LatchOpI);
+    while (!Worklist.empty()) {
+      auto *I = Worklist.pop_back_val();
+      if (!L->contains(I))
+        continue;
+      if (auto *OpPHI = dyn_cast<PHINode>(I)) {
+        OrderPHIOp(OpPHI);
+        continue;
+      }
+      Ops.push_back(I);
+      for (auto &Op : I->operands())
+        if (auto *OpI = dyn_cast<Instruction>(Op))
+          Worklist.push_back(OpI);
+    }
+
+    //errs() << "Insert Ops for " << *PHI << " @ " << *FIP << "\n";
+    for (auto It = Ops.rbegin(), End = Ops.rend(); It != End; It++) {
+      //errs() << "\t Op: " << **It << " [Moved: " << Moved.count(*It) << "]\n";
+      //if (!DT.dominates(*It, FIP))
+      if (Moved.insert(*It).second)
+        (*It)->moveBefore(FIP);
+    }
+  };
+
+  for (auto &It : PHIMap) {
+    auto *Inst = It.first;
+    auto *PHI = It.second;
+    Inst->replaceAllUsesWith(PHI);
+    Inst->eraseFromParent();
+    //errs() << "Finished PHI: " << *PHI << " [Uses: " << PHI->getNumUses()
+           //<< "]\n\n";
+  }
+  for (auto &It : PHIMap) {
+    auto *PHI = It.second;
+    if (PHI->getNumUses() == 0) {
+      PHI->eraseFromParent();
+      continue;
+    }
+    OrderPHIOp(PHI);
+    auto *LatchOpI = dyn_cast<Instruction>(PHI->getIncomingValueForBlock(LatchBB));
+    if (!LatchOpI)
+      continue;
+    for (auto *User : PHI->users()) {
+      if (isa<PHINode>(User))
+        continue;
+      auto *UserI = cast<Instruction>(User);
+      if (!DT.dominates(LatchOpI, UserI)) {
+        UserI->getFunction()->dump();
+        PHI->dump();
+      }
+      assert(DT.dominates(LatchOpI, UserI));
+    }
+  }
+  //HeaderBB->getParent()->dump();
+
+
+  for (auto &It : LastItMaps)
+    isl_map_free(It.second);
+
+  Builder.SetInsertPoint(&*IP);
+}
+
 void IslNodeBuilder::createForSequential(__isl_take isl_ast_node *For,
                                          bool KnownParallel) {
   isl_ast_node *Body;
@@ -461,7 +848,7 @@ void IslNodeBuilder::createForSequential(__isl_take isl_ast_node *For,
   CmpInst::Predicate Predicate;
   bool Parallel;
 
-  Parallel = KnownParallel || (IslAstInfo::isParallel(For) &&
+  Parallel = KnownParallel || (IslAstInfo::isInnermostParallel(For) &&
                                !IslAstInfo::isReductionParallel(For));
 
   Body = isl_ast_node_for_get_body(For);
@@ -498,17 +885,35 @@ void IslNodeBuilder::createForSequential(__isl_take isl_ast_node *For,
   // omit the GuardBB in front of the loop.
   bool UseGuardBB =
       !SE.isKnownPredicate(Predicate, SE.getSCEV(ValueLB), SE.getSCEV(ValueUB));
+  // TODO FIXME JD
+  UseGuardBB = false;
   IV = createLoop(ValueLB, ValueUB, ValueInc, Builder, LI, DT, ExitBlock,
                   Predicate, &Annotator, Parallel, UseGuardBB);
   IDToValue[IteratorID] = IV;
 
+  BlockGen.clearMALoopMap();
+
   create(Body);
+
+  if (Parallel && PollyExpProp) {
+    colocateAccesses();
+    createLoopPHIs(For);
+  }
+  BlockGen.clearMALoopMap();
 
   Annotator.popLoop(Parallel);
 
   IDToValue.erase(IDToValue.find(IteratorID));
 
+  auto *L = LI.getLoopFor(Builder.GetInsertBlock());
+  assert(L);
+  assert(!Parallel || L->isAnnotatedParallel());
+
   Builder.SetInsertPoint(&ExitBlock->front());
+
+  ValueMapT BBMap;
+  BlockGen.removeDeadInstructions(L->getHeader(), BBMap);
+
 
   isl_ast_node_free(For);
   isl_ast_expr_free(Iterator);
@@ -625,7 +1030,7 @@ void IslNodeBuilder::createForParallel(__isl_take isl_ast_node *For) {
   }
 
   ValueMapT NewValues;
-  ParallelLoopGenerator ParallelLoopGen(Builder, LI, DT, DL);
+  ParallelLoopGenerator ParallelLoopGen(Builder, LI, DT, DL, Annotator);
 
   IV = ParallelLoopGen.createParallelLoop(ValueLB, ValueUB, ValueInc,
                                           SubtreeValues, NewValues, &LoopBody);
@@ -649,7 +1054,18 @@ void IslNodeBuilder::createForParallel(__isl_take isl_ast_node *For) {
 
   Annotator.addAlternativeAliasBases(NewValuesReverse);
 
+  BlockGen.clearMALoopMap();
+
   create(Body);
+
+  if (PollyExpProp) {
+    colocateAccesses();
+    createLoopPHIs(For);
+  }
+
+  BlockGen.clearMALoopMap();
+
+  Annotator.popLoop(true);
 
   Annotator.resetAlternativeAliasBases();
   // Restore the original values.
@@ -679,9 +1095,15 @@ void IslNodeBuilder::createFor(__isl_take isl_ast_node *For) {
     }
   }
 
-  if (IslAstInfo::isExecutedInParallel(For)) {
-    createForParallel(For);
-    return;
+  static int x = 0;
+  if (IslAstInfo::isExecutedInParallel(For) &&
+      Builder.GetInsertBlock()->getParent() == &S.getFunction()) {
+    x++;
+    if ((!getenv("MIN_PARALLEL") || x >= atoi(getenv("MIN_PARALLEL"))) &&
+        (!getenv("MAX_PARALLEL") || x <= atoi(getenv("MAX_PARALLEL")))) {
+      createForParallel(For);
+      return;
+    }
   }
   createForSequential(For, false);
 }
@@ -731,6 +1153,7 @@ void IslNodeBuilder::createIf(__isl_take isl_ast_node *If) {
   Builder.SetInsertPoint(&MergeBB->front());
 
   isl_ast_node_free(If);
+  BlockGen.clearMALoopMap();
 }
 
 __isl_give isl_id_to_ast_expr *
@@ -759,6 +1182,8 @@ IslNodeBuilder::createNewAccesses(ScopStmt *Stmt,
         continue;
       }
     }
+    if (!MA->isAffine() && MA->hasNewAccessRelation())
+      continue;
     assert(MA->isAffine() &&
            "Only affine memory accesses can be code generated");
 
@@ -772,6 +1197,11 @@ IslNodeBuilder::createNewAccesses(ScopStmt *Stmt,
     Dom = isl_set_intersect_params(Dom, Stmt->getParent()->getContext());
     SchedDom =
         isl_set_intersect_params(SchedDom, Stmt->getParent()->getContext());
+    if (!isl_set_is_subset(SchedDom, AccDom) || !isl_set_is_subset(Dom, AccDom)) {
+      errs() << "SchedDom: " << SchedDom << "\n";
+      errs() << "  AccDom: " <<   AccDom << "\n";
+      errs() << "     Dom: " <<      Dom << "\n";
+    }
     assert(isl_set_is_subset(SchedDom, AccDom) &&
            "Access relation not defined on full schedule domain");
     assert(isl_set_is_subset(Dom, AccDom) &&
@@ -886,6 +1316,7 @@ void IslNodeBuilder::createBlock(__isl_take isl_ast_node *Block) {
 }
 
 void IslNodeBuilder::create(__isl_take isl_ast_node *Node) {
+  //static int X = 0;
   switch (isl_ast_node_get_type(Node)) {
   case isl_ast_node_error:
     llvm_unreachable("code generation error");
@@ -893,6 +1324,9 @@ void IslNodeBuilder::create(__isl_take isl_ast_node *Node) {
     createMark(Node);
     return;
   case isl_ast_node_for:
+    //if (x++ < 12)
+    //if (getenv("SKIPFOR") && X++ < atoi(getenv("SKIPFOR")))
+      //return;
     createFor(Node);
     return;
   case isl_ast_node_if:
@@ -1028,7 +1462,8 @@ Value *IslNodeBuilder::preloadUnconditionally(isl_set *AccessRange,
 
   auto *Ptr = AddressValue;
   auto Name = Ptr->getName();
-  Ptr = Builder.CreatePointerCast(Ptr, Ty->getPointerTo(), Name + ".cast");
+  auto AS = Ptr->getType()->getPointerAddressSpace();
+  Ptr = Builder.CreatePointerCast(Ptr, Ty->getPointerTo(AS), Name + ".cast");
   PreloadVal = Builder.CreateLoad(Ptr, Name + ".load");
   if (LoadInst *PreloadInst = dyn_cast<LoadInst>(PreloadVal))
     PreloadInst->setAlignment(dyn_cast<LoadInst>(AccInst)->getAlignment());
@@ -1212,7 +1647,8 @@ bool IslNodeBuilder::preloadInvariantEquivClass(
   }
 
   BasicBlock *EntryBB = &Builder.GetInsertBlock()->getParent()->getEntryBlock();
-  auto *Alloca = new AllocaInst(AccInstTy, AccInst->getName() + ".preload.s2a");
+  auto *Alloca = new AllocaInst(AccInstTy, DL.getAllocaAddrSpace(),
+                                AccInst->getName() + ".preload.s2a");
   Alloca->insertBefore(&*EntryBB->getFirstInsertionPt());
   Builder.CreateStore(PreloadVal, Alloca);
   ValueMapT PreloadedPointer;
@@ -1227,7 +1663,7 @@ bool IslNodeBuilder::preloadInvariantEquivClass(
       // current SAI could be the base pointer of the derived SAI, however we
       // should only change the base pointer of the derived SAI if we actually
       // preloaded it.
-      if (BasePtr == MA->getBaseAddr()) {
+      if (BasePtr == MA->getOriginalBaseAddr()) {
         assert(BasePtr->getType() == PreloadVal->getType());
         DerivedSAI->setBasePtr(PreloadVal);
       }
@@ -1282,7 +1718,8 @@ void IslNodeBuilder::allocateNewArrays() {
 
     auto InstIt =
         Builder.GetInsertBlock()->getParent()->getEntryBlock().getTerminator();
-    auto *CreatedArray = new AllocaInst(NewArrayType, SAI->getName(), &*InstIt);
+    auto *CreatedArray = new AllocaInst(NewArrayType, DL.getAllocaAddrSpace(),
+                                        SAI->getName(), &*InstIt);
     CreatedArray->setAlignment(PollyTargetFirstLevelCacheLineSize);
     SAI->setBasePtr(CreatedArray);
   }
@@ -1359,24 +1796,24 @@ Value *IslNodeBuilder::generateSCEV(const SCEV *Expr) {
 /// of this run-time check to false to be cosnservatively correct,
 Value *IslNodeBuilder::createRTC(isl_ast_expr *Condition) {
   auto ExprBuilder = getExprBuilder();
-  ExprBuilder.setTrackOverflow(true);
+  //ExprBuilder.setTrackOverflow(true);
   Value *RTC = ExprBuilder.create(Condition);
   if (!RTC->getType()->isIntegerTy(1))
     RTC = Builder.CreateIsNotNull(RTC);
-  Value *OverflowHappened =
-      Builder.CreateNot(ExprBuilder.getOverflowState(), "polly.rtc.overflown");
+  //Value *OverflowHappened =
+      //Builder.CreateNot(ExprBuilder.getOverflowState(), "polly.rtc.overflown");
 
-  if (PollyGenerateRTCPrint) {
-    auto *F = Builder.GetInsertBlock()->getParent();
-    RuntimeDebugBuilder::createCPUPrinter(
-        Builder,
-        "F: " + F->getName().str() + " R: " + S.getRegion().getNameStr() +
-            " __RTC: ",
-        RTC, " Overflow: ", OverflowHappened, "\n");
-  }
+  //if (PollyGenerateRTCPrint) {
+    //auto *F = Builder.GetInsertBlock()->getParent();
+    //RuntimeDebugBuilder::createCPUPrinter(
+        //Builder,
+        //"F: " + F->getName().str() + " R: " + S.getRegion().getNameStr() +
+            //" __RTC: ",
+        //RTC, " Overflow: ", OverflowHappened, "\n");
+  //}
 
-  RTC = Builder.CreateAnd(RTC, OverflowHappened, "polly.rtc.result");
-  ExprBuilder.setTrackOverflow(false);
+  //RTC = Builder.CreateAnd(RTC, OverflowHappened, "polly.rtc.result");
+  //ExprBuilder.setTrackOverflow(false);
 
   if (!isa<ConstantInt>(RTC))
     VersionedScops++;

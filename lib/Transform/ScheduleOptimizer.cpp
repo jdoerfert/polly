@@ -1446,6 +1446,8 @@ private:
 char IslScheduleOptimizer::ID = 0;
 
 bool IslScheduleOptimizer::runOnScop(Scop &S) {
+  if (S.isOptimized())
+    return false;
 
   // Skip empty SCoPs but still allow code generation as it will delete the
   // loops present but not needed.

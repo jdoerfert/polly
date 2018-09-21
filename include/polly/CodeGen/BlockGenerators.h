@@ -16,6 +16,7 @@
 #ifndef POLLY_BLOCK_GENERATORS_H
 #define POLLY_BLOCK_GENERATORS_H
 
+#include "polly/ScopInfo.h"
 #include "polly/CodeGen/IRBuilder.h"
 #include "polly/Support/ScopHelper.h"
 #include "llvm/ADT/MapVector.h"
@@ -41,6 +42,10 @@ class IslExprBuilder;
 /// Generate a new basic block for a polyhedral statement.
 class BlockGenerator {
 public:
+  DenseMap<const ScopArrayInfo *,
+           std::map<Instruction *, std::pair<ScopStmt *, isl_map *>>>
+      MALoopMap;
+
   typedef llvm::SmallVector<ValueMapT, 8> VectorValueMapT;
 
   /// Map types to resolve scalar dependences.
@@ -79,7 +84,8 @@ public:
   BlockGenerator(PollyIRBuilder &Builder, LoopInfo &LI, ScalarEvolution &SE,
                  DominatorTree &DT, AllocaMapTy &ScalarMap,
                  EscapeUsersAllocaMapTy &EscapeMap, ValueMapT &GlobalMap,
-                 IslExprBuilder *ExprBuilder, BasicBlock *StartBlock);
+                 IslExprBuilder *ExprBuilder, BasicBlock *StartBlock,
+                 ScopAnnotator &Annotator);
 
   /// Copy the basic block.
   ///
@@ -135,16 +141,27 @@ public:
   /// @see createScalarFinalization(Region &)
   void finalizeSCoP(Scop &S);
 
+  /// Remove dead instructions generated for BB
+  ///
+  /// @param BB The basic block code for which code has been generated.
+  /// @param BBMap A local map from old to new instructions.
+  void removeDeadInstructions(BasicBlock *BB, ValueMapT &BBMap);
+
   /// An empty destructor
-  virtual ~BlockGenerator() {}
+  virtual ~BlockGenerator();
+  void clearMALoopMap();
 
   BlockGenerator(const BlockGenerator &) = default;
 
 protected:
   PollyIRBuilder &Builder;
+  ScopAnnotator &Annotator;
   LoopInfo &LI;
   ScalarEvolution &SE;
   IslExprBuilder *ExprBuilder;
+  DenseMap<const RecomputeInfo *, RecomputeInfo *>
+      RIMapping;
+  //SmallPtrSet<const RecomputeInfo *, 8> MappedRIs;
 
   /// The dominator tree of this function.
   DominatorTree &DT;
@@ -316,6 +333,45 @@ protected:
   void copyBB(ScopStmt &Stmt, BasicBlock *BB, BasicBlock *BBCopy,
               ValueMapT &BBMap, LoopToScevMapT &LTS,
               isl_id_to_ast_expr *NewAccesses);
+
+  Value *recomputeLoopPHI(ScopStmt &Stmt, PHINode *PHI,
+                          RecomputeInfo &RInfo);
+
+  Value *recomputeInstruction(ScopStmt &Stmt, LoopToScevMapT &LTS,
+                              ValueMapT &BBMap, Value *Val, RecomputeInfo &RI,
+                              __isl_keep isl_id_to_ast_expr *NewAccesses);
+  Value *recomputeInstruction2(ScopStmt &Stmt, LoopToScevMapT &LTS,
+                               ValueMapT &BBMap, Value *Val, RecomputeInfo &RI,
+                               __isl_keep isl_id_to_ast_expr *NewAccesses);
+  Value *recomputeInstructionTree(ScopStmt &Stmt, LoopToScevMapT &LTS, ValueMapT &BBMap,
+                                  RecomputeInfo &RI,
+                                  __isl_keep isl_id_to_ast_expr *NewAccesses);
+  void recomputeValuesInOf(ScopStmt &Stmt, LoopToScevMapT &LTS,
+                           ValueMapT &BBMap,
+                           __isl_keep isl_id_to_ast_expr *NewAccesses);
+  void createNextItPHI(ScopStmt &Stmt, NextItMapTy &NextItRevMap,
+                       MemoryAccess *PrevMA, MemoryAccess *NextMA,
+                       ValueMapT &BBMap, BasicBlock *HeaderBB);
+  void createNextItPHIs(ScopStmt &Stmt, NextItMapTy &NextItMap,
+                        LoopToScevMapT &LTS, ValueMapT &BBMap,
+                        __isl_keep isl_id_to_ast_expr *NewAccesses);
+  unsigned createPHIInit(ScopStmt &Stmt, NextItMapTy &NextItRevMap,
+                         MemoryAccess *PrevMA, MemoryAccess *NextMA,
+                         ValueMapT &BBMap, Value *&NewVal);
+  void createPHILatch(ScopStmt &Stmt, BasicBlock *LatchBB, MemoryAccess *PrevMA,
+                      MemoryAccess *NextMA);
+  void finalizeNextItPHIs(ScopStmt &Stmt, NextItMapTy &NextItMap,
+                          ValueMapT &BBMap, LoopToScevMapT &LTS,
+                          __isl_keep isl_id_to_ast_expr *NewAccesses);
+
+  MemoryAccess *getLocalMA(ScopStmt &Stmt, RecomputeInfo &RI, MemoryAccess *MA);
+  MemoryAccess *getLocalMemAcc(ScopStmt &Stmt, RecomputeInfo &RI, Value *Val);
+
+  void setLoopMemAcc(ScopStmt &Stmt, RecomputeInfo *RI, Instruction *Val,
+                     Instruction *NewVal);
+
+  DenseMap<MemoryAccess *, Value *> MABBMap;
+  DenseMap<PHINode *, MemoryAccess *> PHIMap;
 
   /// Generate reload of scalars demoted to memory and needed by @p Stmt.
   ///
@@ -502,11 +558,14 @@ protected:
   Value *generateArrayLoad(ScopStmt &Stmt, LoadInst *load, ValueMapT &BBMap,
                            LoopToScevMapT &LTS,
                            isl_id_to_ast_expr *NewAccesses);
+  Value *generateArrayLoad2(ScopStmt &Stmt, MemoryAccess &MA, ValueMapT &BBMap,
+                            LoopToScevMapT &LTS,
+                            isl_id_to_ast_expr *NewAccesses, Type *Ty);
 
   /// @param NewAccesses A map from memory access ids to new ast expressions,
   ///                    which may contain new access expressions for certain
   ///                    memory accesses.
-  void generateArrayStore(ScopStmt &Stmt, StoreInst *store, ValueMapT &BBMap,
+  StoreInst *generateArrayStore(ScopStmt &Stmt, StoreInst *store, ValueMapT &BBMap,
                           LoopToScevMapT &LTS, isl_id_to_ast_expr *NewAccesses);
 
   /// Copy a single PHI instruction.
@@ -542,12 +601,6 @@ protected:
   ///
   /// @returns false, iff @p Inst can be synthesized in @p Stmt.
   bool canSyntheziseInStmt(ScopStmt &Stmt, Instruction *Inst);
-
-  /// Remove dead instructions generated for BB
-  ///
-  /// @param BB The basic block code for which code has been generated.
-  /// @param BBMap A local map from old to new instructions.
-  void removeDeadInstructions(BasicBlock *BB, ValueMapT &BBMap);
 
   /// Invalidate the scalar evolution expressions for a scop.
   ///

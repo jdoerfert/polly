@@ -205,8 +205,9 @@ public:
     IslNodeBuilder NodeBuilder(Builder, Annotator, *DL, *LI, *SE, *DT, S,
                                StartBlock);
 
+    DEBUG(S.dump());
     if (PerfMonitoring) {
-      PerfMonitor P(EnteringBB->getParent()->getParent());
+      PerfMonitor P(S, EnteringBB->getParent()->getParent());
       P.initialize();
       P.insertRegionStart(SplitBlock->getTerminator());
 
@@ -248,7 +249,8 @@ public:
     } else {
       NodeBuilder.allocateNewArrays();
       NodeBuilder.addParameters(S.getContext());
-      Value *RTC = NodeBuilder.createRTC(AI->getRunCondition());
+      Value *RTC = Builder.getTrue();
+      //Value *RTC = NodeBuilder.createRTC(AI->getRunCondition());
 
       Builder.GetInsertBlock()->getTerminator()->setOperand(0, RTC);
       Builder.SetInsertPoint(&StartBlock->front());
@@ -259,14 +261,30 @@ public:
     }
 
     Function *F = EnteringBB->getParent();
+    ValueMapT BBMap;
+    auto &BlockGen = NodeBuilder.getBlockGenerator();
+    for (auto &BB : *F)
+      BlockGen.removeDeadInstructions(&BB, BBMap);
     verifyGeneratedFunction(S, *F);
-    for (auto *SubF : NodeBuilder.getParallelSubfunctions())
+    DEBUG(errs() << "CODEGEN DONE\n\n"; F->dump());
+
+    for (auto *SubF : NodeBuilder.getParallelSubfunctions()) {
+      for (auto &BB : *SubF)
+        BlockGen.removeDeadInstructions(&BB, BBMap);
+
       verifyGeneratedFunction(S, *SubF);
+      //SubF->addFnAttr(Attribute::NoInline);
+      //SubF->addFnAttr(Attribute::OptimizeNone);
+      DEBUG(SubF->dump());
+    }
 
     // Mark the function such that we run additional cleanup passes on this
     // function (e.g. mem2reg to rediscover phi nodes).
     F->addFnAttr("polly-optimized");
+    //F->addFnAttr(Attribute::NoInline);
+    //F->addFnAttr(Attribute::OptimizeNone);
 
+    DT->verifyDomTree();
     return true;
   }
 

@@ -47,6 +47,7 @@ add_polly_library(Polly
   ${GPGPU_CODEGEN_FILES}
   Exchange/JSONExporter.cpp
   Support/GICHelper.cpp
+  Support/LiveOutAnalyser.cpp
   Support/SCEVAffinator.cpp
   Support/SCEVValidator.cpp
   Support/RegisterPasses.cpp
@@ -54,10 +55,12 @@ add_polly_library(Polly
   Support/ScopLocation.cpp
   Support/ISLTools.cpp
   Support/DumpModulePass.cpp
+  Support/VirtualInstruction.cpp
   ${POLLY_JSON_FILES}
   Transform/Canonicalization.cpp
   Transform/CodePreparation.cpp
   Transform/DeadCodeElimination.cpp
+  Transform/ExpressionPropagation.cpp
   Transform/ScheduleOptimizer.cpp
   Transform/FlattenSchedule.cpp
   Transform/FlattenAlgo.cpp

@@ -17,7 +17,7 @@
 
 #include "llvm/Analysis/LoopInfo.h"
 #include "llvm/IR/IRBuilder.h"
-#include "llvm/IR/ValueMap.h"
+#include "polly/Support/ScopHelper.h"
 
 namespace llvm {
 class ScalarEvolution;
@@ -53,6 +53,13 @@ public:
   /// Remove the last added loop.
   void popLoop(bool isParallel);
 
+  ///
+  llvm::Loop *peekLoop() {
+    if (ActiveLoops.empty())
+      return nullptr;
+    return ActiveLoops.back();
+  }
+
   /// Annotate the new instruction @p I for all parallel loops.
   void annotate(llvm::Instruction *I);
 
@@ -71,9 +78,7 @@ public:
   /// to allow the ScopAnnotator to still find the right alias scop annotations.
   ///
   /// @param NewMap A map from new base pointers to original base pointers.
-  void addAlternativeAliasBases(
-      llvm::DenseMap<llvm::AssertingVH<llvm::Value>,
-                     llvm::AssertingVH<llvm::Value>> &NewMap) {
+  void addAlternativeAliasBases(ValueMapT &NewMap) {
     AlternativeAliasBases.insert(NewMap.begin(), NewMap.end());
   }
 

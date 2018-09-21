@@ -77,7 +77,7 @@ struct Dependences {
   /// cyclic and possibly "reversed".
   enum Type {
     // Write after read
-    TYPE_WAR = 1 << 0,
+    TYPE_WAR = 1,
 
     // Read after write
     TYPE_RAW = 1 << 1,
@@ -154,6 +154,12 @@ struct Dependences {
   /// Destructor that will free internal objects.
   ~Dependences() { releaseMemory(); }
 
+  explicit Dependences(const std::shared_ptr<isl_ctx> &IslCtx,
+                       AnalysisLevel Level, isl_union_map *RAW,
+                       isl_union_map *WAR, isl_union_map *WAW)
+      : RAW(RAW), WAR(WAR), WAW(WAW), RED(nullptr), TC_RED(nullptr),
+        IslCtx(IslCtx), Level(Level) {}
+
 private:
   /// Create an empty dependences struct.
   explicit Dependences(const std::shared_ptr<isl_ctx> &IslCtx,
@@ -210,6 +216,7 @@ public:
   /// @return The dependence analysis result
   ///
   const Dependences &getDependences(Dependences::AnalysisLevel Level);
+  void setDependences(Dependences::AnalysisLevel Level, Dependences *D);
 
   /// Recompute dependences from schedule and memory accesses.
   const Dependences &recomputeDependences(Dependences::AnalysisLevel Level);

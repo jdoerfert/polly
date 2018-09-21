@@ -29,6 +29,7 @@
 
 #include "polly/CodeGen/IslAst.h"
 #include "polly/CodeGen/CodeGeneration.h"
+#include "polly/CodeGen/IslNodeBuilder.h"
 #include "polly/DependenceInfo.h"
 #include "polly/LinkAllPasses.h"
 #include "polly/Options.h"
@@ -178,6 +179,8 @@ static isl_printer *cbPrintFor(__isl_take isl_printer *Printer,
 static bool astScheduleDimIsParallel(__isl_keep isl_ast_build *Build,
                                      const Dependences *D,
                                      IslAstUserPayload *NodeInfo) {
+  if (!DetectParallel)
+    return true;
   if (!D->hasValidDependences())
     return false;
 
@@ -226,7 +229,7 @@ static __isl_give isl_id *astBuildBeforeFor(__isl_keep isl_ast_build *Build,
   BuildInfo->LastForNodeId = Id;
 
   // Test for parallelism only if we are not already inside a parallel loop
-  if (!BuildInfo->InParallelFor)
+  //if (!BuildInfo->InParallelFor)
     BuildInfo->InParallelFor = Payload->IsOutermostParallel =
         astScheduleDimIsParallel(Build, BuildInfo->Deps, Payload);
 
@@ -267,6 +270,21 @@ astBuildAfterFor(__isl_take isl_ast_node *Node, __isl_keep isl_ast_build *Build,
   }
   if (Payload->IsOutermostParallel)
     BuildInfo->InParallelFor = false;
+#if 0
+  auto NumIt = IslNodeBuilder::getNumberOfIterations(Node);
+  int NumCores;
+  isl_ast_node *Body = isl_ast_node_for_get_body(Node);
+  bool BodyIsLoop = isl_ast_node_get_type(Body) == isl_ast_node_for;
+  isl_ast_node_free(Body);
+  if (PollyNumThreads != 0)
+    NumCores = PollyNumThreads;
+  else
+    NumCores = sys::getHostNumPhysicalCores() * (PollyHyperthreading && BodyIsLoop ? 2 : 1);
+  if (NumIt >= 0 && NumIt < NumCores) {
+    Payload->IsOutermostParallel = false;
+    Payload->IsInnermostParallel = false;
+  }
+#endif
 
   isl_id_free(Id);
   return Node;
@@ -332,8 +350,11 @@ buildCondition(__isl_keep isl_ast_build *Build, const Scop::MinMaxAccessTy *It0,
 }
 
 __isl_give isl_ast_expr *
-IslAst::buildRunCondition(Scop *S, __isl_keep isl_ast_build *Build) {
+IslAst::buildRunCondition(Scop *S) {
   isl_ast_expr *RunCondition;
+
+  isl_ast_build *Build =
+      isl_ast_build_from_context(isl_set_universe(S->getParamSpace()));
 
   // The conditions that need to be checked at run-time for this scop are
   // available as an isl_set in the runtime check context from which we can
@@ -368,6 +389,7 @@ IslAst::buildRunCondition(Scop *S, __isl_keep isl_ast_build *Build) {
     }
   }
 
+  isl_ast_build_free(Build);
   return RunCondition;
 }
 
@@ -415,11 +437,16 @@ void IslAst::init(const Dependences &D) {
   isl_ctx *Ctx = S->getIslCtx();
   isl_options_set_ast_build_atomic_upper_bound(Ctx, true);
   isl_options_set_ast_build_detect_min_max(Ctx, true);
+  isl_options_set_ast_build_scale_strides(Ctx, false);
+  isl_options_set_ast_build_allow_else(Ctx, true);
+  //isl_options_set_ast_build_group_coscheduled(Ctx, true);
   isl_ast_build *Build;
   AstBuildUserInfo BuildInfo;
 
   if (UseContext)
-    Build = isl_ast_build_from_context(S->getContext());
+    //Build = isl_ast_build_from_context(S->getContext());
+    Build = isl_ast_build_from_context(
+        isl_set_intersect(S->getContext(), S->getAssumedContext()));
   else
     Build = isl_ast_build_from_context(isl_set_universe(S->getParamSpace()));
 
@@ -441,7 +468,7 @@ void IslAst::init(const Dependences &D) {
                                               &BuildInfo);
   }
 
-  RunCondition = buildRunCondition(S, Build);
+  RunCondition = buildRunCondition(S);
 
   Root = isl_ast_build_node_from_schedule(Build, S->getScheduleTree());
 
@@ -539,10 +566,12 @@ bool IslAstInfo::isExecutedInParallel(__isl_keep isl_ast_node *Node) {
   //       executed. This can possibly require run-time checks, which again
   //       raises the question of both run-time check overhead and code size
   //       costs.
-  if (!PollyParallelForce && isInnermost(Node))
+  if (!PollyParallelForce &&
+      (isInnermost(Node) ||
+       IslNodeBuilder::getNumberOfIterations(Node) >= 32768))
     return false;
 
-  return isOutermostParallel(Node) && !isReductionParallel(Node);
+  return isParallel(Node) && !isReductionParallel(Node);
 }
 
 __isl_give isl_union_map *

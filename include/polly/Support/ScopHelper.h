@@ -36,10 +36,14 @@ class GetElementPtrInst;
 
 namespace polly {
 class Scop;
+class ScopStmt;
+class MemoryAccess;
+
+using NextItMapTy = llvm::DenseMap<MemoryAccess *, MemoryAccess *>;
 
 /// Type to remap values.
-using ValueMapT = llvm::DenseMap<llvm::AssertingVH<llvm::Value>,
-                                 llvm::AssertingVH<llvm::Value>>;
+using ValueMapT = llvm::DenseMap<llvm::Value*,
+                                 llvm::Value*>;
 
 /// Type for a set of invariant loads.
 using InvariantLoadsSetTy = llvm::SetVector<llvm::AssertingVH<llvm::LoadInst>>;
@@ -293,6 +297,10 @@ template <> struct simplify_type<polly::MemAccInst> {
 
 namespace polly {
 
+llvm::BasicBlock *splitBlock(llvm::BasicBlock *Old, llvm::Instruction *SplitPt,
+                             llvm::DominatorTree *DT, llvm::LoopInfo *LI,
+                             llvm::RegionInfo *RI);
+
 /// Simplify the region to have a single unconditional entry edge and a
 /// single exit edge.
 ///
@@ -401,6 +409,8 @@ bool isIgnoredIntrinsic(const llvm::Value *V);
 ///         otherwise return false.
 bool canSynthesize(const llvm::Value *V, const Scop &S,
                    llvm::ScalarEvolution *SE, llvm::Loop *Scope);
+bool canSynthesize(const llvm::Value *V, llvm::Region &R,
+                   llvm::ScalarEvolution *SE, llvm::Loop *Scope);
 
 /// Return the block in which a value is used.
 ///
@@ -426,5 +436,10 @@ llvm::BasicBlock *getUseBlock(llvm::Use &U);
 std::tuple<std::vector<const llvm::SCEV *>, std::vector<int>>
 getIndexExpressionsFromGEP(llvm::GetElementPtrInst *GEP,
                            llvm::ScalarEvolution &SE);
+
+void sortBB(ScopStmt &Stmt, llvm::StoreInst *SI, llvm::Loop *L,
+            llvm::LoopInfo &LI, const llvm::DominatorTree &DT);
+
+void createExpressionTree(llvm::BasicBlock &BB, llvm::Loop *L);
 } // namespace polly
 #endif

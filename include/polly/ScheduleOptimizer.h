@@ -51,6 +51,7 @@ namespace polly {
 struct OptimizerAdditionalInfoTy {
   const llvm::TargetTransformInfo *TTI;
   const Dependences *D;
+  Scop *S;
 };
 
 /// Parameters of the matrix multiplication operands.

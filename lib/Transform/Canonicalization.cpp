@@ -18,10 +18,15 @@
 #include "polly/Options.h"
 #include "llvm/Transforms/IPO.h"
 #include "llvm/Transforms/Scalar.h"
+#include "llvm/Transforms/Utils/UnifyFunctionExitNodes.h"
 
 using namespace llvm;
 using namespace polly;
 
+static cl::opt<bool>
+    PollyMinPrepare("polly-min-prepare",
+                 cl::desc(""), cl::Hidden,
+                 cl::init(false), cl::ZeroOrMore, cl::cat(PollyCategory));
 static cl::opt<bool>
     PollyInliner("polly-run-inliner",
                  cl::desc("Run an early inliner pass before Polly"), cl::Hidden,
@@ -29,11 +34,17 @@ static cl::opt<bool>
 
 void polly::registerCanonicalicationPasses(llvm::legacy::PassManagerBase &PM) {
   PM.add(llvm::createPromoteMemoryToRegisterPass());
+  if (PollyMinPrepare) {
+    PM.add(polly::createCodePreparationPass());
+    return;
+  }
+
   PM.add(llvm::createInstructionCombiningPass());
   PM.add(llvm::createCFGSimplificationPass());
   PM.add(llvm::createTailCallEliminationPass());
   PM.add(llvm::createCFGSimplificationPass());
   PM.add(llvm::createReassociatePass());
+  PM.add(llvm::createLoopRerollPass());
   PM.add(llvm::createLoopRotatePass());
   if (PollyInliner) {
     PM.add(llvm::createFunctionInliningPass(200));
@@ -44,6 +55,8 @@ void polly::registerCanonicalicationPasses(llvm::legacy::PassManagerBase &PM) {
   }
   PM.add(llvm::createInstructionCombiningPass());
   PM.add(llvm::createIndVarSimplifyPass());
+  PM.add(llvm::createUnifyFunctionExitNodesPass());
+  //PM.add(llvm::createLoopUnrollPass(3));
   PM.add(polly::createCodePreparationPass());
 }
 

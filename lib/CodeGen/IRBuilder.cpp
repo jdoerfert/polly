@@ -21,7 +21,7 @@
 using namespace llvm;
 using namespace polly;
 
-static const int MaxArraysInAliasScops = 10;
+static const int MaxArraysInAliasScops = 30;
 
 /// Get a self referencing id metadata node.
 ///
@@ -31,7 +31,7 @@ static const int MaxArraysInAliasScops = 10;
 ///
 /// @return The self referencing id metadata node.
 static MDNode *getID(LLVMContext &Ctx, Metadata *arg0 = nullptr,
-                     Metadata *arg1 = nullptr) {
+                     Metadata *arg1 = nullptr, Metadata *arg2 = nullptr) {
   MDNode *ID;
   SmallVector<Metadata *, 3> Args;
   // Use a temporary node to safely create a unique pointer for the first arg.
@@ -43,6 +43,8 @@ static MDNode *getID(LLVMContext &Ctx, Metadata *arg0 = nullptr,
     Args.push_back(arg0);
   if (arg1)
     Args.push_back(arg1);
+  if (arg2)
+    Args.push_back(arg2);
 
   ID = MDNode::get(Ctx, Args);
   ID->replaceOperandWith(0, ID);
@@ -93,13 +95,32 @@ void ScopAnnotator::pushLoop(Loop *L, bool IsParallel) {
   if (!IsParallel)
     return;
 
-  BasicBlock *Header = L->getHeader();
-  MDNode *Id = getID(Header->getContext());
+  auto &Ctx = SE->getContext();
+  Metadata *TrueVal = ConstantAsMetadata::get(
+        ConstantInt::get(Type::getInt1Ty(Ctx), true));
+  Metadata *UnrollFactor = ConstantAsMetadata::get(
+        ConstantInt::get(Type::getInt32Ty(Ctx), 1));
+  Metadata *InterleaveCount = ConstantAsMetadata::get(
+        ConstantInt::get(Type::getInt32Ty(Ctx), 1));
+  auto *VEMetadata = MDNode::get(
+      Ctx, {MDString::get(Ctx, "llvm.loop.vectorize.enable"), TrueVal});
+  auto *UCMetadata = MDNode::get(
+      Ctx, {MDString::get(Ctx, "llvm.loop.unroll.count"), UnrollFactor});
+  auto *URMetadata =
+      MDNode::get(Ctx, {MDString::get(Ctx, "llvm.loop.unroll.disable")});
+  auto *ILMetadata = MDNode::get(
+      Ctx, {MDString::get(Ctx, "llvm.loop.interleave.count"), InterleaveCount});
+  (void)ILMetadata;
+  (void)UCMetadata;
+  (void)URMetadata;
+  (void)VEMetadata;
+  MDNode *Id = getID(Ctx/*, VEMetadata , UCMetadata, URMetadata, ILMetadata*/);
   assert(Id->getOperand(0) == Id && "Expected Id to be a self-reference");
-  assert(Id->getNumOperands() == 1 && "Unexpected extra operands in Id");
+  //assert(Id->getNumOperands() == 1 && "Unexpected extra operands in Id");
+  auto *IdOp = MDNode::get(SE->getContext(), {Id->getOperand(0)});
   MDNode *Ids = ParallelLoops.empty()
-                    ? Id
-                    : MDNode::concatenate(ParallelLoops.back(), Id);
+                    ? IdOp
+                    : MDNode::concatenate(ParallelLoops.back(), IdOp);
   ParallelLoops.push_back(Ids);
 }
 

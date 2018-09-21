@@ -13,7 +13,7 @@ target datalayout = "e-p:64:64:64-i1:8:8-i8:8:8-i16:16:16-i32:32:32-i64:64:64-f3
 ; for (i = 100; i < 110; i++ )
 ;   A[i] = i;
 ;
-define void @main() nounwind uwtable {
+define i32 @main() nounwind uwtable {
 entry:
   %A = alloca [200 x i32], align 16
   br label %for.body.1
@@ -64,7 +64,9 @@ for.body.4:
   br i1 %exitcond.4, label %for.body.4, label %exit.4
 
 exit.4:
-  ret void
+  %addr = getelementptr [200 x i32], [200 x i32]* %A, i64 0, i64 0
+  %l = load i32, i32* %addr
+  ret i32 %l
 }
 
 ; CHECK: for (int c0 = 50; c0 <= 99; c0 += 1)

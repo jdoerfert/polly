@@ -586,7 +586,7 @@ ReportUnprofitable::ReportUnprofitable(Region *R)
     : ReportOther(RejectReasonKind::Unprofitable), R(R) {}
 
 std::string ReportUnprofitable::getMessage() const {
-  return "Region can not profitably be optimized!";
+  return "Region (" + R->getNameStr() + ") can not profitably be optimized!";
 }
 
 std::string ReportUnprofitable::getEndUserMessage() const {

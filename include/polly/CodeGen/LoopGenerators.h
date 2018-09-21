@@ -99,8 +99,9 @@ class ParallelLoopGenerator {
 public:
   /// Create a parallel loop generator for the current function.
   ParallelLoopGenerator(PollyIRBuilder &Builder, LoopInfo &LI,
-                        DominatorTree &DT, const DataLayout &DL)
-      : Builder(Builder), LI(LI), DT(DT),
+                        DominatorTree &DT, const DataLayout &DL,
+                        ScopAnnotator &Annotator)
+      : Builder(Builder), LI(LI), DT(DT), Annotator(Annotator),
         LongType(
             Type::getIntNTy(Builder.getContext(), DL.getPointerSizeInBits())),
         M(Builder.GetInsertBlock()->getParent()->getParent()) {}
@@ -136,6 +137,8 @@ private:
   /// The dominance tree of the current function we need to update.
   DominatorTree &DT;
 
+  ScopAnnotator &Annotator;
+
   /// The type of a "long" on this hardware used for backend calls.
   Type *LongType;
 
@@ -155,19 +158,21 @@ public:
   /// @param LB         The lower bound for the loop we parallelize.
   /// @param UB         The upper bound for the loop we parallelize.
   /// @param Stride     The stride of the loop we parallelize.
+  /// @param ChunkSize  TODO
   void createCallSpawnThreads(Value *SubFn, Value *SubFnParam, Value *LB,
-                              Value *UB, Value *Stride);
+                              Value *UB, Value *Stride, Value *ChunkSize);
 
   /// Create a runtime library call to join the worker threads.
   void createCallJoinThreads();
 
   /// Create a runtime library call to get the next work item.
   ///
-  /// @param LBPtr A pointer value to store the work item begin in.
-  /// @param UBPtr A pointer value to store the work item end in.
+  /// @param LBPtr  A pointer value to store the work item begin in.
+  /// @param UBPtr  A pointer value to store the work item end in.
+  /// @param Static TODO
   ///
   /// @returns A true value if the work item is not empty.
-  Value *createCallGetWorkItem(Value *LBPtr, Value *UBPtr);
+  Value *createCallGetWorkItem(Value *LBPtr, Value *UBPtr, bool Static);
 
   /// Create a runtime library call to allow cleanup of the thread.
   ///
@@ -203,11 +208,12 @@ public:
   /// @param VMap   A map to allow outside access to the new versions of
   ///               the values in @p Values.
   /// @param SubFn  The newly created subfunction is returned here.
+  /// @param Static TODO
   ///
   /// @return The newly created induction variable.
   Value *createSubFn(Value *Stride, AllocaInst *Struct,
                      SetVector<Value *> UsedValues, ValueMapT &VMap,
-                     Function **SubFn);
+                     Function **SubFn, bool Static);
 };
 } // end namespace polly
 #endif

@@ -58,6 +58,7 @@
 #include "llvm/Analysis/RegionIterator.h"
 #include "llvm/Analysis/ScalarEvolution.h"
 #include "llvm/Analysis/ScalarEvolutionExpressions.h"
+#include "llvm/Transforms/Utils/UnifyFunctionExitNodes.h"
 #include "llvm/IR/DebugInfo.h"
 #include "llvm/IR/DiagnosticInfo.h"
 #include "llvm/IR/DiagnosticPrinter.h"
@@ -90,11 +91,11 @@ static cl::opt<bool, true> XPollyProcessUnprofitable(
     cl::location(PollyProcessUnprofitable), cl::init(false), cl::ZeroOrMore,
     cl::cat(PollyCategory));
 
-static cl::opt<std::string> OnlyFunction(
+static cl::list<std::string> OnlyFunctions(
     "polly-only-func",
     cl::desc("Only run on functions that contain a certain string"),
-    cl::value_desc("string"), cl::ValueRequired, cl::init(""),
-    cl::cat(PollyCategory));
+    cl::Hidden, cl::ZeroOrMore, cl::CommaSeparated,
+    cl::ValueRequired, cl::cat(PollyCategory));
 
 static cl::opt<std::string> OnlyRegion(
     "polly-only-region",
@@ -183,7 +184,7 @@ bool polly::PollyInvariantLoadHoisting;
 static cl::opt<bool, true> XPollyInvariantLoadHoisting(
     "polly-invariant-load-hoisting", cl::desc("Hoist invariant loads."),
     cl::location(PollyInvariantLoadHoisting), cl::Hidden, cl::ZeroOrMore,
-    cl::init(false), cl::cat(PollyCategory));
+    cl::init(true), cl::cat(PollyCategory));
 
 /// The minimal trip count under which loops are considered unprofitable.
 static const unsigned MIN_LOOP_TRIP_COUNT = 8;
@@ -557,6 +558,23 @@ bool ScopDetection::isValidCallInst(CallInst &CI,
   if (CalledFunction == nullptr)
     return false;
 
+  if (CalledFunction->getName().equals("_ZSt3expf"))
+    return true;
+  if (CalledFunction->getName().equals("fprintf") ||
+      CalledFunction->getName().equals("fwrite") ||
+      CalledFunction->getName().equals("fputc")) {
+    unsigned Idx = CalledFunction->getName().equals("fprintf")
+                       ? 0
+                       : CI.getNumArgOperands() - 1;
+    auto *Load = dyn_cast<LoadInst>(CI.getArgOperand(Idx));
+    if (!Load)
+      return false;
+    if (!isa<GlobalValue>(Load->getPointerOperand()))
+      return false;
+    Context.RequiredILS.insert(Load);
+    return true;
+  }
+
   if (AllowModrefCall) {
     switch (AA->getModRefBehavior(CalledFunction)) {
     case FMRB_UnknownModRefBehavior:
@@ -592,6 +610,7 @@ bool ScopDetection::isValidCallInst(CallInst &CI,
       Context.AST.add(&CI);
       return true;
     case FMRB_DoesNotReadMemory:
+      return true;
     case FMRB_OnlyAccessesInaccessibleMem:
     case FMRB_OnlyAccessesInaccessibleOrArgMem:
       return false;
@@ -712,14 +731,18 @@ private:
 SmallVector<const SCEV *, 4>
 ScopDetection::getDelinearizationTerms(DetectionContext &Context,
                                        const SCEVUnknown *BasePointer) const {
+  DEBUG(errs() << "\nBasePointer: " << *BasePointer << " : "
+         << Context.Accesses[BasePointer].size() << "\n");
   SmallVector<const SCEV *, 4> Terms;
   for (const auto &Pair : Context.Accesses[BasePointer]) {
+    DEBUG(errs() << "P: " << *Pair.first << " : " << *Pair.second << "\n");
     std::vector<const SCEV *> MaxTerms;
     SCEVRemoveMax::rewrite(Pair.second, *SE, &MaxTerms);
     if (MaxTerms.size() > 0) {
       Terms.insert(Terms.begin(), MaxTerms.begin(), MaxTerms.end());
       continue;
     }
+
     // In case the outermost expression is a plain add, we check if any of its
     // terms has the form 4 * %inst * %param * %param ..., aka a term that
     // contains a product between a parameter and an instruction that is
@@ -753,9 +776,10 @@ ScopDetection::getDelinearizationTerms(DetectionContext &Context,
         }
       }
     }
-    if (Terms.empty())
-      SE->collectParametricTerms(Pair.second, Terms);
+    //if (Terms.empty())
+    SE->collectParametricTerms(Pair.second, Terms);
   }
+  DEBUG(errs() << "TERMS: " << Terms.size() << "\n";);
   return Terms;
 }
 
@@ -766,6 +790,8 @@ bool ScopDetection::hasValidArraySizes(DetectionContext &Context,
   Value *BaseValue = BasePointer->getValue();
   Region &CurRegion = Context.CurRegion;
   for (const SCEV *DelinearizedSize : Sizes) {
+    DEBUG(errs() << "\tDS: " << *DelinearizedSize
+           << " Affine: " << isAffine(DelinearizedSize, Scope, Context) << "\n");
     if (!isAffine(DelinearizedSize, Scope, Context)) {
       Sizes.clear();
       break;
@@ -779,6 +805,10 @@ bool ScopDetection::hasValidArraySizes(DetectionContext &Context,
         continue;
       }
     }
+    DEBUG(errs() << "\t Scalar deps: " << hasScalarDepsInsideRegion(DelinearizedSize,
+                                                              &CurRegion, Scope,
+                                                              false)
+           << "\n");
     if (hasScalarDepsInsideRegion(DelinearizedSize, &CurRegion, Scope, false))
       return invalid<ReportNonAffineAccess>(
           Context, /*Assert=*/true, DelinearizedSize,
@@ -844,6 +874,11 @@ bool ScopDetection::computeAccessFunctions(
 
     // (Possibly) report non affine access
     if (IsNonAffine) {
+      DEBUG(errs() << "\t IS NON AFFINE: " << *AF <<  " for " << *Insn << "\n");
+      if (AllowNonAffine) {
+        Acc->DelinearizedSubscripts.clear();
+        continue;
+      }
       BasePtrHasNonAffine = true;
       if (!AllowNonAffine)
         invalid<ReportNonAffineAccess>(Context, /*Assert=*/true, Pair.second,
@@ -869,12 +904,33 @@ bool ScopDetection::hasBaseAffineAccesses(DetectionContext &Context,
 
   SE->findArrayDimensions(Terms, Shape->DelinearizedSizes,
                           Context.ElementSize[BasePointer]);
+  size_t MaxTyS = 0;
+  for (const auto &Pair : Context.Accesses[BasePointer]) {
+    auto *S = Pair.second;
+    if (!S->getType()->isIntegerTy())
+      return false;
+    MaxTyS = std::max(MaxTyS, SE->getTypeSizeInBits(S->getType()));
+  }
+  auto *Ty = Type::getIntNTy(SE->getContext(), MaxTyS);
+  for (const SCEV *&T : Shape->DelinearizedSizes)
+    if (T->getType() != Ty)
+      T = SE->getSignExtendExpr(T, Ty);
+
+  DEBUG(errs() << "#Sizes: " << Shape->DelinearizedSizes.size() << "\n";
+        for (auto *S
+             : Shape->DelinearizedSizes) errs()
+        << "\tSize: " << *S << "\n";);
 
   if (!hasValidArraySizes(Context, Shape->DelinearizedSizes, BasePointer,
-                          Scope))
+                          Scope)) {
+    DEBUG(errs() << "no valid array sizes!\n");
     return false;
+  }
+  DEBUG(errs() << "valid array sizes!\n");
 
-  return computeAccessFunctions(Context, BasePointer, Shape);
+  bool R = computeAccessFunctions(Context, BasePointer, Shape);
+  DEBUG(errs() << "?Valid accesses: " << R << "\n");
+  return R;
 }
 
 bool ScopDetection::hasAffineMemoryAccesses(DetectionContext &Context) const {
@@ -1601,6 +1657,7 @@ void updateLoopCountStatistic(ScopDetection::LoopStats Stats,
 }
 
 bool ScopDetection::runOnFunction(llvm::Function &F) {
+  DEBUG(F.dump());
   LI = &getAnalysis<LoopInfoWrapperPass>().getLoopInfo();
   RI = &getAnalysis<RegionInfoPass>().getRegionInfo();
   if (!PollyProcessUnprofitable && LI->empty())
@@ -1609,15 +1666,37 @@ bool ScopDetection::runOnFunction(llvm::Function &F) {
   AA = &getAnalysis<AAResultsWrapperPass>().getAAResults();
   SE = &getAnalysis<ScalarEvolutionWrapperPass>().getSE();
   DT = &getAnalysis<DominatorTreeWrapperPass>().getDomTree();
+  auto &UFE = getAnalysis<UnifyFunctionExitNodes>();
   Region *TopRegion = RI->getTopLevelRegion();
 
   releaseMemory();
 
-  if (OnlyFunction != "" && !F.getName().count(OnlyFunction))
+  if (!OnlyFunctions.empty() &&
+      !std::any_of(OnlyFunctions.begin(), OnlyFunctions.end(),
+                   [&](const std::string &OnlyFunction) {
+                     errs() << F.getName() << " vs " << OnlyFunction << " = "
+                            << F.getName().count(OnlyFunction) << "\n";
+                     return F.getName().count(OnlyFunction);
+                   }))
     return false;
 
   if (!isValidFunction(F))
     return false;
+
+  Region *SubTopRegion;
+  auto *EntrySuccBB = F.getEntryBlock().getUniqueSuccessor();
+  auto *UnreachableBB = UFE.getUnreachableBlock();
+  auto *ReturnBB = UFE.getReturnBlock();
+  auto *UnwindBB = UFE.getUnwindBlock();
+  if (EntrySuccBB && ReturnBB && !UnreachableBB && !UnwindBB) {
+    SubTopRegion = new Region(EntrySuccBB, ReturnBB, RI, DT);
+    TopRegion->transferChildrenTo(SubTopRegion);
+    TopRegion->addSubRegion(SubTopRegion);
+    for (auto &BB : F)
+      if (&BB != &F.getEntryBlock() && RI->getRegionFor(&BB) == TopRegion)
+        RI->setRegionFor(&BB, SubTopRegion);
+    RI->verifyAnalysis();
+  }
 
   findScops(*TopRegion);
 
@@ -1685,6 +1764,7 @@ void polly::ScopDetection::verifyAnalysis() const {
 
 void ScopDetection::getAnalysisUsage(AnalysisUsage &AU) const {
   AU.addRequired<LoopInfoWrapperPass>();
+  AU.addRequired<UnifyFunctionExitNodes>();
   AU.addRequiredTransitive<ScalarEvolutionWrapperPass>();
   AU.addRequired<DominatorTreeWrapperPass>();
   // We also need AA and RegionInfo when we are verifying analysis.
@@ -1719,5 +1799,6 @@ INITIALIZE_PASS_DEPENDENCY(LoopInfoWrapperPass);
 INITIALIZE_PASS_DEPENDENCY(RegionInfoPass);
 INITIALIZE_PASS_DEPENDENCY(DominatorTreeWrapperPass);
 INITIALIZE_PASS_DEPENDENCY(ScalarEvolutionWrapperPass);
+INITIALIZE_PASS_DEPENDENCY(UnifyFunctionExitNodes);
 INITIALIZE_PASS_END(ScopDetection, "polly-detect",
                     "Polly - Detect static control parts (SCoPs)", false, false)

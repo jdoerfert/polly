@@ -20,12 +20,14 @@
 
 #include "polly/ScopDetection.h"
 #include "polly/Support/SCEVAffinator.h"
+#include "polly/Support/LiveOutAnalyser.h"
 
 #include "llvm/ADT/MapVector.h"
 #include "llvm/Analysis/RegionPass.h"
 #include "isl/aff.h"
 #include "isl/ctx.h"
 #include "isl/set.h"
+#include "isl/map.h"
 
 #include <deque>
 #include <forward_list>
@@ -64,7 +66,48 @@ class Scop;
 class ScopStmt;
 class ScopBuilder;
 
+extern bool PollyExpProp;
+
 //===---------------------------------------------------------------------===//
+struct RecomputeInfo {
+  RecomputeInfo *ParentRI = nullptr;
+
+  MemoryAccess *RecomputeMA = nullptr;
+  MemoryAccess *DefiningMA = nullptr;
+  isl_map *Dependence = nullptr;
+
+  DenseMap<MemoryAccess *, MemoryAccess *> NewAccs;
+
+  ValueMapT BBMap;
+  DenseMap<MemoryAccess *, Value *> MABBMap;
+
+  RecomputeInfo(MemoryAccess *RecomputeMA, MemoryAccess *DefiningMA,
+                __isl_take isl_map *Dependence)
+      : RecomputeMA(RecomputeMA), DefiningMA(DefiningMA),
+        Dependence(Dependence) {
+    //errs() << "New RI: " << this << "\n";
+  }
+  RecomputeInfo(const RecomputeInfo &RI)
+      : RecomputeMA(RI.RecomputeMA), DefiningMA(RI.DefiningMA),
+        Dependence(isl_map_copy(RI.Dependence)), NewAccs(RI.NewAccs) {
+    //errs() << "Copy RI: " << &RI << " to " << this << "\n";
+  }
+  RecomputeInfo(const RecomputeInfo &RI,
+                const DenseMap<MemoryAccess *, MemoryAccess *> &Mapping)
+      : RecomputeMA(RI.RecomputeMA), DefiningMA(RI.DefiningMA),
+        Dependence(isl_map_copy(RI.Dependence)), NewAccs(RI.NewAccs) {
+    //errs() << "Copy RI: " << &RI << " to " << this << "\n";
+    for (auto &It : NewAccs) {
+      if (auto *NewMA = Mapping.lookup(It.second))
+        It.second = NewMA;
+    }
+  }
+  ~RecomputeInfo() {
+    //errs() << "Delete RI: " << this << "\n";
+    //assert(Dependence);
+    Dependence = isl_map_free(Dependence);
+  }
+};
 
 /// Enumeration of assumptions Polly can take.
 enum AssumptionKind {
@@ -269,6 +312,18 @@ public:
 
   /// Return the base pointer.
   Value *getBasePtr() const { return BasePtr; }
+
+  SetVector<MemoryAccess *> Accesses;
+  void addMemoryAccess(MemoryAccess *Acc) const {
+    const_cast<ScopArrayInfo *>(this)->Accesses.insert(Acc);
+  }
+  isl_pw_aff *MinDim0 = nullptr;
+  isl_pw_aff *MaxDim0 = nullptr;
+  void setMinMaxDim0(isl_pw_aff *MinD0, isl_pw_aff *MaxD0) {
+    assert(MinDim0 == nullptr && MaxDim0 == nullptr);
+    const_cast<ScopArrayInfo *>(this)->MinDim0 = MinD0;
+    const_cast<ScopArrayInfo *>(this)->MaxDim0 = MaxD0;
+  }
 
   /// For indirect accesses return the origin SAI of the BP, else null.
   const ScopArrayInfo *getBasePtrOriginSAI() const { return BasePtrOriginSAI; }
@@ -721,6 +776,9 @@ public:
     Incoming.emplace_back(std::make_pair(IncomingBlock, IncomingValue));
   }
 
+  /// Copy AccessInst and Subscripts from @p MemoryAccess
+  void copyAccInstAndSubscripts(MemoryAccess *Access);
+
   /// Return the list of possible PHI/ExitPHI values.
   ///
   /// After code generation moves some PHIs around during region simplification,
@@ -754,6 +812,9 @@ public:
   bool isMemoryIntrinsic() const {
     return isa<MemIntrinsic>(getAccessInstruction());
   }
+
+  /// Check if an access relation is present.
+  bool hasAccessRelation() const { return AccessRelation; }
 
   /// Check if a new access relation was imported or set by a pass.
   bool hasNewAccessRelation() const { return NewAccessRelation; }
@@ -803,6 +864,11 @@ public:
   /// Get an isl string representing a new access function, if available.
   std::string getNewAccessRelationStr() const;
 
+  std::string getAccessRelationStr() const {
+    return hasNewAccessRelation() ? getNewAccessRelationStr()
+                                  : getOriginalAccessRelationStr();
+  }
+
   /// Get the base address of this access (e.g. A for A[i+j]) when
   /// detected.
   Value *getOriginalBaseAddr() const {
@@ -839,7 +905,8 @@ public:
 
   /// Legacy name of getOriginalScopArrayInfo().
   const ScopArrayInfo *getScopArrayInfo() const {
-    return getOriginalScopArrayInfo();
+    return hasNewAccessRelation() ? getLatestScopArrayInfo()
+                                  : getOriginalScopArrayInfo();
   }
 
   /// Return a string representation of the access's reduction type.
@@ -864,6 +931,10 @@ public:
 
   /// Return the access function subscript in the dimension @p Dim.
   const SCEV *getSubscript(unsigned Dim) const { return Subscripts[Dim]; }
+  const SmallVectorImpl<const SCEV *> &getSubscripts() const {
+    return Subscripts;
+  }
+  const SmallVectorImpl<const SCEV *> &getSizes() const { return Sizes; }
 
   /// Compute the isl representation for the SCEV @p E wrt. this access.
   ///
@@ -904,8 +975,8 @@ public:
 
   /// Return the kind when this access was first detected.
   MemoryKind getOriginalKind() const {
-    assert(!getOriginalScopArrayInfo() /* not yet initialized */ ||
-           getOriginalScopArrayInfo()->getKind() == Kind);
+    //assert(!getOriginalScopArrayInfo() [> not yet initialized <] ||
+           //getOriginalScopArrayInfo()->getKind() == Kind);
     return Kind;
   }
 
@@ -1051,6 +1122,9 @@ public:
 
   /// Is the memory access affine?
   bool isAffine() const { return IsAffine; }
+
+  DenseSet<std::pair<RecomputeInfo *, MemoryAccess *>> CollocatedAccs;
+  size_t AccNo;
 };
 
 llvm::raw_ostream &operator<<(llvm::raw_ostream &OS,
@@ -1128,6 +1202,11 @@ public:
   ScopStmt(Scop &parent, __isl_take isl_map *SourceRel,
            __isl_take isl_map *TargetRel, __isl_take isl_set *Domain);
 
+  /// Copy an existing ScopStmt into a new ScopStmt
+  DenseMap<MemoryAccess *, MemoryAccess *> copyStmt(ScopStmt &Stmt,
+                                                    unsigned no);
+  unsigned getNumCopyStmts() const { return CopyStmts.size(); }
+
   /// Initialize members after all MemoryAccesses have been added.
   void init(LoopInfo &LI);
 
@@ -1174,6 +1253,7 @@ private:
 
   /// Mapping from instructions to (scalar) memory accesses.
   DenseMap<const Instruction *, MemoryAccessList> InstructionToAccess;
+  DenseMap<const Instruction *, MemoryAccessList> OrigInstructionToAccess;
 
   /// The set of values defined elsewhere required in this ScopStmt and
   ///        their MemoryKind::Value READ MemoryAccesses.
@@ -1248,7 +1328,7 @@ public:
   /// Get the iteration domain of this ScopStmt.
   ///
   /// @return The iteration domain of this ScopStmt.
-  __isl_give isl_set *getDomain() const;
+  __isl_give isl_set *getDomain(bool UseCopyDom = false) const;
 
   /// Get the space of the iteration domain
   ///
@@ -1287,6 +1367,22 @@ public:
 
   /// Set the invalid context for this statement to @p ID.
   void setInvalidDomain(__isl_take isl_set *ID);
+
+  NextItMapTy NextItMap;
+  DenseMap<MemoryAccess *, MemoryAccess *> MemAccMap;
+  unsigned NumRecomputeValues = 0;
+  unsigned NumLocalRecomputeValues = 0;
+
+  /// @brief TODO
+  RecomputeInfo *addRecomputeValue(
+      MemoryAccess *Trg, MemoryAccess *Src, __isl_take isl_map *Dependence,
+      DenseMap<MemoryAccess *, MemoryAccess *> &NewAccs);
+
+  /// The statements in this Scop.
+  SmallPtrSet<ScopStmt *, 4> CopyStmts;
+  ScopStmt *ParentStmt = nullptr;
+  isl_set *CopyDomain = nullptr;
+  MemoryAccess *WriteMA = nullptr;
 
   /// Get the BasicBlock represented by this ScopStmt (if any).
   ///
@@ -1354,15 +1450,25 @@ public:
 
   /// Return true if this statement does not contain any accesses.
   bool isEmpty() const { return MemAccs.empty(); }
+  bool isExecuted() const { return !isl_set_plain_is_empty(Domain); }
+
+  void getOriginalMemAccesses(SmallVectorImpl<MemoryAccess *> &Vec) {
+    for (auto &It : OrigInstructionToAccess)
+      for (auto &MIt : It.second)
+        if (MIt->isArrayKind())
+          Vec.push_back(MIt);
+  }
 
   /// Return the only array access for @p Inst, if existing.
   ///
   /// @param Inst The instruction for which to look up the access.
   /// @returns The unique array memory access related to Inst or nullptr if
   ///          no array access exists
-  MemoryAccess *getArrayAccessOrNULLFor(const Instruction *Inst) const {
-    auto It = InstructionToAccess.find(Inst);
-    if (It == InstructionToAccess.end())
+  MemoryAccess *getArrayAccessOrNULLFor(const Instruction *Inst,
+                                        bool Orig = true) const {
+    auto &I2A = Orig ? OrigInstructionToAccess : InstructionToAccess;
+    auto It = I2A.find(Inst), End = I2A.end();
+    if (It == End)
       return nullptr;
 
     MemoryAccess *ArrayAccess = nullptr;
@@ -1421,6 +1527,7 @@ public:
   /// Note that scalar accesses that are caused by MA will
   /// be eliminated too.
   void removeMemoryAccess(MemoryAccess *MA);
+  void removeOneMemoryAccess(MemoryAccess *MA);
 
   /// Remove @p MA from this statement.
   ///
@@ -1452,7 +1559,7 @@ public:
   /// Restrict the domain of the statement.
   ///
   /// @param NewDomain The new statement domain.
-  void restrictDomain(__isl_take isl_set *NewDomain);
+  bool restrictDomain(__isl_take isl_set *NewDomain);
 
   /// Compute the isl representation for the SCEV @p E in this stmt.
   ///
@@ -1460,7 +1567,8 @@ public:
   /// @param NonNegative Flag to indicate the @p E has to be non-negative.
   ///
   /// Note that this function will also adjust the invalid context accordingly.
-  __isl_give isl_pw_aff *getPwAff(const SCEV *E, bool NonNegative = false);
+  __isl_give isl_pw_aff *getPwAff(const SCEV *E, bool NonNegative = false,
+                                  bool Unsigned = false);
 
   /// Get the loop for a dimension.
   ///
@@ -1519,10 +1627,13 @@ public:
   /// non read only and read only accesses for each alias group.
   using MinMaxVectorPairVectorTy = SmallVector<MinMaxVectorPairTy, 4>;
 
+  DenseMap<MemoryAccess *, RecomputeInfo *> RecomputeMAs;
+
 private:
   Scop(const Scop &) = delete;
   const Scop &operator=(const Scop &) = delete;
 
+  LoopInfo *LI;
   ScalarEvolution *SE;
 
   /// The underlying Region.
@@ -1917,25 +2028,6 @@ private:
   /// @return The representing SCEV for invariant loads or @p S if none.
   const SCEV *getRepresentingInvariantLoadSCEV(const SCEV *S);
 
-  /// Create a new SCoP statement for @p BB.
-  ///
-  /// A new statement for @p BB will be created and added to the statement
-  /// vector
-  /// and map.
-  ///
-  /// @param BB              The basic block we build the statement for.
-  /// @param SurroundingLoop The loop the created statement is contained in.
-  void addScopStmt(BasicBlock *BB, Loop *SurroundingLoop);
-
-  /// Create a new SCoP statement for @p R.
-  ///
-  /// A new statement for @p R will be created and added to the statement vector
-  /// and map.
-  ///
-  /// @param R               The region we build the statement for.
-  /// @param SurroundingLoop The loop the created statement is contained in.
-  void addScopStmt(Region *R, Loop *SurroundingLoop);
-
   /// Update access dimensionalities.
   ///
   /// When detecting memory accesses different accesses to the same array may
@@ -1995,6 +2087,8 @@ private:
   /// set of accesses as a whole. This function finalizes the memory accesses
   /// and constructs a globally consistent state.
   void finalizeAccesses();
+
+  bool isLiveOutScalar(Instruction *Inst, bool Recursive);
 
   /// Construct the schedule of this SCoP.
   ///
@@ -2085,6 +2179,25 @@ public:
   /// @return The count of copy statements added to this Scop.
   unsigned getCopyStmtsNum() { return CopyStmtsNum; }
 
+  /// Create a new SCoP statement for @p BB.
+  ///
+  /// A new statement for @p BB will be created and added to the statement
+  /// vector
+  /// and map.
+  ///
+  /// @param BB              The basic block we build the statement for.
+  /// @param SurroundingLoop The loop the created statement is contained in.
+  ScopStmt *addScopStmt(BasicBlock *BB, Loop *SurroundingLoop);
+
+  /// Create a new SCoP statement for @p R.
+  ///
+  /// A new statement for @p R will be created and added to the statement vector
+  /// and map.
+  ///
+  /// @param R               The region we build the statement for.
+  /// @param SurroundingLoop The loop the created statement is contained in.
+  ScopStmt *addScopStmt(Region *R, Loop *SurroundingLoop);
+
   /// Create a new copy statement.
   ///
   /// A new statement will be created and added to the statement vector.
@@ -2097,6 +2210,23 @@ public:
   ScopStmt *addScopStmt(__isl_take isl_map *SourceRel,
                         __isl_take isl_map *TargetRel,
                         __isl_take isl_set *Domain);
+
+  /// Create a new SCoP statement for @p BB.
+  ///
+  /// A new statement for @p BB will be created and added to the statement
+  /// vector
+  /// and map.
+  ///
+  /// @param BB         The basic block we build the statement for.
+  ScopStmt *addScopStmt(BasicBlock *BB);
+
+  /// Create a new SCoP statement for @p R.
+  ///
+  /// A new statement for @p R will be created and added to the statement vector
+  /// and map.
+  ///
+  /// @param R          The region we build the statement for.
+  ScopStmt *addScopStmt(Region *R);
 
   /// Add the access function to all MemoryAccess objects of the Scop
   ///        created in this pass.
@@ -2215,6 +2345,14 @@ public:
 
   /// Check if the SCoP has been optimized by the scheduler.
   bool isOptimized() const { return IsOptimized; }
+
+  /// Get the name of the entry and exit blocks of this Scop.
+  ///
+  /// These along with the function name can uniquely identify a Scop.
+  ///
+  /// @return std::pair whose first element is the entry name & second element
+  ///         is the exit name.
+  std::pair<std::string, std::string> getEntryExitStr() const;
 
   /// Get the name of this Scop.
   std::string getNameStr() const;
@@ -2501,7 +2639,8 @@ public:
   ///                               as profitably optimizable.
   ///
   /// @return Whether this SCoP can be profitably optimized.
-  bool isProfitable(bool ScalarsAreUnprofitable) const;
+  bool isProfitable(bool ScalarsAreUnprofitable,
+                    bool BeforeExpProp = true) const;
 
   /// Return true if the SCoP contained at least one error block.
   bool hasErrorBlock() const { return HasErrorBlock; }
@@ -2538,7 +2677,7 @@ public:
   /// a dummy value of appropriate dimension is returned. This allows to bail
   /// for complex cases without "error handling code" needed on the users side.
   __isl_give PWACtx getPwAff(const SCEV *E, BasicBlock *BB = nullptr,
-                             bool NonNegative = false);
+                             bool NonNegative = false, bool Unsigned = false);
 
   /// Compute the isl representation for the SCEV @p E
   ///
@@ -2557,13 +2696,15 @@ public:
   __isl_give isl_set *getDomainConditions(BasicBlock *BB) const;
 
   /// Get a union set containing the iteration domains of all statements.
-  __isl_give isl_union_set *getDomains() const;
+  __isl_give isl_union_set *getDomains(bool UseCopyDom = false) const;
 
   /// Get a union map of all may-writes performed in the SCoP.
   __isl_give isl_union_map *getMayWrites();
 
   /// Get a union map of all must-writes performed in the SCoP.
   __isl_give isl_union_map *getMustWrites();
+
+  __isl_give isl_union_map *getLiveOutMustWrites();
 
   /// Get a union map of all writes performed in the SCoP.
   __isl_give isl_union_map *getWrites();
@@ -2621,6 +2762,8 @@ public:
   ///                      When true, also removes statements without
   ///                      side-effects.
   void simplifySCoP(bool AfterHoisting);
+
+  void removeStmts(SmallPtrSetImpl<ScopStmt *> &StmtSet);
 };
 
 /// Print Scop scop to raw_ostream O.

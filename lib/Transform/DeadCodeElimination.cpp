@@ -55,7 +55,7 @@ cl::opt<int> DCEPreciseSteps(
     cl::desc("The number of precise steps between two approximating "
              "iterations. (A value of -1 schedules another approximation stage "
              "before the actual dead code elimination."),
-    cl::ZeroOrMore, cl::init(-1), cl::cat(PollyCategory));
+    cl::ZeroOrMore, cl::init(25), cl::cat(PollyCategory));
 
 class DeadCodeElim : public ScopPass {
 public:
@@ -64,6 +64,8 @@ public:
 
   /// Remove dead iterations from the schedule of @p S.
   bool runOnScop(Scop &S) override;
+
+  void printScop(raw_ostream &OS, Scop &S) const override;
 
   /// Register all analyses and transformation required.
   void getAnalysisUsage(AnalysisUsage &AU) const override;
@@ -95,7 +97,7 @@ char DeadCodeElim::ID = 0;
 // no point in trying to remove them from the live-out set.
 isl::union_set DeadCodeElim::getLiveOut(Scop &S) {
   isl::union_map Schedule = isl::manage(S.getSchedule());
-  isl::union_map MustWrites = isl::manage(S.getMustWrites());
+  isl::union_map MustWrites = isl::manage(S.getLiveOutMustWrites());
   isl::union_map WriteIterations = MustWrites.reverse();
   isl::union_map WriteTimes = WriteIterations.apply_range(Schedule);
 
@@ -158,13 +160,21 @@ bool DeadCodeElim::eliminateDeadCode(Scop &S, int PreciseSteps) {
 
   // FIXME: We can probably avoid the recomputation of all dependences by
   // updating them explicitly.
-  if (Changed)
+  if (Changed) {
+    S.simplifySCoP(true);
     DI.recomputeDependences(Dependences::AL_Statement);
+  }
+
   return Changed;
 }
 
 bool DeadCodeElim::runOnScop(Scop &S) {
   return eliminateDeadCode(S, DCEPreciseSteps);
+}
+
+void DeadCodeElim::printScop(raw_ostream &OS, Scop &S) const {
+  OS << "Scop after DeadCodeElim:\n\n";
+  S.print(OS);
 }
 
 void DeadCodeElim::getAnalysisUsage(AnalysisUsage &AU) const {

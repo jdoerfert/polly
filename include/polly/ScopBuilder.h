@@ -204,12 +204,13 @@ class ScopBuilder {
   /// Ensure an llvm::Value is available in the BB's statement, creating a
   /// MemoryAccess for reloading it if necessary.
   ///
+  /// @param Inst   TODO
   /// @param V      The value expected to be loaded.
   /// @param UserBB Where to reload the value.
   ///
   /// @see ensureValueStore()
   /// @see MemoryKind
-  void ensureValueRead(Value *V, BasicBlock *UserBB);
+  void ensureValueRead(Instruction *Inst, Value *V, BasicBlock *UserBB);
 
   /// Create a write MemoryAccess for the incoming block of a phi node.
   ///

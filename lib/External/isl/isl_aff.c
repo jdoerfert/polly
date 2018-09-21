@@ -2284,6 +2284,18 @@ __isl_give isl_set *isl_aff_ge_set(__isl_take isl_aff *aff1,
 	return isl_set_from_basic_set(isl_aff_ge_basic_set(aff1, aff2));
 }
 
+/* Return a set containing those elements in the shared domain space
+ * of aff1 and aff2 where aff1 is greater than aff2.
+ *
+ * If either of the two inputs is NaN, then the result is empty,
+ * as comparisons with NaN always return false.
+ */
+__isl_give isl_set *isl_aff_gt_set(__isl_take isl_aff *aff1,
+	__isl_take isl_aff *aff2)
+{
+	return isl_set_from_basic_set(isl_aff_gt_basic_set(aff1, aff2));
+}
+
 /* Return a basic set containing those elements in the shared space
  * of aff1 and aff2 where aff1 is smaller than or equal to aff2.
  */
@@ -2338,6 +2350,23 @@ __isl_give isl_set *isl_aff_eq_set(__isl_take isl_aff *aff1,
 	__isl_take isl_aff *aff2)
 {
 	return isl_set_from_basic_set(isl_aff_eq_basic_set(aff1, aff2));
+}
+
+/* Return a set containing those elements in the shared domain space
+ * of aff1 and aff2 where aff1 and aff2 are not equal.
+ *
+ * If either of the two inputs is NaN, then the result is empty,
+ * as comparisons with NaN always return false.
+ */
+__isl_give isl_set *isl_aff_ne_set(__isl_take isl_aff *aff1,
+	__isl_take isl_aff *aff2)
+{
+	isl_set *set_lt, *set_gt;
+
+	set_lt = isl_aff_lt_set(isl_aff_copy(aff1),
+				isl_aff_copy(aff2));
+	set_gt = isl_aff_gt_set(aff1, aff2);
+	return isl_set_union_disjoint(set_lt, set_gt);
 }
 
 __isl_give isl_aff *isl_aff_add_on_domain(__isl_keep isl_set *dom,
@@ -3804,6 +3833,64 @@ error:
 #include <isl_multi_gist.c>
 
 #undef NO_DOMAIN
+
+/* Construct an isl_multi_aff living in "space" that corresponds
+ * to the affine transformation matrix "mat".
+ */
+__isl_give isl_multi_aff *isl_multi_aff_from_aff_mat(
+	__isl_take isl_space *space, __isl_take isl_mat *mat)
+{
+	isl_ctx *ctx;
+	isl_local_space *ls = NULL;
+	isl_multi_aff *ma = NULL;
+	int n_row, n_col, n_out, total;
+	int i;
+
+	if (!space || !mat)
+		goto error;
+
+	ctx = isl_mat_get_ctx(mat);
+
+	n_row = isl_mat_rows(mat);
+	n_col = isl_mat_cols(mat);
+	if (n_row < 1)
+		isl_die(ctx, isl_error_invalid,
+			"insufficient number of rows", goto error);
+	if (n_col < 1)
+		isl_die(ctx, isl_error_invalid,
+			"insufficient number of columns", goto error);
+	n_out = isl_space_dim(space, isl_dim_out);
+	total = isl_space_dim(space, isl_dim_all);
+	if (1 + n_out != n_row || 2 + total != n_row + n_col)
+		isl_die(ctx, isl_error_invalid,
+			"dimension mismatch", goto error);
+
+	ma = isl_multi_aff_zero(isl_space_copy(space));
+	ls = isl_local_space_from_space(isl_space_domain(space));
+
+	for (i = 0; i < n_row - 1; ++i) {
+		isl_vec *v;
+		isl_aff *aff;
+
+		v = isl_vec_alloc(ctx, 1 + n_col);
+		if (!v)
+			goto error;
+		isl_int_set(v->el[0], mat->row[0][0]);
+		isl_seq_cpy(v->el + 1, mat->row[1 + i], n_col);
+		v = isl_vec_normalize(v);
+		aff = isl_aff_alloc_vec(isl_local_space_copy(ls), v);
+		ma = isl_multi_aff_set_aff(ma, i, aff);
+	}
+
+	isl_local_space_free(ls);
+	isl_mat_free(mat);
+	return ma;
+error:
+	isl_local_space_free(ls);
+	isl_mat_free(mat);
+	isl_multi_aff_free(ma);
+	return NULL;
+}
 
 /* Remove any internal structure of the domain of "ma".
  * If there is any such internal structure in the input,
@@ -7061,7 +7148,7 @@ __isl_give isl_map *isl_multi_pw_aff_eq_map(__isl_take isl_multi_pw_aff *mpa1,
  * pairwise equal.
  */
 static __isl_give isl_map *isl_multi_pw_aff_lex_map_on_space(
-	__isl_take isl_multi_pw_aff *mpa1, __isl_take isl_multi_pw_aff *mpa2,
+	__isl_keep isl_multi_pw_aff *mpa1, __isl_keep isl_multi_pw_aff *mpa2,
 	__isl_give isl_map *(*base)(__isl_take isl_pw_aff *pa1,
 		__isl_take isl_pw_aff *pa2),
 	__isl_take isl_space *space)
@@ -7106,7 +7193,7 @@ static __isl_give isl_map *isl_multi_pw_aff_lex_map_on_space(
  * pairwise equal.
  */
 __isl_give isl_map *isl_multi_pw_aff_lex_lt_map_on_space(
-	__isl_take isl_multi_pw_aff *mpa1, __isl_take isl_multi_pw_aff *mpa2,
+	__isl_keep isl_multi_pw_aff *mpa1, __isl_keep isl_multi_pw_aff *mpa2,
 	__isl_take isl_space *space)
 {
 	return isl_multi_pw_aff_lex_map_on_space(mpa1, mpa2,
@@ -7134,7 +7221,7 @@ __isl_give isl_map *isl_multi_pw_aff_lex_lt_map(
  * pairwise equal.
  */
 __isl_give isl_map *isl_multi_pw_aff_lex_gt_map_on_space(
-	__isl_take isl_multi_pw_aff *mpa1, __isl_take isl_multi_pw_aff *mpa2,
+	__isl_keep isl_multi_pw_aff *mpa1, __isl_keep isl_multi_pw_aff *mpa2,
 	__isl_take isl_space *space)
 {
 	return isl_multi_pw_aff_lex_map_on_space(mpa1, mpa2,

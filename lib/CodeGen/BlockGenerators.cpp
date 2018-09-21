@@ -35,6 +35,8 @@
 #include "isl/set.h"
 #include <deque>
 
+#define DEBUG_TYPE "polly-codegen-blocks"
+
 using namespace llvm;
 using namespace polly;
 
@@ -42,6 +44,9 @@ static cl::opt<bool> Aligned("enable-polly-aligned",
                              cl::desc("Assumed aligned memory accesses."),
                              cl::Hidden, cl::init(false), cl::ZeroOrMore,
                              cl::cat(PollyCategory));
+static cl::opt<bool> PropagateLoads("polly-load-recurences", cl::desc(""),
+                                    cl::Hidden, cl::init(true), cl::ZeroOrMore,
+                                    cl::cat(PollyCategory));
 
 bool PollyDebugPrinting;
 static cl::opt<bool, true> DebugPrintingX(
@@ -50,13 +55,28 @@ static cl::opt<bool, true> DebugPrintingX(
     cl::location(PollyDebugPrinting), cl::Hidden, cl::init(false),
     cl::ZeroOrMore, cl::cat(PollyCategory));
 
-BlockGenerator::BlockGenerator(
-    PollyIRBuilder &B, LoopInfo &LI, ScalarEvolution &SE, DominatorTree &DT,
-    AllocaMapTy &ScalarMap, EscapeUsersAllocaMapTy &EscapeMap,
-    ValueMapT &GlobalMap, IslExprBuilder *ExprBuilder, BasicBlock *StartBlock)
-    : Builder(B), LI(LI), SE(SE), ExprBuilder(ExprBuilder), DT(DT),
-      EntryBB(nullptr), ScalarMap(ScalarMap), EscapeMap(EscapeMap),
-      GlobalMap(GlobalMap), StartBlock(StartBlock) {}
+BlockGenerator::BlockGenerator(PollyIRBuilder &B, LoopInfo &LI,
+                               ScalarEvolution &SE, DominatorTree &DT,
+                               AllocaMapTy &ScalarMap,
+                               EscapeUsersAllocaMapTy &EscapeMap,
+                               ValueMapT &GlobalMap,
+                               IslExprBuilder *ExprBuilder,
+                               BasicBlock *StartBlock, ScopAnnotator &Annotator)
+    : Builder(B), Annotator(Annotator), LI(LI), SE(SE),
+      ExprBuilder(ExprBuilder), DT(DT), EntryBB(nullptr), ScalarMap(ScalarMap),
+      EscapeMap(EscapeMap), GlobalMap(GlobalMap), StartBlock(StartBlock) {}
+
+BlockGenerator::~BlockGenerator() {
+  clearMALoopMap();
+}
+
+void BlockGenerator::clearMALoopMap() {
+  for (auto &SAIIt : MALoopMap)
+    for (auto &It : SAIIt.second)
+      isl_map_free(It.second.second);
+  MALoopMap.clear();
+}
+
 
 Value *BlockGenerator::trySynthesizeNewValue(ScopStmt &Stmt, Value *Old,
                                              ValueMapT &BBMap,
@@ -153,7 +173,7 @@ void BlockGenerator::copyInstScalar(ScopStmt &Stmt, Instruction *Inst,
     if (!NewOperand) {
       assert(!isa<StoreInst>(NewInst) &&
              "Store instructions are always needed!");
-      delete NewInst;
+      NewInst->deleteValue();
       return;
     }
 
@@ -231,8 +251,48 @@ Value *BlockGenerator::generateArrayLoad(ScopStmt &Stmt, LoadInst *Load,
 
   Value *NewPointer =
       generateLocationAccessed(Stmt, Load, BBMap, LTS, NewAccesses);
-  Value *ScalarLoad = Builder.CreateAlignedLoad(
+  auto *ScalarLoad = Builder.CreateAlignedLoad(
       NewPointer, Load->getAlignment(), Load->getName() + "_p_scalar_");
+  if (Aligned)
+    ScalarLoad->setAlignment(16);
+
+  if (PollyDebugPrinting)
+    RuntimeDebugBuilder::createCPUPrinter(Builder, "Load from ", NewPointer,
+                                          ": ", ScalarLoad, "\n");
+
+  MemoryAccess &MA = Stmt.getArrayAccessFor(Load);
+  MABBMap[&MA] = ScalarLoad;
+
+  if (MA.isAffine()) {
+    auto *AccRel = MA.getAddressFunction();
+    if (!isl_map_is_injective(AccRel)) {
+      isl_map_free(AccRel);
+      return ScalarLoad;
+    }
+    isl_union_map *ScheduleUMap =
+        isl_ast_build_get_schedule(Stmt.getAstBuild());
+    isl_map *Schedule = isl_map_from_union_map(ScheduleUMap);
+    AccRel = isl_map_apply_domain(AccRel, Schedule);
+    //errs() << "-- AccRel: " << AccRel << "\n";
+    assert(!MALoopMap[MA.getScopArrayInfo()].count(ScalarLoad));
+    MALoopMap[MA.getScopArrayInfo()][ScalarLoad] = {&Stmt, AccRel};
+  }
+
+  return ScalarLoad;
+}
+
+Value *BlockGenerator::generateArrayLoad2(ScopStmt &Stmt, MemoryAccess &MA,
+                                          ValueMapT &BBMap, LoopToScevMapT &LTS,
+                                          isl_id_to_ast_expr *NewAccesses,
+                                          Type *Ty) {
+  LoadInst *Load = cast<LoadInst>(MA.getAccessInstruction());
+  Value *NewPointer = generateLocationAccessed(
+      Stmt, getLoopForStmt(Stmt), Load->getPointerOperand(), BBMap, LTS,
+      NewAccesses, MA.getId(), Ty);
+  auto *ScalarLoad = Builder.CreateAlignedLoad(
+      NewPointer, Load->getAlignment(), Load->getName() + "_p_scalar_");
+  if (Aligned)
+    ScalarLoad->setAlignment(16);
 
   if (PollyDebugPrinting)
     RuntimeDebugBuilder::createCPUPrinter(Builder, "Load from ", NewPointer,
@@ -241,7 +301,8 @@ Value *BlockGenerator::generateArrayLoad(ScopStmt &Stmt, LoadInst *Load,
   return ScalarLoad;
 }
 
-void BlockGenerator::generateArrayStore(ScopStmt &Stmt, StoreInst *Store,
+
+StoreInst* BlockGenerator::generateArrayStore(ScopStmt &Stmt, StoreInst *Store,
                                         ValueMapT &BBMap, LoopToScevMapT &LTS,
                                         isl_id_to_ast_expr *NewAccesses) {
   Value *NewPointer =
@@ -251,9 +312,26 @@ void BlockGenerator::generateArrayStore(ScopStmt &Stmt, StoreInst *Store,
 
   if (PollyDebugPrinting)
     RuntimeDebugBuilder::createCPUPrinter(Builder, "Store to  ", NewPointer,
-                                          ": ", ValueOperand, "\n");
+                                          ": ", ValueOperand, " [",
+                                          Stmt.getBaseName(), "]\n");
 
-  Builder.CreateAlignedStore(ValueOperand, NewPointer, Store->getAlignment());
+  assert(
+      NewPointer->getType()->getPointerElementType()->getScalarSizeInBits() ==
+      ValueOperand->getType()->getScalarSizeInBits());
+  if (NewPointer->getType()->getPointerElementType() !=
+      ValueOperand->getType())
+    NewPointer = Builder.CreateBitOrPointerCast(
+        NewPointer, ValueOperand->getType()->getPointerTo());
+
+  auto *StoreCopy = Builder.CreateAlignedStore(ValueOperand, NewPointer,
+                                               Store->getAlignment());
+  if (Aligned)
+    StoreCopy->setAlignment(16);
+  (void)StoreCopy;
+  //MDNode *Kind = MDNode::get(Builder.getContext(),
+                              //{ConstantAsMetadata::get(Builder.getInt32(1))});
+  //StoreCopy->setMetadata(LLVMContext::MD_nontemporal, Kind);
+  return StoreCopy;
 }
 
 bool BlockGenerator::canSyntheziseInStmt(ScopStmt &Stmt, Instruction *Inst) {
@@ -265,6 +343,8 @@ bool BlockGenerator::canSyntheziseInStmt(ScopStmt &Stmt, Instruction *Inst) {
 void BlockGenerator::copyInstruction(ScopStmt &Stmt, Instruction *Inst,
                                      ValueMapT &BBMap, LoopToScevMapT &LTS,
                                      isl_id_to_ast_expr *NewAccesses) {
+  if (BBMap.count(Inst))
+    return;
   // Terminator instructions control the control flow. They are explicitly
   // expressed in the clast and do not need to be copied.
   if (Inst->isTerminator())
@@ -275,6 +355,9 @@ void BlockGenerator::copyInstruction(ScopStmt &Stmt, Instruction *Inst,
     return;
 
   if (auto *Load = dyn_cast<LoadInst>(Inst)) {
+    if (BBMap.count(Load))
+      return;
+
     Value *NewLoad = generateArrayLoad(Stmt, Load, BBMap, LTS, NewAccesses);
     // Compute NewLoad before its insertion in BBMap to make the insertion
     // deterministic.
@@ -287,6 +370,12 @@ void BlockGenerator::copyInstruction(ScopStmt &Stmt, Instruction *Inst,
     if (!Stmt.getArrayAccessOrNULLFor(Store))
       return;
 
+    //static int X = 0;
+    //if (getenv("SKIPSTORES") && X++ < atoi(getenv("SKIPSTORES")))
+      //return;
+    //static int M = 0;
+    //if (getenv("MAXSTORES") && M++ >= atoi(getenv("MAXSTORES")))
+      //return;
     generateArrayStore(Stmt, Store, BBMap, LTS, NewAccesses);
     return;
   }
@@ -305,33 +394,67 @@ void BlockGenerator::copyInstruction(ScopStmt &Stmt, Instruction *Inst,
 }
 
 void BlockGenerator::removeDeadInstructions(BasicBlock *BB, ValueMapT &BBMap) {
-  auto NewBB = Builder.GetInsertBlock();
-  for (auto I = NewBB->rbegin(); I != NewBB->rend(); I++) {
+  SmallPtrSet<BasicBlock *, 8> BBsToCheck;
+  for (auto I = BB->rbegin(); I != BB->rend(); I++) {
     Instruction *NewInst = &*I;
 
     if (!isInstructionTriviallyDead(NewInst))
       continue;
 
-    for (auto Pair : BBMap)
-      if (Pair.second == NewInst) {
-        BBMap.erase(Pair.first);
-      }
+    //for (auto Pair : BBMap)
+      //if (Pair.second == NewInst) {
+        //BBMap.erase(Pair.first);
+      //}
 
+    for (auto &Op : NewInst->operands())
+      if (auto *OpI = dyn_cast<Instruction>(Op))
+        BBsToCheck.insert(OpI->getParent());
     NewInst->eraseFromParent();
-    I = NewBB->rbegin();
+    I = BB->rbegin();
   }
+  for (auto *BB: BBsToCheck)
+    removeDeadInstructions(BB, BBMap);
+
+  #if 0
+  SmallVector<BinaryOperator *, 8> FSubUsers;
+  for (auto &I : *BB) {
+    if (!I.getType()->isFloatingPointTy())
+      continue;
+    auto *BinOp = dyn_cast<BinaryOperator>(&I);
+    if (!BinOp || BinOp->getOpcode() != BinaryOperator::FMul)
+      continue;
+    for (auto *User : I.users()) {
+      auto *BinOpUser = dyn_cast<BinaryOperator>(User);
+      if (!BinOpUser || BinOpUser->getOpcode() != BinaryOperator::FSub)
+        continue;
+      errs() << "Mul: " << I.getName() << " => " << BinOpUser->getName() << "\n";
+      FSubUsers.push_back(BinOpUser);
+    }
+  }
+  for (auto *FSub : FSubUsers) {
+    auto *Op = FSub->getOperand(1);
+    auto *NegOp = BinaryOperator::CreateFNeg(Op, Op->getName() + "_neg", FSub);
+    auto *FAdd = BinaryOperator::CreateFAdd(
+        FSub->llvm::User::getOperand(0), NegOp, FSub->getName() + "_add", FSub);
+    FSub->replaceAllUsesWith(FAdd);
+    errs() << "Replace " << FSub->getName() << " by " << FAdd->getName() << "\n";
+    //FSub->eraseFromParent();
+  }
+  #endif
 }
 
 void BlockGenerator::copyStmt(ScopStmt &Stmt, LoopToScevMapT &LTS,
                               isl_id_to_ast_expr *NewAccesses) {
   assert(Stmt.isBlockStmt() &&
          "Only block statements can be copied by the block generator");
+  //if (!Stmt.CopyStmts.empty())
+    //return;
 
   ValueMapT BBMap;
 
   BasicBlock *BB = Stmt.getBasicBlock();
   copyBB(Stmt, BB, BBMap, LTS, NewAccesses);
-  removeDeadInstructions(BB, BBMap);
+  //removeDeadInstructions(BB, BBMap);
 }
 
 BasicBlock *BlockGenerator::splitBB(BasicBlock *BB) {
@@ -353,7 +476,80 @@ BasicBlock *BlockGenerator::copyBB(ScopStmt &Stmt, BasicBlock *BB,
   // After a basic block was copied store all scalars that escape this block in
   // their alloca.
   generateScalarStores(Stmt, LTS, BBMap, NewAccesses);
+
+  //if (auto *L = Annotator.peekLoop())
+    //for (auto &I : *CopyBB)
+      //if (auto *SI = dyn_cast<StoreInst>(&I)) {
+        ////createExpressionTree(*CopyBB, L);
+        //sortBB(Stmt, SI, L, LI, DT);
+      //}
+
   return CopyBB;
+}
+
+static void movePrior(Instruction *I, Loop *L) {
+  //errs() << "Move: " << *I << "\n";
+  if (isa<PHINode>(I) || !L->contains(I))
+    return;
+
+  if (I->getNumOperands() == 1)
+    if (auto *IOpI = dyn_cast<Instruction>(I->getOperand(0)))
+      if (!isa<PHINode>(IOpI))
+        I->moveBefore(IOpI->getNextNode());
+
+  if (!L->contains(I))
+    return;
+
+  SmallPtrSet<Instruction *, 8> InLoopOps;
+  for (auto &Op : I->operands())
+    if (auto *OpI = dyn_cast<Instruction>(Op)) {
+      movePrior(OpI, L);
+
+      if (L->contains(OpI) && !isa<PHINode>(OpI))
+        InLoopOps.insert(OpI);
+    }
+
+  if (InLoopOps.empty()) {
+    I->moveBefore(&*L->getHeader()->getFirstInsertionPt());
+    return;
+  }
+
+  if (InLoopOps.size() == 1) {
+    auto *InLoopOp = *InLoopOps.begin();
+    I->moveBefore(InLoopOp->getNextNode());
+    return;
+  }
+
+  if (std::all_of(InLoopOps.begin(), InLoopOps.end(), [&](Instruction *OpI) {
+        return OpI->getParent() != I->getParent();
+      })) {
+    I->moveBefore(&*I->getParent()->getFirstInsertionPt());
+  }
+}
+
+static Instruction *getUniqueUserInLoop(Instruction *I, Loop *L) {
+  if (I->getNumUses() == 0)
+    return nullptr;
+
+  auto *User = I->user_back();
+  if (!L->contains(User))
+    return nullptr;
+  for (auto *U : I->users())
+    if (U != User)
+      return nullptr;
+
+  return User;
+}
+
+static void moveToUser(Instruction *I, Loop *L) {
+  auto *User = getUniqueUserInLoop(I, L);
+  if (User)
+    I->moveBefore(User);
+
+  for (auto &Op : I->operands())
+    if (auto *OpI = dyn_cast<Instruction>(Op))
+      if (L->contains(OpI) && !isa<PHINode>(OpI))
+        moveToUser(OpI, L);
 }
 
 void BlockGenerator::copyBB(ScopStmt &Stmt, BasicBlock *BB, BasicBlock *CopyBB,
@@ -408,7 +604,10 @@ Value *BlockGenerator::getOrCreateAlloca(const ScopArrayInfo *Array) {
   else
     NameExt = ".s2a";
 
-  Addr = new AllocaInst(Ty, ScalarBase->getName() + NameExt);
+  const DataLayout &DL = Builder.GetInsertBlock()->getModule()->getDataLayout();
+
+  Addr = new AllocaInst(Ty, DL.getAllocaAddrSpace(),
+                        ScalarBase->getName() + NameExt);
   EntryBB = &Builder.GetInsertBlock()->getParent()->getEntryBlock();
   Addr->insertBefore(&*EntryBB->getFirstInsertionPt());
 
@@ -449,9 +648,448 @@ void BlockGenerator::handleOutsideUsers(const Scop &S, ScopArrayInfo *Array) {
   EscapeMap[Inst] = std::make_pair(ScalarAddr, std::move(EscapeUsers));
 }
 
+Value *BlockGenerator::recomputeLoopPHI(ScopStmt &Stmt, PHINode *PHI,
+                                        RecomputeInfo &RI) {
+  DEBUG(errs() << "PHI: " << *PHI << "\n");
+  DEBUG(errs() << "Dep: " << RI.Dependence << "\n");
+  assert(PHI->getType()->isIntegerTy());
+  assert(LI.isLoopHeader(PHI->getParent()));
+
+  Loop *L = LI.getLoopFor(PHI->getParent());
+  assert(SE.isSCEVable(PHI->getType()));
+  const SCEV *PHIScev = SE.getSCEVAtScope(PHI, L);
+  assert(PHIScev && !isa<SCEVCouldNotCompute>(PHIScev));
+
+  DEBUG(errs() << "PHISCev: " << *PHIScev << "\n");
+
+  Scop &S = *Stmt.getParent();
+
+  isl_pw_aff *PHIPWA = S.getPwAffOnly(PHIScev, PHI->getParent());
+  DEBUG(errs() << "PHIPWA: " << PHIPWA << " : " << PHI->getParent()->getName() << "\n");
+
+  isl_map *Dep = isl_map_copy(RI.Dependence);
+  auto *PRI = RI.ParentRI;
+
+  auto *BB = RI.RecomputeMA->getStatement()->getBasicBlock();
+  //errs() << "Dep: " << Dep << "\nBB: " << BB->getName() << "\n";
+  //errs() << "Stmt: " << Stmt.getBaseName() << "\n";
+  while (PRI) {
+    //errs() << "PRI: " << PRI << " : " << PRI->Dependence << "\n";
+    auto *PRIDefStmt =PRI->DefiningMA->getStatement();
+    if (PRIDefStmt->getBasicBlock() == BB) {
+      Dep = isl_map_set_tuple_id(Dep, isl_dim_out, PRIDefStmt->getDomainId());
+      //errs() << "Dep: " << Dep << "\nBB: " << BB->getName() << "\n";
+      Dep = isl_map_apply_range(Dep, isl_map_copy(PRI->Dependence));
+      BB = PRI->RecomputeMA->getStatement()->getBasicBlock();
+      //errs() << "Dep: " << Dep << "\nBB: " << BB->getName() << "\n";
+    }
+    PRI = PRI->ParentRI;
+  }
+  DEBUG(errs() << "Dep: " << Dep << "\n");
+
+  int Depth = S.getRelativeLoopDepth(L);
+  int Dims = isl_map_dim(Dep, isl_dim_in);
+  if (Dims > Depth + 1)
+    Dep = isl_map_project_out(Dep, isl_dim_in, Depth+1, Dims - Depth - 1);
+  DEBUG(errs() << "Dep: " << Dep << "\n");
+
+  Dep = isl_map_reset_tuple_id(Dep, isl_dim_in);
+  Dep = isl_map_reset_tuple_id(Dep, isl_dim_out);
+  Dep = isl_map_gist_params(Dep, S.getAssumedContext());
+  Dep = isl_map_set_tuple_id(Dep, isl_dim_out, Stmt.getDomainId());
+  DEBUG(errs() << "Dep: " << Dep << "\n");
+
+  isl_union_map *Schedule = isl_ast_build_get_schedule(Stmt.getAstBuild());
+  //Schedule = isl_union_map_intersect_domain(
+      //Schedule, isl_union_set_from_set(Stmt.getDomain()));
+  isl_map *ScheduleMap = isl_map_from_union_map(Schedule);
+  DEBUG(errs() << "ScheduleMap: " << ScheduleMap << "\n");
+
+  Dep = isl_map_apply_range(Dep, ScheduleMap);
+  DEBUG(errs() << "Dep: " << Dep << "\n");
+
+  isl_map *PHIAccMap = isl_map_from_pw_aff(PHIPWA);
+  DEBUG(errs() << "PHIAccMap: " << PHIAccMap << "\n");
+  PHIAccMap = isl_map_apply_domain(PHIAccMap, Dep);
+  DEBUG(errs() << "PHIAccMap: " << PHIAccMap << "\n");
+  PHIAccMap = isl_map_lexmin(PHIAccMap);
+  DEBUG(errs() << "PHIAccMap: " << PHIAccMap << "\n");
+  //if (isl_map_is_empty(PHIAccMap))
+    //return UndefValue::get(PHI->getType());
+  assert(!isl_map_is_empty(PHIAccMap));
+
+  isl_pw_multi_aff *PHIPWmA = isl_pw_multi_aff_from_map(PHIAccMap);
+
+  auto *PHIExpr = isl_ast_build_expr_from_pw_aff(
+      Stmt.getAstBuild(), isl_pw_multi_aff_get_pw_aff(PHIPWmA, 0));
+
+  isl_pw_multi_aff_free(PHIPWmA);
+
+  auto *NewVal = ExprBuilder->create(PHIExpr);
+  DEBUG(errs() << "NewVal: " << *NewVal << "\n");
+
+  assert(!NewVal->getType()->isFloatingPointTy());
+  if (NewVal->getType() != PHI->getType())
+    NewVal = Builder.CreateSExtOrTrunc(NewVal, PHI->getType());
+  DEBUG(errs() << "NewVal: " << *NewVal << "\n");
+
+  return NewVal;
+}
+
+void BlockGenerator::setLoopMemAcc(ScopStmt &Stmt, RecomputeInfo *RI,
+                                   Instruction *Val, Instruction *NewVal) {
+  assert(RI && Val && NewVal);
+  auto *Inst = dyn_cast<Instruction>(Val);
+  assert(Inst);
+  auto &DefStmt = *RI->DefiningMA->getStatement();
+  auto *CurMA = DefStmt.getArrayAccessOrNULLFor(Inst);
+  assert(CurMA);
+  if (!CurMA->isAffine())
+    return;
+  auto *SAI = CurMA->getScopArrayInfo();
+  if (MALoopMap[SAI].count(NewVal))
+    return;
+
+  //errs() << "Original MA in [" << Stmt.getBaseName() << "]:\n";
+  //CurMA->dump();
+
+  isl_map *AccRel = CurMA->getAddressFunction();
+  if (!isl_map_is_injective(AccRel)) {
+    isl_map_free(AccRel);
+    return;
+  }
+  while (RI) {
+    //errs() << "RI: " << RI << " CurMA: " << CurMA << " AccRel: " << AccRel
+           //<< "\n   Dep: " << RI->Dependence << "\n";
+    auto *RIDefStmt = RI->DefiningMA->getStatement();
+    if (auto *LocalMA = RIDefStmt->MemAccMap.lookup(CurMA)) {
+      //errs() << "2 LocalMA: " << LocalMA << "\n";
+      AccRel =
+          isl_map_set_tuple_id(AccRel, isl_dim_in, RIDefStmt->getDomainId());
+      CurMA = LocalMA;
+      continue;
+    }
+    if (auto *LocalMA = Stmt.MemAccMap.lookup(CurMA)) {
+      //errs() << "0 LocalMA: " << LocalMA << "\n";
+      assert(!RI->NewAccs.count(CurMA));
+      CurMA = LocalMA;
+      continue;
+    }
+    if (auto *LocalMA = RI->NewAccs.lookup(CurMA)) {
+      //errs() << "1 LocalMA: " << LocalMA << "\n";
+      assert(!Stmt.MemAccMap.count(CurMA));
+      isl_map *Dep = isl_map_copy(RI->Dependence);
+      AccRel = isl_map_apply_domain(AccRel, Dep);
+      CurMA = LocalMA;
+    }
+    if (CurMA->getStatement()->getBasicBlock() == RIDefStmt->getBasicBlock()) {
+      //errs() << "3 LocalMA: " << RI->RecomputeMA << "\n";
+      assert(Stmt.getParent()->RecomputeMAs.count(CurMA));
+      isl_map *Dep = isl_map_copy(RI->Dependence);
+      AccRel =
+          isl_map_set_tuple_id(AccRel, isl_dim_in, RIDefStmt->getDomainId());
+      AccRel = isl_map_apply_domain(AccRel, Dep);
+      CurMA = RI->RecomputeMA;
+    }
+
+    RI = RI->ParentRI;
+  }
+
+  AccRel = isl_map_set_tuple_id(AccRel, isl_dim_in, Stmt.getDomainId());
+  AccRel = isl_map_gist_domain(AccRel, Stmt.getDomain());
+  AccRel = isl_map_gist_params(AccRel, Stmt.getParent()->getAssumedContext());
+
+  //errs() << "Final AccRel: " << AccRel << "\n";
+  isl_union_map *ScheduleUMap = isl_ast_build_get_schedule(Stmt.getAstBuild());
+  isl_map *Schedule = isl_map_from_union_map(ScheduleUMap);
+  AccRel = isl_map_apply_domain(AccRel, Schedule);
+  //errs() << "Sched AccRel: " << AccRel << "\n";
+
+  MALoopMap[SAI][NewVal] = {&Stmt, AccRel};
+}
+
+MemoryAccess *BlockGenerator::getLocalMA(ScopStmt &Stmt,
+    RecomputeInfo &RI, MemoryAccess *MA) {
+  //errs() << "Stmt: " << Stmt.getBaseName() << " RI " << &RI << " MA: " << MA
+         //<< "\n";
+  if (auto *LocalMA = RI.DefiningMA->getStatement()->MemAccMap.lookup(MA)) {
+    assert(!RI.NewAccs.count(MA));
+    return getLocalMA(Stmt, RI, LocalMA);
+  }
+  if (auto *LocalMA = Stmt.MemAccMap.lookup(MA)) {
+    assert(!RI.NewAccs.count(MA));
+    return getLocalMA(Stmt, RI, LocalMA);
+  }
+  if (auto *LocalMA = RI.NewAccs.lookup(MA)) {
+    assert(!Stmt.MemAccMap.count(MA));
+    return getLocalMA(Stmt, RI, LocalMA);
+  }
+  if (RI.ParentRI)
+    return getLocalMA(Stmt, *RI.ParentRI, MA);
+  return MA;
+}
+
+MemoryAccess *BlockGenerator::getLocalMemAcc(ScopStmt &Stmt, RecomputeInfo &RI,
+                                             Value *Val) {
+  auto *Inst = dyn_cast<Instruction>(Val);
+  if (!Inst)
+    return nullptr;
+
+  auto &DefStmt = *RI.DefiningMA->getStatement();
+  auto *InstMA = DefStmt.getArrayAccessOrNULLFor(Inst);
+  if (!InstMA)
+    return nullptr;
+
+  //errs() << "Inst: " << Inst << " DefStmt: " << DefStmt.getBaseName()
+         //<< " InstMA: " << InstMA << "\n";
+  //errs() << "OldVal is mapped to MA: [" << InstMA << "]\n";
+  //InstMA->dump();
+  InstMA = getLocalMA(Stmt, RI, InstMA);
+  //errs() << "LocalMA: [" << InstMA << "]\n";
+  //InstMA->dump();
+  return InstMA;
+}
+
+Value *BlockGenerator::recomputeInstruction(
+    ScopStmt &Stmt, LoopToScevMapT &LTS, ValueMapT &BBMap, Value *Val,
+    RecomputeInfo &RI, __isl_keep isl_id_to_ast_expr *NewAccesses) {
+  DEBUG(errs() << "Recompute Val: " << *Val << "\n");
+  if (Value *NewVal = GlobalMap.lookup(Val)) {
+      if (Value *NewVal2 = GlobalMap.lookup(NewVal))
+        return NewVal2;
+    return NewVal;
+  }
+
+  Value *NewVal = RI.BBMap.lookup(Val);
+  auto *LocalInstMA = getLocalMemAcc(Stmt, RI, Val);
+
+  if (LocalInstMA && !NewVal) {
+    //errs() << "LocalInstMA:\n";
+    //LocalInstMA->dump();
+    //if (LocalInstMA->getStatement() == &Stmt) {
+      //errs() << "LocalInstMA is in Stmt!\n";
+      NewVal = MABBMap.lookup(LocalInstMA);
+      //if (NewVal)
+        //errs() << "  Mapped to => " << *NewVal << "\n";
+    //}
+  }
+
+  if (LocalInstMA && !NewVal) {
+    Scop &S = *Stmt.getParent();
+    if (auto *ChainedRI = S.RecomputeMAs.lookup(LocalInstMA)) {
+      //errs() << "MA is chained to " << ChainedRI << " : "
+             //<< ChainedRI->Dependence << "\n";
+      assert(!ChainedRI->ParentRI);
+      ChainedRI->ParentRI = &RI;
+      NewVal = recomputeInstructionTree(Stmt, LTS, BBMap, *ChainedRI, NewAccesses);
+      ChainedRI->ParentRI = nullptr;
+    } else {
+      bool Hit =
+          std::any_of(Stmt.begin(), Stmt.end(),
+                      [&](const MemoryAccess *MA) { return MA == LocalInstMA; });
+      assert(Hit);
+    }
+  }
+
+  if (!NewVal) {
+    //if (LocalInstMA)
+      //NewVal = generateArrayLoad2(Stmt, *LocalInstMA, BBMap, LTS, NewAccesses,
+                                  //Val->getType());
+    //else
+    NewVal = recomputeInstruction2(Stmt, LTS, BBMap, Val, RI, NewAccesses);
+  }
+
+  assert(NewVal);
+  DEBUG(errs() << "       NewVal: " << *NewVal << " for Val: " << *Val << "\n");
+  assert(!RI.BBMap.count(Val) || RI.BBMap[Val] == NewVal);
+  RI.BBMap[Val] = NewVal;
+
+  if (LocalInstMA && isa<Instruction>(NewVal))
+    setLoopMemAcc(Stmt, &RI, cast<Instruction>(Val), cast<Instruction>(NewVal));
+
+  if (LocalInstMA && LocalInstMA->getStatement() == &Stmt) {
+    //errs() << "LocalInstMA [" << LocalInstMA << "] is in current Stmt!\nMap "
+           //<< LocalInstMA << " in MABBMAp to " << *NewVal << "\n";
+    assert(!MABBMap.count(LocalInstMA) ||
+           MABBMap[LocalInstMA] == NewVal);
+    MABBMap[LocalInstMA] = NewVal;
+  }
+
+  if (auto *LoadI = dyn_cast<LoadInst>(NewVal)) {
+
+    //MDNode *Kind = MDNode::get(Builder.getContext(),
+                                //{ConstantAsMetadata::get(Builder.getInt32(1))});
+    //LoadI->setMetadata(LLVMContext::MD_nontemporal, Kind);
+
+    //LoadI->setVolatile(true);
+    if (PollyDebugPrinting) {
+      if (!LoadI->hasName())
+        LoadI->setName("l");
+      auto IP = Builder.GetInsertPoint();
+      Builder.SetInsertPoint(LoadI);
+      RuntimeDebugBuilder::createCPUPrinter(
+          Builder, "Load from  ", LoadI->getPointerOperand(), " in ",
+          Stmt.getBaseName(), " [", LoadI->getName(), "]\n");
+      Builder.SetInsertPoint(&*IP);
+    }
+  }
+
+  return NewVal;
+}
+
+Value *BlockGenerator::recomputeInstruction2(
+    ScopStmt &Stmt, LoopToScevMapT &LTS, ValueMapT &BBMap, Value *Val,
+    RecomputeInfo &RI, __isl_keep isl_id_to_ast_expr *NewAccesses) {
+
+  if (Value *NewVal = RI.BBMap.lookup(Val)) {
+    return NewVal;
+  }
+
+  if (Value *NewVal = GlobalMap.lookup(Val)) {
+      if (Value *NewVal2 = GlobalMap.lookup(NewVal))
+        return NewVal2;
+    return NewVal;
+  }
+
+  Loop *L = getLoopForStmt(Stmt);
+  auto *Inst = dyn_cast<Instruction>(Val);
+  if (!Inst || !Stmt.getParent()->contains(Inst)) {
+    if (Value *New = trySynthesizeNewValue(Stmt, Val, RI.BBMap, LTS, L)) {
+      return New;
+    }
+    return Val;
+  }
+
+  if (auto *PHI = dyn_cast<PHINode>(Inst)) {
+    auto *New = recomputeLoopPHI(Stmt, PHI, RI);
+    return New;
+  }
+
+  Instruction *NewInst = Inst->clone();
+
+  SmallVector<Value *, 4> Ops;
+  for (auto &Op : Inst->operands()) {
+    auto *NewOp = recomputeInstruction(Stmt, LTS, BBMap, Op, RI, NewAccesses);
+    assert(NewOp);
+    Ops.push_back(NewOp);
+  }
+
+  unsigned u = 0;
+  for (auto &Op : Inst->operands())
+    NewInst->replaceUsesOfWith(Op, Ops[u++]);
+
+  Builder.Insert(NewInst);
+
+  if (!NewInst->getType()->isVoidTy())
+    NewInst->setName("p_" + Inst->getName());
+
+  return NewInst;
+}
+
+void BlockGenerator::createNextItPHI(ScopStmt &Stmt, NextItMapTy &NextItRevMap,
+                                     MemoryAccess *PrevMA, MemoryAccess *NextMA,
+                                     ValueMapT &BBMap, BasicBlock *HeaderBB) {
+  if (MABBMap.count(NextMA))
+    return;
+
+  if (auto *PrevPrevMA = NextItRevMap.lookup(PrevMA))
+    createNextItPHI(Stmt, NextItRevMap, PrevPrevMA, PrevMA, BBMap, HeaderBB);
+
+  //if (!PropagateLoads && !S.RecomputeMAs.count(PrevMA))
+    //continue;
+
+  DEBUG(errs() << "Prev MA: [" << PrevMA << "]\n"
+               << "Next MA: [" << NextMA << "]\n");
+
+  auto *Val = NextMA->getAccessValue();
+  auto *PHI = PHINode::Create(Val->getType(), 2, Val->getName() + "_rec",
+                              HeaderBB->getFirstNonPHI());
+
+  DEBUG(errs() << "Set new PHI for " << *Val << " : " << *PHI << "\n");
+  assert(!MABBMap.count(NextMA));
+  MABBMap[NextMA] = PHI;
+  if (Stmt.contains(NextMA->getAccessInstruction()->getParent()))
+    BBMap[NextMA->getAccessValue()] = PHI;
+  PHIMap[PHI] = NextMA;
+}
+
+Value *BlockGenerator::recomputeInstructionTree(
+    ScopStmt &Stmt, LoopToScevMapT &LTS, ValueMapT &BBMap, RecomputeInfo &RI,
+    __isl_keep isl_id_to_ast_expr *NewAccesses) {
+  Value *OriginalInst = RI.RecomputeMA->getAccessValue();
+  DEBUG({
+    errs() << "\nRecompute Inst Tree for : " << *OriginalInst;
+    auto *CRI = &RI;
+    while (CRI) {
+      errs() << " [" << CRI << "]";
+      CRI = CRI->ParentRI;
+    }
+    errs() << "\n  Dep: " << RI.Dependence << " in " << Stmt.getBaseName()
+           << "\n";
+  });
+
+  RI.BBMap.clear();
+  Value *NewVal = RI.DefiningMA->getAccessValue();
+  NewVal = recomputeInstruction(Stmt, LTS, BBMap, NewVal, RI, NewAccesses);
+
+  bool NewValIsFP = NewVal->getType()->isFloatingPointTy();
+  bool OldValIsFP = OriginalInst->getType()->isFloatingPointTy();
+  if (NewValIsFP != OldValIsFP) {
+    auto *LoadI = dyn_cast<LoadInst>(NewVal);
+    assert(LoadI);
+    auto *Ptr = LoadI->getPointerOperand();
+    Ptr = Builder.CreatePointerCast(Ptr, OriginalInst->getType()->getPointerTo());
+    auto *AdjustedLoadI = Builder.CreateLoad(Ptr, LoadI->getName());
+    LoadI->eraseFromParent();
+    NewVal = AdjustedLoadI;
+    DEBUG(errs() << "RELOAD with adjusted type: " << *NewVal << "\n");
+  }
+
+  DEBUG(errs() << "\nDone Recompute Inst Tree for : "
+               << *RI.RecomputeMA->getAccessValue()
+               << " [#BBMap: " << RI.BBMap.size() << "] [" << &RI << "]\n");
+
+  assert(!RI.BBMap.count(OriginalInst) || RI.BBMap[OriginalInst] == NewVal);
+  RI.BBMap[OriginalInst] = NewVal;
+
+  assert(OriginalInst->getType() == NewVal->getType());
+  return NewVal;
+}
+
+void BlockGenerator::recomputeValuesInOf(
+    ScopStmt &Stmt, LoopToScevMapT &LTS, ValueMapT &BBMap,
+    __isl_keep isl_id_to_ast_expr *NewAccesses) {
+  DEBUG(errs() << "Recompute values [#LocRecV" << Stmt.NumLocalRecomputeValues
+               << "] [#RecV" << Stmt.NumRecomputeValues << "] in "
+               << Stmt.getBaseName() << "\n");
+
+  Scop &S = *Stmt.getParent();
+  SmallVector<MemoryAccess *, 8> Vec;
+  Stmt.getOriginalMemAccesses(Vec);
+  for (auto *MA : Vec) {
+    assert(Stmt.contains(MA->getAccessInstruction()->getParent()));
+    auto *AccVal = MA->getAccessValue();
+    auto *RI = S.RecomputeMAs.lookup(MA);
+    if (!RI)
+      continue;
+    assert(RI->Dependence);
+    DEBUG(errs() << "Start RI for " << *AccVal << " [MA: " << MA
+                 << "] [RI: " << RI << "]\n");
+    Value *NewVal = MABBMap.lookup(MA);
+    if (!NewVal)
+      NewVal = recomputeInstructionTree(Stmt, LTS, BBMap, *RI, NewAccesses);
+    DEBUG(errs() << "RI Done: " << *AccVal << " => " << *NewVal << " in "
+                 << Stmt.getBaseName() << "\n");
+    assert(!BBMap.count(AccVal) || BBMap[AccVal] == NewVal);
+    BBMap[AccVal] = NewVal;
+  }
+}
+
 void BlockGenerator::generateScalarLoads(
     ScopStmt &Stmt, LoopToScevMapT &LTS, ValueMapT &BBMap,
     __isl_keep isl_id_to_ast_expr *NewAccesses) {
+
+#if 0
   for (MemoryAccess *MA : Stmt) {
     if (MA->isOriginalArrayKind() || MA->isWrite())
       continue;
@@ -474,6 +1112,9 @@ void BlockGenerator::generateScalarLoads(
     BBMap[MA->getAccessValue()] =
         Builder.CreateLoad(Address, Address->getName() + ".reload");
   }
+#endif
+
+  recomputeValuesInOf(Stmt, LTS, BBMap, NewAccesses);
 }
 
 void BlockGenerator::generateScalarStores(
@@ -524,6 +1165,8 @@ void BlockGenerator::generateScalarStores(
            "Domination violation");
     Builder.CreateStore(Val, Address);
   }
+
+  MABBMap.clear();
 }
 
 void BlockGenerator::createScalarInitialization(Scop &S) {

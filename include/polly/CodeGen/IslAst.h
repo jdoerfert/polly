@@ -59,11 +59,9 @@ public:
   /// Build run-time condition for scop.
   ///
   /// @param S     The scop to build the condition for.
-  /// @param Build The isl_build object to use to build the condition.
   ///
   /// @returns An ast expression that describes the necessary run-time check.
-  static isl_ast_expr *buildRunCondition(Scop *S,
-                                         __isl_keep isl_ast_build *Build);
+  static isl_ast_expr *buildRunCondition(Scop *S);
 
 private:
   Scop *S;

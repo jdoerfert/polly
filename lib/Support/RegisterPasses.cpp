@@ -199,6 +199,11 @@ static cl::opt<bool> EnablePruneUnprofitable(
     cl::desc("Bail out on unprofitable SCoPs before rescheduling"), cl::Hidden,
     cl::init(true), cl::cat(PollyCategory));
 
+bool polly::PollyExpProp;
+static cl::opt<bool, true> EnableExprProp(
+    "polly-enable-propagation", cl::desc("Propagate expressions"), cl::Hidden,
+    cl::location(PollyExpProp), cl::init(false), cl::cat(PollyCategory));
+
 namespace polly {
 void initializePollyPasses(PassRegistry &Registry) {
   initializeCodeGenerationPass(Registry);
@@ -210,6 +215,7 @@ void initializePollyPasses(PassRegistry &Registry) {
   initializeDeadCodeElimPass(Registry);
   initializeDependenceInfoPass(Registry);
   initializeDependenceInfoWrapperPassPass(Registry);
+  initializeExpressionPropagationPass(Registry);
   initializeJSONExporterPass(Registry);
   initializeJSONImporterPass(Registry);
   initializeIslAstInfoPass(Registry);
@@ -281,6 +287,9 @@ void registerPollyPasses(llvm::legacy::PassManagerBase &PM) {
     PM.add(polly::createDeLICMPass());
   if (EnableSimplify)
     PM.add(polly::createSimplifyPass());
+
+  if (EnableExprProp)
+    PM.add(polly::createExpressionPropagationPass());
 
   if (ImportJScop)
     PM.add(polly::createJSONImporterPass());

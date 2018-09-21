@@ -112,6 +112,8 @@ extern bool PollyUseRuntimeAliasChecks;
 extern bool PollyProcessUnprofitable;
 extern bool PollyInvariantLoadHoisting;
 extern bool PollyAllowUnsignedOperations;
+extern bool PollyHyperthreading;
+extern int PollyNumThreads;
 
 /// A function attribute which will cause Polly to skip the function
 extern llvm::StringRef PollySkipFnAttr;
@@ -203,7 +205,7 @@ private:
 
   /// Analysis passes used.
   //@{
-  const DominatorTree *DT;
+  DominatorTree *DT;
   ScalarEvolution *SE;
   LoopInfo *LI;
   RegionInfo *RI;

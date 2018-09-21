@@ -34,6 +34,7 @@ llvm::Pass *createCodePreparationPass();
 llvm::Pass *createDeadCodeElimPass();
 llvm::Pass *createDependenceInfoPass();
 llvm::Pass *createDependenceInfoWrapperPassPass();
+llvm::Pass *createExpressionPropagationPass();
 llvm::Pass *createDOTOnlyPrinterPass();
 llvm::Pass *createDOTOnlyViewerPass();
 llvm::Pass *createDOTPrinterPass();
@@ -70,6 +71,7 @@ struct PollyForcePassLinking {
     polly::createCodePreparationPass();
     polly::createDeadCodeElimPass();
     polly::createDependenceInfoPass();
+    polly::createExpressionPropagationPass();
     polly::createDOTOnlyPrinterPass();
     polly::createDOTOnlyViewerPass();
     polly::createDOTPrinterPass();
@@ -99,6 +101,7 @@ namespace llvm {
 class PassRegistry;
 void initializeCodePreparationPass(llvm::PassRegistry &);
 void initializeDeadCodeElimPass(llvm::PassRegistry &);
+void initializeExpressionPropagationPass(llvm::PassRegistry &);
 void initializeJSONExporterPass(llvm::PassRegistry &);
 void initializeJSONImporterPass(llvm::PassRegistry &);
 void initializeIslAstInfoPass(llvm::PassRegistry &);

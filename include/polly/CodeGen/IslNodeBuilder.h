@@ -56,7 +56,7 @@ struct SubtreeReferences {
 /// @param CreateScalarRefs Should the result include allocas of scalar
 ///                         references?
 isl_stat addReferencesFromStmt(const ScopStmt *Stmt, void *UserPtr,
-                               bool CreateScalarRefs = true);
+                               bool CreateScalarRefs = false);
 
 class IslNodeBuilder {
 public:
@@ -67,7 +67,7 @@ public:
         ExprBuilder(S, Builder, IDToValue, ValueMap, DL, SE, DT, LI,
                     StartBlock),
         BlockGen(Builder, LI, SE, DT, ScalarMap, EscapeMap, ValueMap,
-                 &ExprBuilder, StartBlock),
+                 &ExprBuilder, StartBlock, Annotator),
         RegionGen(BlockGen), DL(DL), LI(LI), SE(SE), DT(DT),
         StartBlock(StartBlock) {}
 
@@ -207,8 +207,8 @@ protected:
   //    of loop iterations.
   //
   // 3. With the existing code, upper bounds have been easier to implement.
-  __isl_give isl_ast_expr *getUpperBound(__isl_keep isl_ast_node *For,
-                                         CmpInst::Predicate &Predicate);
+  static __isl_give isl_ast_expr *getUpperBound(__isl_keep isl_ast_node *For,
+                                                CmpInst::Predicate &Predicate);
 
   /// Return non-negative number of iterations in case of the following form
   /// of a loop and -1 otherwise.
@@ -219,7 +219,9 @@ protected:
   ///
   /// NumIter is a non-negative integer value. Condition can have
   /// isl_ast_op_lt type.
-  int getNumberOfIterations(__isl_keep isl_ast_node *For);
+public:
+  static int getNumberOfIterations(__isl_keep isl_ast_node *For);
+protected:
 
   /// Compute the values and loops referenced in this subtree.
   ///
@@ -264,6 +266,9 @@ protected:
   /// @param Mark The node we generate code for.
   virtual void createMark(__isl_take isl_ast_node *Marker);
   virtual void createFor(__isl_take isl_ast_node *For);
+
+  void colocateAccesses();
+  void createLoopPHIs(__isl_keep isl_ast_node *For);
 
   /// Set to remember materialized invariant loads.
   ///

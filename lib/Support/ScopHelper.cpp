@@ -165,7 +165,7 @@ void polly::simplifyRegion(Region *R, DominatorTree *DT, LoopInfo *LI,
 // Split the block into two successive blocks.
 //
 // Like llvm::SplitBlock, but also preserves RegionInfo
-static BasicBlock *splitBlock(BasicBlock *Old, Instruction *SplitPt,
+BasicBlock *polly::splitBlock(BasicBlock *Old, Instruction *SplitPt,
                               DominatorTree *DT, llvm::LoopInfo *LI,
                               RegionInfo *RI) {
   assert(Old && SplitPt);
@@ -197,8 +197,8 @@ static BasicBlock *splitBlock(BasicBlock *Old, Instruction *SplitPt,
 void polly::splitEntryBlockForAlloca(BasicBlock *EntryBlock, Pass *P) {
   // Find first non-alloca instruction. Every basic block has a non-alloc
   // instruction, as every well formed basic block has a terminator.
-  BasicBlock::iterator I = EntryBlock->begin();
-  while (isa<AllocaInst>(I))
+  auto I = EntryBlock->rbegin();
+  while (I != EntryBlock->rend() && !isa<CallInst>(&*I) && !isa<AllocaInst>(&*I))
     ++I;
 
   auto *DTWP = P->getAnalysisIfAvailable<DominatorTreeWrapperPass>();
@@ -209,7 +209,7 @@ void polly::splitEntryBlockForAlloca(BasicBlock *EntryBlock, Pass *P) {
   RegionInfo *RI = RIP ? &RIP->getRegionInfo() : nullptr;
 
   // splitBlock updates DT, LI and RI.
-  splitBlock(EntryBlock, &*I, DT, LI, RI);
+  splitBlock(EntryBlock, &*(--I), DT, LI, RI);
 }
 
 /// The SCEVExpander will __not__ generate any code for an existing SDiv/SRem
@@ -231,8 +231,10 @@ struct ScopExpander : SCEVVisitor<ScopExpander, const SCEV *> {
     // If we generate code in the region we will immediately fall back to the
     // SCEVExpander, otherwise we will stop at all unknowns in the SCEV and if
     // needed replace them by copies computed in the entering block.
-    if (!R.contains(I))
+    if (!R.contains(I)) {
+      this->I = I;
       E = visit(E);
+    }
     return Expander.expandCodeFor(E, Ty, I);
   }
 
@@ -243,12 +245,16 @@ private:
   const Region &R;
   ValueMapT *VMap;
   BasicBlock *RTCBB;
+  Instruction *I = nullptr;
 
   const SCEV *visitGenericInst(const SCEVUnknown *E, Instruction *Inst,
                                Instruction *IP) {
     if (!Inst || !R.contains(Inst))
       return E;
 
+    if (!(!Inst->mayThrow() && !Inst->mayReadOrWriteMemory() &&
+           !isa<PHINode>(Inst)))
+      Inst->dump();
     assert(!Inst->mayThrow() && !Inst->mayReadOrWriteMemory() &&
            !isa<PHINode>(Inst));
 
@@ -279,6 +285,8 @@ private:
     }
 
     Instruction *Inst = dyn_cast<Instruction>(E->getValue());
+    if (Inst && Inst->getName().contains("pexp"))
+      return E;
     Instruction *IP;
     if (Inst && !R.contains(Inst))
       IP = Inst;
@@ -286,6 +294,9 @@ private:
       IP = RTCBB->getTerminator();
     else
       IP = RTCBB->getParent()->getEntryBlock().getTerminator();
+
+    if (I && (I->getFunction() != RTCBB->getParent()))
+      IP = I;
 
     if (!Inst || (Inst->getOpcode() != Instruction::SRem &&
                   Inst->getOpcode() != Instruction::SDiv))
@@ -401,7 +412,10 @@ bool polly::isErrorBlock(BasicBlock &BB, const Region &R, LoopInfo &LI,
   for (Instruction &Inst : BB)
     if (CallInst *CI = dyn_cast<CallInst>(&Inst)) {
       if (isIgnoredIntrinsic(CI))
-        return false;
+        continue;
+      if (CI->getCalledFunction() &&
+          CI->getCalledFunction()->getName().equals("_ZSt3expf"))
+        continue;
 
       if (!CI->doesNotAccessMemory())
         return true;
@@ -431,6 +445,11 @@ bool polly::isHoistableLoad(LoadInst *LInst, Region &R, LoopInfo &LI,
   Loop *L = LI.getLoopFor(LInst->getParent());
   auto *Ptr = LInst->getPointerOperand();
   const SCEV *PtrSCEV = SE.getSCEVAtScope(Ptr, L);
+
+  if (auto *SU = dyn_cast<SCEVUnknown>(SE.getPointerBase(PtrSCEV)))
+    if (isa<LoadInst>(SU->getValue()))
+      L = nullptr;
+
   while (L && R.contains(L)) {
     if (!SE.isLoopInvariant(PtrSCEV, L))
       return false;
@@ -502,6 +521,19 @@ bool polly::canSynthesize(const Value *V, const Scop &S, ScalarEvolution *SE,
   return false;
 }
 
+bool polly::canSynthesize(const Value *V, Region &R, ScalarEvolution *SE,
+                          Loop *Scope) {
+  if (!V || !SE->isSCEVable(V->getType()))
+    return false;
+
+  if (const SCEV *Scev = SE->getSCEVAtScope(const_cast<Value *>(V), Scope))
+    if (!isa<SCEVCouldNotCompute>(Scev))
+      if (!hasScalarDepsInsideRegion(Scev, &R, Scope, false))
+        return true;
+
+  return false;
+}
+
 llvm::BasicBlock *polly::getUseBlock(llvm::Use &U) {
   Instruction *UI = dyn_cast<Instruction>(U.getUser());
   if (!UI)
@@ -560,4 +592,58 @@ polly::getIndexExpressionsFromGEP(GetElementPtrInst *GEP, ScalarEvolution &SE) {
   }
 
   return std::make_tuple(Subscripts, Sizes);
+}
+
+void polly::createExpressionTree(BasicBlock &BB, Loop *L) {
+    SmallVector<Instruction *, 8> Insts;
+    SmallPtrSet<Instruction *, 8> Users;
+    auto *PreHeader = L->getLoopPredecessor();
+    auto IsOutside = [&](const Use &U) {
+      if (auto *I = dyn_cast<Instruction>(&U))
+        return !L->contains(I);
+      return true;
+    };
+
+    for (auto &I : BB) {
+      if (isa<PHINode>(I))
+        continue;
+      Insts.push_back(&I);
+    }
+    for (auto It = Insts.rbegin(), End = Insts.rend(); It != End; It++) {
+      auto *I = *It;
+      if (!isa<LoadInst>(I)) {
+        continue;
+      }
+      //cast<LoadInst>(I)->setVolatile(true);
+      //if (std::all_of(I->op_begin(), I->op_end(), IsOutside)) {
+        //I->moveBefore(PreHeader->getTerminator());
+        //continue;
+      //}
+      bool First = true;
+      Users.clear();
+      for (auto *User : I->users()) {
+        auto *UserI = cast<Instruction>(User);
+        Users.insert(UserI);
+      }
+      for (auto *UserI : Users) {
+        if (First) {
+          if (isa<PHINode>(UserI)) {
+            //I->moveBefore(BB.getTerminator());
+          } else {
+            I->moveBefore(UserI);
+          }
+          First = false;
+          continue;
+        }
+        auto *Copy = I->clone();
+        Copy->setName(I->getName() + "_1u");
+        if (isa<PHINode>(UserI)) {
+          //Copy->insertBefore(BB.getTerminator());
+          Copy->insertBefore(&*BB.getFirstInsertionPt());
+        } else {
+          Copy->insertBefore(UserI);
+        }
+        UserI->replaceUsesOfWith(I, Copy);
+      }
+    }
 }

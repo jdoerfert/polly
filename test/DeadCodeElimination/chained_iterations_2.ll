@@ -61,5 +61,5 @@ exit.3:
 ; CHECK: for (int c0 = 0; c0 <= 199; c0 += 1)
 ; CHECK:   Stmt_for_body_3(c0);
 
-; CHECK-DCE: for (int c0 = 0; c0 <= 199; c0 += 1)
-; CHECK-DCE:   Stmt_for_body_3(c0);
+; CHECK-DCE:      if (1)
+; CHECK-DCE-NOT:   Stmt
